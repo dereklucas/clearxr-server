@@ -49,7 +49,7 @@ Supporting files live alongside those components:
   Rust Cargo tasks for building the full repository.
 
 
-## Getting Started
+## How do I build this?
 1. Install Rust via the [Rustup install documentation](https://rust-lang.org/tools/install/)
 2. Download the NVIDIA Cloud XR dependencies, described below.
 3. Run the `scripts\build-vendor.ps1` vendor script.
