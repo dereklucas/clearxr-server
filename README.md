@@ -1,6 +1,8 @@
 # Clear XR Server
 
-Clear XR Server lets you stream interactive virtual worlds and applications from high-powered gaming PCs, workstations, or servers, to spatial computing, aka. extended reality (XR) devices, starting with Apple Vision Pro. 
+Clear XR Server lets you stream interactive virtual worlds and applications from high-powered gaming PCs, workstations, or servers, to spatial computing, aka. extended reality (XR) devices, starting with Apple Vision Pro.  
+
+Clear XR utilizes dynamic foveated streaming to render the sharpest content in the user’s direct line of sight. 
 
 Currently only OpenXR compliant applications are supported. OpenVR (and SteamVR) applications are not yet supported.
 
@@ -47,7 +49,7 @@ Supporting files live alongside those components:
   Rust Cargo tasks for building the full repository.
 
 
-## Getting Started
+## How do I build this?
 1. Install Rust via the [Rustup install documentation](https://rust-lang.org/tools/install/)
 2. Download the NVIDIA Cloud XR dependencies, described below.
 3. Run the `scripts\build-vendor.ps1` vendor script.
