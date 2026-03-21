@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>CLEARXR — HUD Launcher</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@300;400;500&family=Rajdhani:wght@300;400;500&display=swap');
+
+  *, *::before, *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  :root {
+    --cyan: #00e5ff;
+    --cyan-dim: rgba(0, 229, 255, 0.3);
+    --cyan-glow: rgba(0, 229, 255, 0.15);
+    --glass-bg: rgba(0, 229, 255, 0.04);
+    --glass-border: rgba(0, 229, 255, 0.18);
+    --text-primary: rgba(220, 245, 255, 0.92);
+    --text-secondary: rgba(180, 220, 235, 0.55);
+  }
+
+  body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    background: transparent;
+    font-family: 'Rajdhani', 'Segoe UI', sans-serif;
+    color: var(--text-primary);
+    position: relative;
+  }
+
+  /* Scan-line overlay */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1000;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent 0px,
+      transparent 2px,
+      rgba(0, 229, 255, 0.018) 2px,
+      rgba(0, 229, 255, 0.018) 4px
+    );
+  }
+
+  .viewport {
+    width: 1024px;
+    height: 640px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 48px 24px;
+    position: relative;
+  }
+
+  /* Floating header */
+  .header {
+    text-align: center;
+    margin-bottom: 12px;
+    position: relative;
+  }
+
+  .header h1 {
+    font-family: 'Orbitron', monospace;
+    font-weight: 300;
+    font-size: 32px;
+    letter-spacing: 18px;
+    color: var(--cyan);
+    text-shadow:
+      0 0 20px rgba(0, 229, 255, 0.5),
+      0 0 60px rgba(0, 229, 255, 0.2),
+      0 0 100px rgba(0, 229, 255, 0.1);
+    text-indent: 18px; /* balance letter-spacing */
+    animation: headerPulse 4s ease-in-out infinite;
+  }
+
+  @keyframes headerPulse {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 1; }
+  }
+
+  .header .tagline {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 300;
+    font-size: 11px;
+    letter-spacing: 8px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    text-indent: 8px;
+  }
+
+  .header .line {
+    width: 280px;
+    height: 1px;
+    margin: 14px auto 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      var(--cyan-dim) 30%,
+      var(--cyan) 50%,
+      var(--cyan-dim) 70%,
+      transparent 100%
+    );
+    opacity: 0.5;
+  }
+
+  /* Game grid */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    width: 100%;
+    flex: 1;
+    align-content: start;
+    padding-top: 20px;
+  }
+
+  /* Card */
+  .card {
+    position: relative;
+    border: 1px solid var(--glass-border);
+    border-radius: 4px;
+    background: var(--glass-bg);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    padding: 18px 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 4px;
+    box-shadow: inset 0 0 30px rgba(0, 229, 255, 0.03);
+    pointer-events: none;
+    transition: box-shadow 0.3s ease;
+  }
+
+  .card:hover {
+    border-color: var(--cyan-dim);
+    transform: scale(1.025);
+    background: rgba(0, 229, 255, 0.06);
+    box-shadow:
+      0 0 15px rgba(0, 229, 255, 0.08),
+      0 0 40px rgba(0, 229, 255, 0.04);
+  }
+
+  .card:hover::before {
+    box-shadow: inset 0 0 40px rgba(0, 229, 255, 0.07);
+  }
+
+  .card:hover .card-title {
+    color: var(--cyan);
+    text-shadow: 0 0 12px rgba(0, 229, 255, 0.4);
+  }
+
+  .card:hover .card-icon {
+    border-color: var(--cyan-dim);
+    box-shadow: 0 0 16px rgba(0, 229, 255, 0.12);
+  }
+
+  /* Corner accents on cards */
+  .card .corner {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    pointer-events: none;
+    opacity: 0.35;
+    transition: opacity 0.3s ease;
+  }
+  .card:hover .corner { opacity: 0.7; }
+
+  .card .corner.tl { top: -1px; left: -1px; border-top: 1px solid var(--cyan); border-left: 1px solid var(--cyan); }
+  .card .corner.tr { top: -1px; right: -1px; border-top: 1px solid var(--cyan); border-right: 1px solid var(--cyan); }
+  .card .corner.bl { bottom: -1px; left: -1px; border-bottom: 1px solid var(--cyan); border-left: 1px solid var(--cyan); }
+  .card .corner.br { bottom: -1px; right: -1px; border-bottom: 1px solid var(--cyan); border-right: 1px solid var(--cyan); }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .card-icon {
+    width: 40px;
+    height: 40px;
+    border: 1px solid rgba(0, 229, 255, 0.12);
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+    background: rgba(0, 229, 255, 0.02);
+    transition: all 0.3s ease;
+  }
+
+  .card-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .card-title {
+    font-family: 'Orbitron', monospace;
+    font-weight: 400;
+    font-size: 12.5px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-primary);
+    transition: all 0.3s ease;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .card-genre {
+    font-weight: 300;
+    font-size: 10.5px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+
+  .card-desc {
+    font-weight: 300;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: rgba(180, 215, 230, 0.4);
+    letter-spacing: 0.3px;
+  }
+
+  /* Status indicator */
+  .card-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: auto;
+    padding-top: 4px;
+  }
+
+  .status-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 6px var(--cyan);
+    animation: dotPulse 2.5s ease-in-out infinite;
+  }
+
+  @keyframes dotPulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+
+  .status-text {
+    font-size: 9.5px;
+    font-weight: 300;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+
+  /* Footer HUD line */
+  .footer {
+    margin-top: auto;
+    padding-top: 16px;
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    opacity: 0.35;
+  }
+
+  .footer span {
+    font-size: 9px;
+    font-weight: 300;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+
+  .footer .line-h {
+    flex: 1;
+    height: 1px;
+    margin: 0 16px;
+    background: linear-gradient(
+      90deg,
+      var(--glass-border),
+      transparent
+    );
+  }
+</style>
+</head>
+<body>
+<div class="viewport">
+
+  <div class="header">
+    <h1>CLEARXR</h1>
+    <div class="tagline">Virtual Reality Launcher</div>
+    <div class="line"></div>
+  </div>
+
+  <div class="grid">
+
+    <div class="card">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="card-top">
+        <div class="card-icon">&#9681;</div>
+        <div class="card-info">
+          <div class="card-title">Void Horizon</div>
+          <div class="card-genre">Space Exploration</div>
+        </div>
+      </div>
+      <div class="card-desc">Traverse procedural star systems in zero-G flight</div>
+      <div class="card-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+    </div>
+
+    <div class="card">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="card-top">
+        <div class="card-icon">&#9876;</div>
+        <div class="card-info">
+          <div class="card-title">Phantom Blade</div>
+          <div class="card-genre">Melee Combat</div>
+        </div>
+      </div>
+      <div class="card-desc">Physics-driven swordplay in mythic arenas</div>
+      <div class="card-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+    </div>
+
+    <div class="card">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="card-top">
+        <div class="card-icon">&#9670;</div>
+        <div class="card-info">
+          <div class="card-title">Neon Drift</div>
+          <div class="card-genre">Racing</div>
+        </div>
+      </div>
+      <div class="card-desc">Anti-gravity racing through cyberpunk cityscapes</div>
+      <div class="card-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+    </div>
+
+    <div class="card">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="card-top">
+        <div class="card-icon">&#9041;</div>
+        <div class="card-info">
+          <div class="card-title">Deep Signal</div>
+          <div class="card-genre">Horror Survival</div>
+        </div>
+      </div>
+      <div class="card-desc">Investigate anomalies aboard a derelict station</div>
+      <div class="card-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+    </div>
+
+    <div class="card">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="card-top">
+        <div class="card-icon">&#9733;</div>
+        <div class="card-info">
+          <div class="card-title">Arclight Arena</div>
+          <div class="card-genre">Multiplayer Shooter</div>
+        </div>
+      </div>
+      <div class="card-desc">Team-based tactical combat in shifting arenas</div>
+      <div class="card-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+    </div>
+
+    <div class="card">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="card-top">
+        <div class="card-icon">&#9883;</div>
+        <div class="card-info">
+          <div class="card-title">Terraform VR</div>
+          <div class="card-genre">Sandbox Builder</div>
+        </div>
+      </div>
+      <div class="card-desc">Shape alien worlds with hand-tracked sculpting</div>
+      <div class="card-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+    </div>
+
+    <div class="card">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="card-top">
+        <div class="card-icon">&#9790;</div>
+        <div class="card-info">
+          <div class="card-title">Lunar Ascent</div>
+          <div class="card-genre">Climbing Sim</div>
+        </div>
+      </div>
+      <div class="card-desc">Scale impossible lunar cliffs in low gravity</div>
+      <div class="card-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+    </div>
+
+    <div class="card">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+      <div class="card-top">
+        <div class="card-icon">&#10070;</div>
+        <div class="card-info">
+          <div class="card-title">Echo Protocol</div>
+          <div class="card-genre">Stealth Puzzle</div>
+        </div>
+      </div>
+      <div class="card-desc">Hack networked systems using spatial reasoning</div>
+      <div class="card-status"><span class="status-dot"></span><span class="status-text">Ready</span></div>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    <span>SYS 01.4.7</span>
+    <div class="line-h"></div>
+    <span>8 Titles</span>
+  </div>
+
+</div>
+</body>
+</html>

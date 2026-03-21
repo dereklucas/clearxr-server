@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>ClearXR Theater</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    background: #0a0a0f;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    color: #fff;
+    position: relative;
+  }
+
+  /* --- Branding --- */
+  .branding {
+    position: absolute;
+    top: 16px;
+    left: 20px;
+    z-index: 10;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.18);
+    user-select: none;
+  }
+
+  /* --- Hero Section (top 75%) --- */
+  .hero {
+    position: relative;
+    width: 1024px;
+    height: 480px;
+    overflow: hidden;
+  }
+
+  .hero-bg {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, #0d0221, #150535, #0a1628, #061218);
+    background-size: 400% 400%;
+    animation: heroShift 8s ease infinite;
+  }
+
+  @keyframes heroShift {
+    0%   { background-position: 0% 50%; }
+    50%  { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+
+  /* Cinematic vignette overlay */
+  .hero-vignette {
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 80% 70% at 50% 40%, transparent 30%, rgba(0,0,0,0.65) 100%),
+      linear-gradient(to top, rgba(10,10,15,0.95) 0%, transparent 40%);
+    pointer-events: none;
+  }
+
+  /* Faint art placeholder */
+  .hero-art {
+    position: absolute;
+    inset: 0;
+    opacity: 0.07;
+    background:
+      repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,229,255,0.15) 2px, rgba(0,229,255,0.15) 3px),
+      repeating-linear-gradient(90deg, transparent, transparent 2px, rgba(0,229,255,0.08) 2px, rgba(0,229,255,0.08) 3px);
+    pointer-events: none;
+  }
+
+  .hero-content {
+    position: absolute;
+    bottom: 52px;
+    left: 48px;
+    right: 48px;
+    z-index: 2;
+  }
+
+  .hero-genre {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: #00e5ff;
+    margin-bottom: 10px;
+  }
+
+  .hero-title {
+    font-size: 52px;
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: -0.5px;
+    text-shadow: 0 0 40px rgba(0, 229, 255, 0.25), 0 2px 20px rgba(0,0,0,0.8);
+    margin-bottom: 12px;
+  }
+
+  .hero-desc {
+    font-size: 15px;
+    color: rgba(255, 255, 255, 0.55);
+    max-width: 540px;
+    line-height: 1.4;
+    margin-bottom: 28px;
+  }
+
+  .btn-launch {
+    display: inline-block;
+    padding: 14px 48px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #0a0a0f;
+    background: #00e5ff;
+    border: none;
+    border-radius: 50px;
+    cursor: pointer;
+    box-shadow:
+      0 0 20px rgba(0, 229, 255, 0.35),
+      0 0 60px rgba(0, 229, 255, 0.15);
+    transition: box-shadow 0.3s, transform 0.2s;
+  }
+
+  .btn-launch:hover {
+    box-shadow:
+      0 0 30px rgba(0, 229, 255, 0.55),
+      0 0 80px rgba(0, 229, 255, 0.25);
+    transform: scale(1.04);
+  }
+
+  /* --- Bottom Strip (bottom 25%) --- */
+  .strip {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 1024px;
+    height: 160px;
+    background: linear-gradient(to top, #08080d 60%, rgba(8,8,13,0.0));
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 0 0 20px 0;
+  }
+
+  .strip-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.22);
+    padding-left: 48px;
+    margin-bottom: 10px;
+  }
+
+  .strip-scroll {
+    display: flex;
+    gap: 10px;
+    padding: 0 48px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .strip-scroll::-webkit-scrollbar { display: none; }
+
+  .strip-card {
+    flex-shrink: 0;
+    width: 120px;
+    height: 68px;
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+    cursor: pointer;
+    border: 2px solid transparent;
+    opacity: 0.5;
+    transition: opacity 0.25s, border-color 0.25s, transform 0.2s;
+  }
+
+  .strip-card:hover {
+    opacity: 0.8;
+    transform: translateY(-2px);
+  }
+
+  .strip-card.selected {
+    opacity: 1;
+    border-color: #00e5ff;
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.3);
+  }
+
+  .strip-card-bg {
+    position: absolute;
+    inset: 0;
+  }
+
+  .strip-card-title {
+    position: absolute;
+    bottom: 4px;
+    left: 6px;
+    right: 6px;
+    font-size: 9px;
+    font-weight: 700;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Card color themes */
+  .card-theme-1 .strip-card-bg { background: linear-gradient(135deg, #1a0a2e, #0d3b66); }
+  .card-theme-2 .strip-card-bg { background: linear-gradient(135deg, #2d0a0a, #4a1a0a); }
+  .card-theme-3 .strip-card-bg { background: linear-gradient(135deg, #0a2d1a, #0a3d3d); }
+  .card-theme-4 .strip-card-bg { background: linear-gradient(135deg, #1a1a3e, #3d0a2d); }
+  .card-theme-5 .strip-card-bg { background: linear-gradient(135deg, #0d1b2a, #1b2838); }
+  .card-theme-6 .strip-card-bg { background: linear-gradient(135deg, #2a1a0d, #3d2a0a); }
+  .card-theme-7 .strip-card-bg { background: linear-gradient(135deg, #0a1a2d, #0d2d4a); }
+  .card-theme-8 .strip-card-bg { background: linear-gradient(135deg, #1e0a2e, #0a1e3e); }
+
+  /* Hero background variants per game */
+  .hero-theme-1 .hero-bg { background: linear-gradient(135deg, #0d0221, #150535, #0a1628, #061218); background-size: 400% 400%; animation: heroShift 8s ease infinite; }
+  .hero-theme-2 .hero-bg { background: linear-gradient(135deg, #1a0505, #2d0a0a, #1a0a00, #0d0800); background-size: 400% 400%; animation: heroShift 8s ease infinite; }
+  .hero-theme-3 .hero-bg { background: linear-gradient(135deg, #021a0d, #05250f, #0a281a, #061812); background-size: 400% 400%; animation: heroShift 8s ease infinite; }
+  .hero-theme-4 .hero-bg { background: linear-gradient(135deg, #0d0521, #250535, #1a0a28, #120618); background-size: 400% 400%; animation: heroShift 8s ease infinite; }
+  .hero-theme-5 .hero-bg { background: linear-gradient(135deg, #050a15, #0a1525, #0d1a2d, #081218); background-size: 400% 400%; animation: heroShift 8s ease infinite; }
+  .hero-theme-6 .hero-bg { background: linear-gradient(135deg, #15100a, #251a0d, #2d1a0a, #181208); background-size: 400% 400%; animation: heroShift 8s ease infinite; }
+  .hero-theme-7 .hero-bg { background: linear-gradient(135deg, #050d1a, #0a1a30, #0d2040, #081520); background-size: 400% 400%; animation: heroShift 8s ease infinite; }
+  .hero-theme-8 .hero-bg { background: linear-gradient(135deg, #0f0521, #1a0a35, #120a28, #0d0618); background-size: 400% 400%; animation: heroShift 8s ease infinite; }
+</style>
+</head>
+<body>
+
+  <div class="branding">CLEARXR</div>
+
+  <!-- Hero -->
+  <div class="hero hero-theme-1">
+    <div class="hero-bg"></div>
+    <div class="hero-art"></div>
+    <div class="hero-vignette"></div>
+    <div class="hero-content">
+      <div class="hero-genre">Action / Adventure</div>
+      <div class="hero-title">Void Horizon</div>
+      <div class="hero-desc">Pilot your mech through shattered dimensions in full-scale VR combat across infinite alien worlds.</div>
+      <button class="btn-launch">LAUNCH</button>
+    </div>
+  </div>
+
+  <!-- Bottom Strip -->
+  <div class="strip">
+    <div class="strip-label">Library</div>
+    <div class="strip-scroll">
+
+      <div class="strip-card selected card-theme-1">
+        <div class="strip-card-bg"></div>
+        <div class="strip-card-title">Void Horizon</div>
+      </div>
+
+      <div class="strip-card card-theme-2">
+        <div class="strip-card-bg"></div>
+        <div class="strip-card-title">Ember Colosseum</div>
+      </div>
+
+      <div class="strip-card card-theme-3">
+        <div class="strip-card-bg"></div>
+        <div class="strip-card-title">Verdant Depths</div>
+      </div>
+
+      <div class="strip-card card-theme-4">
+        <div class="strip-card-bg"></div>
+        <div class="strip-card-title">Neon Requiem</div>
+      </div>
+
+      <div class="strip-card card-theme-5">
+        <div class="strip-card-bg"></div>
+        <div class="strip-card-title">Silent Orbit</div>
+      </div>
+
+      <div class="strip-card card-theme-6">
+        <div class="strip-card-bg"></div>
+        <div class="strip-card-title">Sandstorm Kings</div>
+      </div>
+
+      <div class="strip-card card-theme-7">
+        <div class="strip-card-bg"></div>
+        <div class="strip-card-title">Abyssal Tide</div>
+      </div>
+
+      <div class="strip-card card-theme-8">
+        <div class="strip-card-bg"></div>
+        <div class="strip-card-title">Phantom Circuit</div>
+      </div>
+
+    </div>
+  </div>
+
+</body>
+</html>

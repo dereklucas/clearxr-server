@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>CLEARXR // LAUNCHER</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    background: #0a0a0a;
+    font-family: 'Share Tech Mono', monospace;
+    color: #fff;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ====== GRID VIEW ====== */
+  #grid-view {
+    width: 1024px;
+    height: 640px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 2px;
+    background: #0a0a0a;
+  }
+
+  .game-cell {
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+    border: 2px solid transparent;
+  }
+
+  .game-cell img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    filter: brightness(0.85) contrast(1.1);
+  }
+
+  .game-cell:hover {
+    border-color: #fff;
+  }
+
+  .game-cell:hover img {
+    filter: brightness(1.05) contrast(1.1);
+  }
+
+  .game-cell .title-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 8px 10px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.9));
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    text-shadow: 2px 2px 0 #000, -1px -1px 0 #000;
+    line-height: 1.2;
+  }
+
+  .game-cell:active {
+    border-color: #00e5ff;
+  }
+
+  /* ====== DETAIL VIEW ====== */
+  #detail-view {
+    display: none;
+    width: 1024px;
+    height: 640px;
+    background: #0a0a0a;
+    flex-direction: column;
+  }
+
+  #detail-view.active {
+    display: flex;
+  }
+
+  #grid-view.hidden {
+    display: none;
+  }
+
+  .detail-hero {
+    width: 1024px;
+    height: 320px;
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .detail-hero img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    filter: brightness(0.8) contrast(1.15);
+  }
+
+  .detail-hero::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 120px;
+    background: linear-gradient(transparent, #0a0a0a);
+  }
+
+  .detail-body {
+    flex: 1;
+    padding: 24px 40px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .detail-title {
+    font-size: 36px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 4px;
+    line-height: 1;
+    margin-bottom: 12px;
+    text-shadow: 3px 3px 0 #000;
+  }
+
+  .detail-desc {
+    font-size: 14px;
+    color: #999;
+    line-height: 1.6;
+    max-width: 700px;
+    letter-spacing: 0.5px;
+  }
+
+  .detail-actions {
+    display: flex;
+    align-items: center;
+    gap: 32px;
+    margin-top: 20px;
+  }
+
+  .btn-launch {
+    background: #00e5ff;
+    color: #0a0a0a;
+    border: none;
+    padding: 14px 48px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    cursor: pointer;
+  }
+
+  .btn-launch:hover {
+    background: #fff;
+  }
+
+  .btn-launch:active {
+    background: #00e5ff;
+  }
+
+  .btn-back {
+    color: #fff;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    border-bottom: 2px solid #fff;
+    padding-bottom: 2px;
+  }
+
+  .btn-back:hover {
+    color: #00e5ff;
+    border-color: #00e5ff;
+  }
+
+  /* MARKER LINE */
+  .marker {
+    width: 60px;
+    height: 3px;
+    background: #00e5ff;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+
+<!-- GRID VIEW -->
+<div id="grid-view"></div>
+
+<!-- DETAIL VIEW -->
+<div id="detail-view">
+  <div class="detail-hero">
+    <img id="detail-hero-img" src="" alt="">
+  </div>
+  <div class="detail-body">
+    <div>
+      <div class="marker"></div>
+      <div class="detail-title" id="detail-title"></div>
+      <div class="detail-desc" id="detail-desc"></div>
+    </div>
+    <div class="detail-actions">
+      <button class="btn-launch" id="btn-launch">LAUNCH</button>
+      <button class="btn-back" id="btn-back">[ BACK ]</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const GAMES = [
+  {
+    appid: 546560,
+    title: "Half-Life: Alyx",
+    desc: "Valve's return to the Half-Life universe. A full-length VR entry set between Half-Life and Half-Life 2. Lean around cover, rummage through shelves, throw bottles at headcrabs."
+  },
+  {
+    appid: 620980,
+    title: "Beat Saber",
+    desc: "Slash blocks to the beat of adrenaline-pumping music. A unique VR rhythm game where your goal is to slash the beats which fit perfectly into hand-crafted levels."
+  },
+  {
+    appid: 823500,
+    title: "BONEWORKS",
+    desc: "An experimental physics VR adventure. Advanced physics mechanics, combat, and interaction in a mysterious narrative. Everything is physically simulated."
+  },
+  {
+    appid: 555160,
+    title: "Blade & Sorcery",
+    desc: "A medieval fantasy sandbox built exclusively for VR. Become a powerful warrior using an advanced physics-driven melee combat system."
+  },
+  {
+    appid: 617830,
+    title: "SUPERHOT VR",
+    desc: "Time moves only when you move. Grab weapons from fallen enemies, dodge bullets, and plan your strategy. The most innovative VR shooter."
+  },
+  {
+    appid: 418650,
+    title: "Space Pirate Trainer",
+    desc: "Defend yourself on a space platform against relentless waves of droids. Dual-wield blasters and energy shields in the ultimate VR arcade experience."
+  },
+  {
+    appid: 611670,
+    title: "Pavlov VR",
+    desc: "A multiplayer VR shooter with realistic gunplay. Search and destroy, deathmatch, gun game, and more. The definitive competitive VR FPS."
+  },
+  {
+    appid: 916840,
+    title: "Pistol Whip",
+    desc: "An unstoppable action-rhythm FPS. Journey through a cinematic bullet hell powered by a breakneck soundtrack. Fire, dodge, and strike."
+  }
+];
+
+const gridView = document.getElementById('grid-view');
+const detailView = document.getElementById('detail-view');
+const detailHeroImg = document.getElementById('detail-hero-img');
+const detailTitle = document.getElementById('detail-title');
+const detailDesc = document.getElementById('detail-desc');
+const btnBack = document.getElementById('btn-back');
+const btnLaunch = document.getElementById('btn-launch');
+
+// Build grid
+GAMES.forEach(game => {
+  const cell = document.createElement('div');
+  cell.className = 'game-cell';
+  cell.innerHTML = `
+    <img src="https://cdn.akamai.steamstatic.com/steam/apps/${game.appid}/header.jpg" alt="${game.title}" loading="eager">
+    <div class="title-overlay">${game.title}</div>
+  `;
+  cell.addEventListener('click', () => showDetail(game));
+  gridView.appendChild(cell);
+});
+
+function showDetail(game) {
+  detailHeroImg.src = `https://cdn.akamai.steamstatic.com/steam/apps/${game.appid}/header.jpg`;
+  detailTitle.textContent = game.title;
+  detailDesc.textContent = game.desc;
+  gridView.classList.add('hidden');
+  detailView.classList.add('active');
+}
+
+function showGrid() {
+  detailView.classList.remove('active');
+  gridView.classList.remove('hidden');
+}
+
+btnBack.addEventListener('click', showGrid);
+btnLaunch.addEventListener('click', () => {
+  alert('LAUNCHING // STAND BY');
+});
+</script>
+</body>
+</html>

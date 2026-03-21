@@ -35,37 +35,35 @@ void main() {
         + pc.panel_right.xyz * (off.x * panel_w)
         + pc.panel_up.xyz    * (off.y * panel_h);
 
-    // Manual view-projection: project world_pos through the camera
+    // View-space: project world_pos into camera space
     vec3 to_vert = world_pos - pc.cam_pos.xyz;
     vec3 cam_r = pc.cam_right.xyz;
     vec3 cam_u = pc.cam_up.xyz;
     vec3 cam_f = pc.cam_fwd.xyz;
 
-    float vz = dot(to_vert, cam_f); // depth along camera forward
-    float vx = dot(to_vert, cam_r); // horizontal offset
-    float vy = dot(to_vert, cam_u); // vertical offset
+    float vx = dot(to_vert, cam_r); // horizontal
+    float vy = dot(to_vert, cam_u); // vertical
+    float vz = dot(to_vert, cam_f); // depth
 
-    // Asymmetric projection using FOV tangents (matches scene shader convention)
+    // Asymmetric projection using FOV tangents
     float tan_l = pc.fov.x; // negative
     float tan_r = pc.fov.y; // positive
     float tan_d = pc.fov.z; // negative
     float tan_u = pc.fov.w; // positive
 
-    // NDC: map [tan_l..tan_r] -> [-1..1], [tan_d..tan_u] -> [-1..1]
-    float ndc_x = 2.0 * (vx / vz - tan_l) / (tan_r - tan_l) - 1.0;
-    float ndc_y = 2.0 * (vy / vz - tan_d) / (tan_u - tan_d) - 1.0;
+    // Build clip-space coordinates (let GPU do perspective divide via w)
+    // Maps view-space to clip-space: x_clip = (2*vx - vz*(tan_l+tan_r)) / (tan_r - tan_l)
+    float clip_x = (2.0 * vx - vz * (tan_l + tan_r)) / (tan_r - tan_l);
+    // Negate Y: Vulkan NDC has Y pointing down, our view-space has Y pointing up
+    float clip_y = -(2.0 * vy - vz * (tan_d + tan_u)) / (tan_u - tan_d);
 
-    // Simple near/far depth mapping
+    // Depth: standard perspective depth mapping
     float near = 0.05;
     float far = 100.0;
-    float ndc_z = (far * (vz - near)) / (vz * (far - near));
+    float clip_z = far * (vz - near) / (far - near);
 
-    // Clip behind camera
-    if (vz < near) {
-        gl_Position = vec4(0.0, 0.0, -1.0, 1.0); // degenerate
-    } else {
-        gl_Position = vec4(ndc_x, ndc_y, ndc_z, 1.0);
-    }
+    // w = vz: GPU divides by w for perspective-correct interpolation
+    gl_Position = vec4(clip_x, clip_y, clip_z, vz);
 
     // UV: map vertex offset to [0,1] range
     frag_uv = off + 0.5;
