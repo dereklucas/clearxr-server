@@ -1,16 +1,18 @@
 /// Vulkan instance, physical device, logical device, and queue.
 ///
-/// We follow the XR_KHR_vulkan_enable path: the OpenXR runtime tells us which
-/// instance extensions, device extensions, and physical device to use.
+/// Two construction paths:
+///   - `new()` (feature = "xr"): XR_KHR_vulkan_enable path where the runtime picks the GPU.
+///   - `new_standalone()` (feature = "desktop"): standalone Vulkan init for desktop window mode.
 
 use anyhow::Result;
 use ash::{vk, vk::Handle, Device, Instance};
 use log::info;
+#[cfg(feature = "xr")]
 use openxr as xr;
 use std::ffi::{c_char, c_void, CString};
 
 pub struct VkBackend {
-    _entry: ash::Entry,
+    entry: ash::Entry,
     instance: Instance,
     physical_device: vk::PhysicalDevice,
     device: Device,
@@ -20,6 +22,10 @@ pub struct VkBackend {
 }
 
 impl VkBackend {
+    // ================================================================
+    // XR-driven construction (existing path)
+    // ================================================================
+    #[cfg(feature = "xr")]
     pub fn new(xr_instance: &xr::Instance, system: xr::SystemId) -> Result<Self> {
         // ---- 1. Required VkInstance extensions from XR runtime ----
         let req_inst_exts_str = xr_instance.vulkan_legacy_instance_extensions(system)?;
@@ -66,7 +72,6 @@ impl VkBackend {
         let vk_instance = unsafe { entry.create_instance(&inst_ci, None)? };
 
         // ---- 4. Physical device – mandated by XR runtime ----
-        // vulkan_graphics_device takes/returns *const c_void (opaque handles).
         let phys_dev_raw = unsafe {
             xr_instance.vulkan_graphics_device(
                 system,
@@ -138,7 +143,136 @@ impl VkBackend {
         let command_pool = unsafe { device.create_command_pool(&cp_ci, None)? };
 
         Ok(Self {
-            _entry: entry,
+            entry,
+            instance: vk_instance,
+            physical_device: phys_dev,
+            device,
+            queue_family_index,
+            queue,
+            command_pool,
+        })
+    }
+
+    // ================================================================
+    // Standalone construction for desktop window mode
+    // ================================================================
+    #[cfg(feature = "desktop")]
+    pub fn new_standalone(
+        required_instance_extensions: &[CString],
+    ) -> Result<Self> {
+        let entry = unsafe { ash::Entry::load()? };
+
+        // Build instance extension list: caller's surface extensions + portability
+        let mut inst_ext_names: Vec<CString> = required_instance_extensions.to_vec();
+
+        // On macOS (MoltenVK), we need portability enumeration
+        #[cfg(target_os = "macos")]
+        {
+            let portability_enum = CString::new("VK_KHR_portability_enumeration").unwrap();
+            if !inst_ext_names.iter().any(|e| e == &portability_enum) {
+                inst_ext_names.push(portability_enum);
+            }
+        }
+
+        let inst_ext_ptrs: Vec<*const c_char> =
+            inst_ext_names.iter().map(|s| s.as_ptr()).collect();
+
+        let app_info = vk::ApplicationInfo {
+            p_application_name: c"Clear XR Desktop".as_ptr(),
+            application_version: vk::make_api_version(0, 0, 1, 0),
+            p_engine_name: c"Clear XR Engine".as_ptr(),
+            engine_version: vk::make_api_version(0, 0, 1, 0),
+            api_version: vk::API_VERSION_1_1,
+            ..Default::default()
+        };
+
+        let mut create_flags = vk::InstanceCreateFlags::empty();
+        #[cfg(target_os = "macos")]
+        {
+            create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+        }
+
+        let inst_ci = vk::InstanceCreateInfo {
+            p_application_info: &app_info,
+            enabled_extension_count: inst_ext_ptrs.len() as u32,
+            pp_enabled_extension_names: inst_ext_ptrs.as_ptr(),
+            flags: create_flags,
+            ..Default::default()
+        };
+
+        let vk_instance = unsafe { entry.create_instance(&inst_ci, None)? };
+
+        // Pick the first discrete GPU, or fall back to the first device
+        let phys_devs = unsafe { vk_instance.enumerate_physical_devices()? };
+        if phys_devs.is_empty() {
+            anyhow::bail!("No Vulkan physical devices found");
+        }
+
+        let phys_dev = phys_devs
+            .iter()
+            .find(|&&pd| {
+                let props = unsafe { vk_instance.get_physical_device_properties(pd) };
+                props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
+            })
+            .copied()
+            .unwrap_or(phys_devs[0]);
+
+        let props = unsafe { vk_instance.get_physical_device_properties(phys_dev) };
+        info!(
+            "Selected GPU: {}",
+            unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy()
+        );
+
+        // Graphics queue family
+        let queue_families =
+            unsafe { vk_instance.get_physical_device_queue_family_properties(phys_dev) };
+        let queue_family_index = queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|(i, _)| i as u32)
+            .ok_or_else(|| anyhow::anyhow!("No graphics queue family found"))?;
+
+        // Device extensions: swapchain + portability subset on macOS
+        let mut dev_ext_names: Vec<CString> =
+            vec![CString::new("VK_KHR_swapchain").unwrap()];
+
+        #[cfg(target_os = "macos")]
+        {
+            dev_ext_names.push(CString::new("VK_KHR_portability_subset").unwrap());
+        }
+
+        let dev_ext_ptrs: Vec<*const c_char> =
+            dev_ext_names.iter().map(|s| s.as_ptr()).collect();
+
+        let queue_priority = 1.0_f32;
+        let queue_ci = vk::DeviceQueueCreateInfo {
+            queue_family_index,
+            queue_count: 1,
+            p_queue_priorities: &queue_priority,
+            ..Default::default()
+        };
+
+        let dev_ci = vk::DeviceCreateInfo {
+            queue_create_info_count: 1,
+            p_queue_create_infos: &queue_ci,
+            enabled_extension_count: dev_ext_ptrs.len() as u32,
+            pp_enabled_extension_names: dev_ext_ptrs.as_ptr(),
+            ..Default::default()
+        };
+
+        let device = unsafe { vk_instance.create_device(phys_dev, &dev_ci, None)? };
+        let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
+        let cp_ci = vk::CommandPoolCreateInfo {
+            queue_family_index,
+            flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            ..Default::default()
+        };
+        let command_pool = unsafe { device.create_command_pool(&cp_ci, None)? };
+
+        Ok(Self {
+            entry,
             instance: vk_instance,
             physical_device: phys_dev,
             device,
@@ -174,7 +308,7 @@ impl VkBackend {
         &self.instance
     }
     pub fn entry(&self) -> &ash::Entry {
-        &self._entry
+        &self.entry
     }
 
     pub fn find_memory_type(

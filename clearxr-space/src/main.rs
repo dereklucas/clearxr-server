@@ -1,8 +1,12 @@
 mod audio;
+#[cfg(all(feature = "xr", target_os = "windows"))]
 mod mirror_window;
 mod vk_backend;
+#[cfg(all(feature = "xr", target_os = "windows"))]
 mod xr_session;
 mod renderer;
+#[cfg(feature = "desktop")]
+mod desktop_session;
 
 use anyhow::Result;
 use log::info;
@@ -27,19 +31,32 @@ fn main() -> Result<()> {
         })
         .ok();
     }
- 
-    // // Start background audio loop.
-    // let wav_path = Path::new("assets/clearxr.wav");
-    // if wav_path.exists() {
-    //     if let Err(e) = audio::start_looped(wav_path, running.clone()) {
-    //         warn!("Audio playback failed to start: {}", e);
-    //     }
-    // } else {
-    //     warn!("WAV file not found at {:?} – no audio.", wav_path);
-    // } 
 
-    xr_session::run(running)?;
+    let args: Vec<String> = std::env::args().collect();
+    let desktop_mode = args.iter().any(|a| a == "--desktop");
 
-    info!("Clear XR exited cleanly.");
-    Ok(())
+    if desktop_mode {
+        #[cfg(feature = "desktop")]
+        {
+            info!("Running in desktop window mode.");
+            return desktop_session::run(running);
+        }
+        #[cfg(not(feature = "desktop"))]
+        anyhow::bail!(
+            "Desktop mode requested but the 'desktop' feature is not enabled.\n\
+             Rebuild with: cargo build --features desktop"
+        );
+    }
+
+    #[cfg(all(feature = "xr", target_os = "windows"))]
+    {
+        xr_session::run(running)?;
+        info!("Clear XR exited cleanly.");
+        return Ok(());
+    }
+
+    #[cfg(not(all(feature = "xr", target_os = "windows")))]
+    anyhow::bail!(
+        "No runtime mode available. Build with --features xr (Windows) or --features desktop."
+    );
 }
