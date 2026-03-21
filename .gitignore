@@ -1,0 +1,8 @@
+.claude/**
+**/target/
+vendor/**
+!vendor/Server/
+vendor/Server/**
+!vendor/Server/cloudxr-runtime.yaml
+Stream-Manager-*
+cloudxr-runtime_*

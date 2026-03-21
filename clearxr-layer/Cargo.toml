@@ -1,0 +1,14 @@
+[package]
+name = "clear-xr-layer"
+version = "0.1.0"
+edition = "2021"
+description = "OpenXR API layer that injects controller events from NV opaque data channel"
+
+[lib]
+crate-type = ["cdylib"]
+name = "clear_xr_layer"
+
+[dependencies]
+openxr-sys = "0.10"
+log = "0.4"
+env_logger = "0.11"

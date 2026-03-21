@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Clear XR Server</title>
+    <link rel="icon" type="image/x-icon" href="./assets/favicon.ico" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="hero-brand">
+          <img class="hero-mark" src="./assets/icon.png" alt="ClearXR icon" />
+          <div class="hero-copy">
+            <p class="eyebrow">CloudXR Host</p>
+            <h1>Clear XR Server</h1>
+          </div>
+        </div>
+        <p class="lede">
+          Advertise this PC, handle Vision Pro pairing, and run CloudXR from a
+          single desktop host.
+        </p>
+      </section>
+
+      <section class="grid">
+        <article class="panel openxr-panel compact-panel" id="openxr-panel">
+          <details class="openxr-collapse">
+            <summary class="openxr-summary">
+              <div>
+                <p class="panel-tag">OpenXR</p>
+                <h2>Runtime And Layer</h2>
+              </div>
+              <strong class="openxr-badge" id="openxr-summary-status">Registered</strong>
+            </summary>
+            <div class="openxr-body">
+              <div class="button-row">
+                <button id="openxr-action" type="button">Checking...</button>
+                <button id="openxr-deregister-layer" type="button" class="secondary">
+                  Deregister Layer
+                </button>
+              </div>
+              <div class="status-row">
+                <span>Runtime</span>
+                <strong id="openxr-runtime-status">Loading...</strong>
+              </div>
+              <div class="status-row">
+                <span>Layer</span>
+                <strong id="openxr-layer-status">Loading...</strong>
+              </div>
+              <details class="detail-panel">
+                <summary>OpenXR Details</summary>
+                <div class="detail-body">
+                  <p class="detail compact-detail" id="openxr-runtime-detail"></p>
+                  <p class="detail compact-detail" id="openxr-layer-detail"></p>
+                  <p class="detail compact-detail" id="openxr-action-note">
+                    Runtime registration may require administrator rights because it is
+                    stored in the machine-wide OpenXR registry key.
+                  </p>
+                </div>
+              </details>
+            </div>
+          </details>
+        </article>
+
+        <article class="panel server-panel">
+          <div class="panel-head">
+            <div>
+              <p class="panel-tag">Server Control</p>
+              <h2>Start Or Stop The Host</h2>
+            </div>
+            <button id="server-toggle" type="button">Start Server</button>
+          </div>
+          <p class="panel-copy">
+            Bonjour advertising, the session-management listener, and CloudXR
+            are managed together.
+          </p>
+          <div class="stack controls">
+            <label>
+              Local IP
+              <select id="local-address"></select>
+            </label>
+            <label>
+              Port
+              <input id="session-port" type="number" value="55000" autocomplete="off" />
+            </label>
+            <label class="checkbox">
+              <input id="force-qr-code" type="checkbox" />
+              Force QR Code
+            </label>
+          </div>
+          <div class="status-row">
+            <span>Server</span>
+            <strong id="overall-status">Loading...</strong>
+          </div>
+          <div class="status-row">
+            <span>Bonjour</span>
+            <strong id="bonjour-status">Loading...</strong>
+          </div>
+          <div class="status-row">
+            <span>Session</span>
+            <strong id="session-status">Loading...</strong>
+          </div>
+          <div class="status-row">
+            <span>CloudXR</span>
+            <strong id="cloudxr-status">Loading...</strong>
+          </div>
+          <div class="status-row">
+            <span>Server ID</span>
+            <strong id="server-id">Loading...</strong>
+          </div>
+          <details class="detail-panel">
+            <summary>Server Details</summary>
+            <div class="detail-body">
+              <p class="detail compact-detail" id="runtime-detail"></p>
+              <p class="detail compact-detail" id="bonjour-detail"></p>
+              <p class="detail compact-detail" id="session-detail"></p>
+              <p class="detail compact-detail" id="cloudxr-detail"></p>
+              <p class="detail compact-detail drawer-hint" id="qr-status">
+                The pairing QR will slide out only when the Vision Pro requests it.
+              </p>
+            </div>
+          </details>
+        </article>
+      </section>
+    </main>
+
+    <aside class="qr-drawer is-hidden" id="qr-drawer" aria-live="polite">
+      <div class="qr-drawer-head">
+        <div>
+          <p class="panel-tag">Pairing</p>
+          <h2>Vision Pro QR</h2>
+        </div>
+      </div>
+      <p class="detail qr-state" id="qr-drawer-status">
+        The QR code will appear here when pairing is requested.
+      </p>
+      <div class="qr-frame" id="qr-frame">
+        <img id="qr-preview" alt="Pairing QR code" />
+      </div>
+    </aside>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

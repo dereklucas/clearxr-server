@@ -1,0 +1,37 @@
+[package]
+name = "clear-xr"
+version = "0.1.0"
+edition = "2021"
+description = "Clear XR – OpenXR visual showcase placeholder for CloudXR/Apple FoveatedStreaming sessions"
+
+[[bin]]
+name = "clear-xr"
+path = "src/main.rs"
+
+[dependencies]
+# OpenXR bindings – "loaded" dynamically finds the runtime (CloudXR, SteamVR, etc.)
+openxr = { version = "0.17", features = ["loaded"] }
+
+# Low-level Vulkan – we drive the GPU directly so the runtime picks the right adapter
+ash = "0.38"
+
+# Math (matrices, vectors, quaternions for view transforms)
+glam = "0.27"
+
+# Graceful Ctrl+C handling
+ctrlc = "3"
+
+# Error handling
+anyhow = "1"
+
+# Audio playback (WASAPI on Windows)
+cpal = "0.15"
+hound = "3"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+[build-dependencies]
+# No Rust deps needed for shader compilation – we shell out to glslc (Vulkan SDK)
+# If you don't have the Vulkan SDK, install it from https://vulkan.lunarg.com/

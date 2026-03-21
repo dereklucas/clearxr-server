@@ -1,0 +1,35 @@
+[package]
+name = "clearxr-streamer"
+version = "0.1.0"
+edition = "2021"
+description = "Rust/Tauri Clear XR streamer application"
+license = "MIT"
+build = "build.rs"
+
+[lib]
+name = "clearxr_streamer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+if-addrs = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }
+libloading = "0.8"
+log = "0.4"
+mdns-sd = "0.18"
+qrcode = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.37"
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
