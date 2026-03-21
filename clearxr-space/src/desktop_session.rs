@@ -21,18 +21,32 @@ use crate::launcher_panel::LauncherPanel;
 use crate::renderer::{
     create_pipeline, create_render_pass_with_layout, record_commands_open, HandData, HandUbo, PushConstants,
 };
+use crate::screen_capture::ScreenCapture;
 use crate::ui_renderer::UiRenderer;
 use crate::vk_backend::VkBackend;
 
-pub fn run(keep_running: Arc<AtomicBool>) -> Result<()> {
+/// What drives the panel texture.
+enum PanelSource {
+    /// HTML launcher UI via Ultralight
+    Launcher {
+        ui: UiRenderer,
+    },
+    /// Live desktop/window capture
+    Screen {
+        capture: ScreenCapture,
+    },
+}
+
+pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()> {
     let event_loop = EventLoop::new()?;
-    let mut app = DesktopApp::new(keep_running)?;
+    let mut app = DesktopApp::new(keep_running, use_screen_capture)?;
     event_loop.run_app(&mut app)?;
     Ok(())
 }
 
 struct DesktopApp {
     keep_running: Arc<AtomicBool>,
+    use_screen_capture: bool,
     state: Option<DesktopState>,
 }
 
@@ -57,7 +71,7 @@ struct DesktopState {
     render_finished: vk::Semaphore,
     hand_ubo: HandUbo,
     launcher: LauncherPanel,
-    ui: UiRenderer,
+    panel_source: PanelSource,
     // Camera state
     cam_pos: Vec3,
     cam_yaw: f32,   // radians
@@ -80,9 +94,10 @@ struct KeysHeld {
 }
 
 impl DesktopApp {
-    fn new(keep_running: Arc<AtomicBool>) -> Result<Self> {
+    fn new(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<Self> {
         Ok(Self {
             keep_running,
+            use_screen_capture,
             state: None,
         })
     }
@@ -93,7 +108,7 @@ impl ApplicationHandler for DesktopApp {
         if self.state.is_some() {
             return;
         }
-        match DesktopState::new(event_loop) {
+        match DesktopState::new(event_loop, self.use_screen_capture) {
             Ok(state) => self.state = Some(state),
             Err(e) => {
                 log::error!("Failed to initialize desktop mode: {}", e);
@@ -178,7 +193,7 @@ impl ApplicationHandler for DesktopApp {
 }
 
 impl DesktopState {
-    fn new(event_loop: &ActiveEventLoop) -> Result<Self> {
+    fn new(event_loop: &ActiveEventLoop, use_screen_capture: bool) -> Result<Self> {
         let window_attrs = Window::default_attributes()
             .with_title("Clear XR – Desktop Mode")
             .with_inner_size(winit::dpi::PhysicalSize::new(1280u32, 720u32));
@@ -237,25 +252,42 @@ impl DesktopState {
         let (pipeline_layout, pipeline) =
             create_pipeline(vk.device(), render_pass, hand_ubo.descriptor_set_layout, false)?;
 
-        // Launcher panel
-        let tex_w = 1024;
-        let tex_h = 640;
+        // Panel texture source
+        let (tex_w, tex_h, mut panel_source) = if use_screen_capture {
+            let tex_w = 1920;
+            let tex_h = 1080;
+            let capture = ScreenCapture::new(tex_w, tex_h)?;
+            info!("Screen capture mode: {}x{}", tex_w, tex_h);
+            (tex_w, tex_h, PanelSource::Screen { capture })
+        } else {
+            let tex_w = 1024;
+            let tex_h = 640;
+            let games = game_scanner::scan_all();
+            info!("Initializing launcher UI...");
+            let html_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/launcher.html");
+            let mut ui = UiRenderer::new(tex_w, tex_h, &html_path)?;
+            if let Err(e) = ui.set_games(&games) {
+                log::warn!("Failed to inject games into UI: {}", e);
+            }
+            info!("Launcher UI initialized ({}x{}, {} games)", tex_w, tex_h, games.len());
+            (tex_w, tex_h, PanelSource::Launcher { ui })
+        };
+
         let mut launcher = LauncherPanel::new(&vk, render_pass, tex_w, tex_h)?;
 
-        // Scan for installed games
-        let games = game_scanner::scan_all();
-
-        // Ultralight HTML renderer
-        info!("Initializing launcher UI...");
-        let html_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/launcher.html");
-        let mut ui = UiRenderer::new(tex_w, tex_h, &html_path)?;
-        if let Err(e) = ui.set_games(&games) {
-            log::warn!("Failed to inject games into UI: {}", e);
-        }
-        if let Some(pixels) = ui.update() {
-            launcher.upload_pixels(&vk, pixels)?;
-        }
-        info!("Launcher UI initialized ({}x{}, {} games)", tex_w, tex_h, games.len());
+        // Initial texture upload
+        match &mut panel_source {
+            PanelSource::Launcher { ui } => {
+                if let Some(pixels) = ui.update() {
+                    launcher.upload_pixels(&vk, pixels)?;
+                }
+            }
+            PanelSource::Screen { capture } => {
+                if let Some(pixels) = capture.capture() {
+                    launcher.upload_pixels(&vk, pixels)?;
+                }
+            }
+        };
 
         // Command buffer
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -295,7 +327,7 @@ impl DesktopState {
             render_finished,
             hand_ubo,
             launcher,
-            ui,
+            panel_source,
             cam_pos: Vec3::new(0.0, 1.6, 0.0), // eye height
             cam_yaw: 0.0,
             cam_pitch: 0.0,
@@ -381,21 +413,32 @@ impl DesktopState {
             ],
         };
 
-        // ---- UI interaction: aim ray → panel hit test ----
-        // In desktop mode, the camera forward direction is the aim ray
-        if let Some((u, v)) =
-            self.launcher.hit_test(self.cam_pos, forward, self.cam_pos)
-        {
-            self.ui.mouse_move(u, v);
-            if self.mouse_clicking {
-                self.ui.mouse_click(u, v);
+        // ---- Panel source update ----
+        match &mut self.panel_source {
+            PanelSource::Launcher { ui } => {
+                // UI interaction: aim ray → panel hit test
+                if let Some((u, v)) =
+                    self.launcher.hit_test(self.cam_pos, forward, self.cam_pos)
+                {
+                    ui.mouse_move(u, v);
+                    if self.mouse_clicking {
+                        ui.mouse_click(u, v);
+                    }
+                }
+                // Update UI (hot-reload check + re-render if dirty)
+                if let Some(pixels) = ui.update() {
+                    if let Err(e) = self.launcher.upload_pixels(&self.vk, pixels) {
+                        log::error!("Panel texture upload failed: {}", e);
+                    }
+                }
             }
-        }
-
-        // Update UI (hot-reload check + re-render if dirty)
-        if let Some(pixels) = self.ui.update() {
-            if let Err(e) = self.launcher.upload_pixels(&self.vk, pixels) {
-                log::error!("Panel texture upload failed: {}", e);
+            PanelSource::Screen { capture } => {
+                // Grab a new frame from the desktop
+                if let Some(pixels) = capture.capture() {
+                    if let Err(e) = self.launcher.upload_pixels(&self.vk, pixels) {
+                        log::error!("Screen capture upload failed: {}", e);
+                    }
+                }
             }
         }
 

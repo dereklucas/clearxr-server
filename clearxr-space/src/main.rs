@@ -1,6 +1,7 @@
 mod audio;
 mod game_scanner;
 mod launcher_panel;
+mod screen_capture;
 mod ui_renderer;
 #[cfg(all(feature = "xr", target_os = "windows"))]
 mod mirror_window;
@@ -37,12 +38,17 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     let desktop_mode = args.iter().any(|a| a == "--desktop");
+    let screen_capture = args.iter().any(|a| a == "--screen");
 
     if desktop_mode {
         #[cfg(feature = "desktop")]
         {
-            info!("Running in desktop window mode.");
-            return desktop_session::run(running);
+            if screen_capture {
+                info!("Running in desktop mode with screen capture.");
+            } else {
+                info!("Running in desktop window mode.");
+            }
+            return desktop_session::run(running, screen_capture);
         }
         #[cfg(not(feature = "desktop"))]
         anyhow::bail!(
