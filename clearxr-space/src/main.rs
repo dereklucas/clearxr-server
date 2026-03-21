@@ -1,4 +1,7 @@
 mod audio;
+mod game_scanner;
+mod launcher_panel;
+mod ui_renderer;
 #[cfg(all(feature = "xr", target_os = "windows"))]
 mod mirror_window;
 mod vk_backend;

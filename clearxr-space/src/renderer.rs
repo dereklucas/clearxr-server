@@ -576,6 +576,29 @@ pub fn record_commands(
     descriptor_set: vk::DescriptorSet,
     has_depth: bool,
 ) -> Result<()> {
+    record_commands_open(device, cmd, render_pass, pipeline, layout, framebuffer, resolution, push, descriptor_set, has_depth)?;
+    unsafe {
+        device.cmd_end_render_pass(cmd);
+        device.end_command_buffer(cmd)?;
+    }
+    Ok(())
+}
+
+/// Begin command buffer, start render pass, draw the scene — but leave the
+/// render pass open so additional draws (e.g. launcher panel) can be appended.
+/// Caller must call cmd_end_render_pass + end_command_buffer when done.
+pub fn record_commands_open(
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    render_pass: vk::RenderPass,
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    framebuffer: vk::Framebuffer,
+    resolution: vk::Extent2D,
+    push: &PushConstants,
+    descriptor_set: vk::DescriptorSet,
+    has_depth: bool,
+) -> Result<()> {
     let begin_info = vk::CommandBufferBeginInfo {
         flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
         ..Default::default()
@@ -637,8 +660,6 @@ pub fn record_commands(
         device.cmd_set_scissor(cmd, 0, &[scissor]);
         device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::FRAGMENT, 0, push_bytes);
         device.cmd_draw(cmd, 3, 1, 0, 0); // fullscreen triangle, no vertex buffer
-        device.cmd_end_render_pass(cmd);
-        device.end_command_buffer(cmd)?;
     }
     Ok(())
 }

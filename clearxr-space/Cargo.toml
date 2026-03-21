@@ -42,6 +42,19 @@ hound = "3"
 log = "0.4"
 env_logger = "0.11"
 
+# Game library detection
+steamlocate = "2"
+
+# Serialization (for game manifests, config)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTML UI rendering (Ultralight — lightweight headless browser)
+ul-next = "0.5"  # default features include appcore_linked (needed for fontloader/filesystem)
+
+# File watching for hot-reload
+notify = "7"
+
 [build-dependencies]
 # No Rust deps needed for shader compilation – we shell out to glslc (Vulkan SDK)
 # If you don't have the Vulkan SDK, install it from https://vulkan.lunarg.com/

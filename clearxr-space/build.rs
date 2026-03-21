@@ -7,6 +7,8 @@ use std::process::Command;
 fn main() {
     compile_shader("shaders/scene.vert");
     compile_shader("shaders/scene.frag");
+    compile_shader("shaders/panel.vert");
+    compile_shader("shaders/panel.frag");
 
     #[cfg(target_os = "windows")]
     copy_openxr_loader();

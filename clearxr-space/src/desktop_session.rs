@@ -16,9 +16,12 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::game_scanner;
+use crate::launcher_panel::LauncherPanel;
 use crate::renderer::{
-    create_pipeline, create_render_pass_with_layout, record_commands, HandData, HandUbo, PushConstants,
+    create_pipeline, create_render_pass_with_layout, record_commands_open, HandData, HandUbo, PushConstants,
 };
+use crate::ui_renderer::UiRenderer;
 use crate::vk_backend::VkBackend;
 
 pub fn run(keep_running: Arc<AtomicBool>) -> Result<()> {
@@ -53,6 +56,8 @@ struct DesktopState {
     image_available: vk::Semaphore,
     render_finished: vk::Semaphore,
     hand_ubo: HandUbo,
+    launcher: LauncherPanel,
+    ui: UiRenderer,
     // Camera state
     cam_pos: Vec3,
     cam_yaw: f32,   // radians
@@ -232,6 +237,26 @@ impl DesktopState {
         let (pipeline_layout, pipeline) =
             create_pipeline(vk.device(), render_pass, hand_ubo.descriptor_set_layout, false)?;
 
+        // Launcher panel
+        let tex_w = 1024;
+        let tex_h = 640;
+        let mut launcher = LauncherPanel::new(&vk, render_pass, tex_w, tex_h)?;
+
+        // Scan for installed games
+        let games = game_scanner::scan_all();
+
+        // Ultralight HTML renderer
+        info!("Initializing launcher UI...");
+        let html_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/launcher.html");
+        let mut ui = UiRenderer::new(tex_w, tex_h, &html_path)?;
+        if let Err(e) = ui.set_games(&games) {
+            log::warn!("Failed to inject games into UI: {}", e);
+        }
+        if let Some(pixels) = ui.update() {
+            launcher.upload_pixels(&vk, pixels)?;
+        }
+        info!("Launcher UI initialized ({}x{}, {} games)", tex_w, tex_h, games.len());
+
         // Command buffer
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(vk.command_pool)
@@ -269,6 +294,8 @@ impl DesktopState {
             image_available,
             render_finished,
             hand_ubo,
+            launcher,
+            ui,
             cam_pos: Vec3::new(0.0, 1.6, 0.0), // eye height
             cam_yaw: 0.0,
             cam_pitch: 0.0,
@@ -354,6 +381,24 @@ impl DesktopState {
             ],
         };
 
+        // ---- UI interaction: aim ray → panel hit test ----
+        // In desktop mode, the camera forward direction is the aim ray
+        if let Some((u, v)) =
+            self.launcher.hit_test(self.cam_pos, forward, self.cam_pos)
+        {
+            self.ui.mouse_move(u, v);
+            if self.mouse_clicking {
+                self.ui.mouse_click(u, v);
+            }
+        }
+
+        // Update UI (hot-reload check + re-render if dirty)
+        if let Some(pixels) = self.ui.update() {
+            if let Err(e) = self.launcher.upload_pixels(&self.vk, pixels) {
+                log::error!("Panel texture upload failed: {}", e);
+            }
+        }
+
         // Simulate a right controller held in front of camera, pointing forward
         let mut hand_data = HandData::default();
         // Position controller slightly below and to the right of camera
@@ -372,7 +417,8 @@ impl DesktopState {
 
         let fb = self.framebuffers[img_idx as usize];
 
-        record_commands(
+        // Draw scene background (leaves render pass open)
+        record_commands_open(
             device,
             self.command_buffer,
             self.render_pass,
@@ -384,6 +430,15 @@ impl DesktopState {
             self.hand_ubo.descriptor_set,
             false,
         )?;
+
+        // Draw launcher panel on top of scene
+        self.launcher.record_draw(device, self.command_buffer, &push);
+
+        // Close render pass + command buffer
+        unsafe {
+            device.cmd_end_render_pass(self.command_buffer);
+            device.end_command_buffer(self.command_buffer)?;
+        }
 
         // Submit
         let wait_sems = [self.image_available];
@@ -478,6 +533,7 @@ impl Drop for DesktopState {
             self.swapchain_fn.destroy_swapchain(self.swapchain, None);
             self.surface_fn.destroy_surface(self.surface, None);
         }
+        self.launcher.destroy(device);
         self.hand_ubo.destroy(device);
     }
 }
