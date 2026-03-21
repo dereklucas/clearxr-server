@@ -1,6 +1,7 @@
 .claude/**
 **/target/
 vendor/**
+!vendor/openxr_loader.dll
 !vendor/Server/
 vendor/Server/**
 !vendor/Server/cloudxr-runtime.yaml

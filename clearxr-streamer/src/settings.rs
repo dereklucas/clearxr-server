@@ -4,20 +4,20 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-const SETTINGS_DIR_NAME: &str = "StreamingSession";
-const SETTINGS_FILE_NAME: &str = "streaming-session-settings.json";
+const SETTINGS_DIR_NAME: &str = "ClearXR";
+const SETTINGS_FILE_NAME: &str = "clearxr-settings.json";
 const DEFAULT_CLEARXR_EXE_PATH: &str = "clear-xr.exe";
 const DEFAULT_LAUNCH_DELAY_SECONDS: u64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct StreamingSessionSettings {
+pub struct ClearXRSettings {
     pub launch_default_app: bool,
     pub clearxr_exe_path: String,
     pub clearxr_launch_delay_seconds: u64,
 }
 
-impl Default for StreamingSessionSettings {
+impl Default for ClearXRSettings {
     fn default() -> Self {
         Self {
             launch_default_app: true,
@@ -35,22 +35,22 @@ pub fn ensure_settings_file() -> Result<PathBuf> {
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
 
     if !path.exists() {
-        write_settings_file(&path, &StreamingSessionSettings::default())?;
+        write_settings_file(&path, &ClearXRSettings::default())?;
     }
 
     Ok(path)
 }
 
-pub fn load_settings() -> Result<(StreamingSessionSettings, PathBuf)> {
+pub fn load_settings() -> Result<(ClearXRSettings, PathBuf)> {
     let path = ensure_settings_file()?;
     let contents =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let settings: StreamingSessionSettings = serde_json::from_str(&contents)
+    let settings: ClearXRSettings = serde_json::from_str(&contents)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok((settings, path))
 }
 
-fn write_settings_file(path: &Path, settings: &StreamingSessionSettings) -> Result<()> {
+fn write_settings_file(path: &Path, settings: &ClearXRSettings) -> Result<()> {
     let contents = serde_json::to_string_pretty(settings)?;
     fs::write(path, format!("{contents}\n"))
         .with_context(|| format!("failed to write {}", path.display()))
@@ -82,7 +82,7 @@ fn settings_path() -> Result<PathBuf> {
 mod tests {
     use std::fs;
 
-    use super::{write_settings_file, StreamingSessionSettings};
+    use super::{write_settings_file, ClearXRSettings};
 
     #[test]
     fn settings_file_uses_expected_json_keys() {
@@ -93,7 +93,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("settings.json");
 
-        write_settings_file(&path, &StreamingSessionSettings::default()).unwrap();
+        write_settings_file(&path, &ClearXRSettings::default()).unwrap();
         let contents = fs::read_to_string(&path).unwrap();
 
         assert!(contents.contains("\"launchDefaultApp\": true"));

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "description": "Capability for the main StreamingSession window",
+  "description": "Capability for the main Clear XR window",
   "windows": [
     "main"
   ],

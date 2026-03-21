@@ -95,5 +95,5 @@ pub fn run() {
             commands::stop_session_management,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running StreamingSession");
+        .expect("error while running Clear XR");
 }
