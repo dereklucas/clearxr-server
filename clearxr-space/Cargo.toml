@@ -55,6 +55,16 @@ ul-next = "0.5"  # default features include appcore_linked (needed for fontloade
 # File watching for hot-reload
 notify = "7"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [build-dependencies]
 # No Rust deps needed for shader compilation – we shell out to glslc (Vulkan SDK)
 # If you don't have the Vulkan SDK, install it from https://vulkan.lunarg.com/

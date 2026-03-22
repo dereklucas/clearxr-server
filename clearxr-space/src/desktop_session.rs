@@ -433,6 +433,15 @@ impl DesktopState {
                 }
             }
             PanelSource::Screen { capture } => {
+                // Input injection: aim ray → panel hit → move/click real mouse
+                if let Some((u, v)) =
+                    self.launcher.hit_test(self.cam_pos, forward, self.cam_pos)
+                {
+                    capture.inject_mouse_move(u, v);
+                    if self.mouse_clicking {
+                        capture.inject_mouse_click(u, v);
+                    }
+                }
                 // Grab a new frame from the desktop
                 if let Some(pixels) = capture.capture() {
                     if let Err(e) = self.launcher.upload_pixels(&self.vk, pixels) {
