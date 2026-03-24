@@ -6,6 +6,11 @@ Clear XR utilizes dynamic foveated streaming to render the sharpest content in t
 
 Currently only OpenXR compliant applications are supported. OpenVR (and SteamVR) applications are not yet supported.
 
+# For End Users
+
+Join the TestFlight!
+[![Clear XR](https://i.imgur.com/DHhfmmK.png)](https://testflight.apple.com/join/ed6778fF)
+
 # For Developers & Hackers
 
 Clear XR currently is built around a visionOS app, Windows desktop app, an OpenXR test application, and an OpenXR API layer, and Apple's FoveatedStreaming framework for visionOS.   
