@@ -8,7 +8,7 @@ Currently only OpenXR compliant applications are supported. OpenVR (and SteamVR)
 
 # For End Users 
 
-Donwload the [latest release](https://github.com/clear-xr/clearxr-server/releases)
+Download the [latest release](https://github.com/clear-xr/clearxr-server/releases)
 
 Download the client from Test Flight
 
