@@ -42,8 +42,22 @@ impl DashboardService {
         let thread = std::thread::Builder::new()
             .name("dashboard-render".into())
             .spawn(move || {
-                if let Err(e) = render_loop(kr) {
-                    log::error!("[ClearXR Dashboard] Render loop failed: {}", e);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    render_loop(kr)
+                }));
+                match result {
+                    Ok(Ok(())) => log::info!("[ClearXR Dashboard] Render loop exited normally."),
+                    Ok(Err(e)) => log::error!("[ClearXR Dashboard] Render loop failed: {}", e),
+                    Err(panic) => {
+                        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        log::error!("[ClearXR Dashboard] Render loop PANICKED: {}", msg);
+                    }
                 }
             })
             .map_err(|e| format!("Failed to spawn dashboard thread: {e}"))?;
@@ -112,7 +126,9 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
 
     let target_interval = std::time::Duration::from_micros(13_889); // ~72fps
 
-    log::info!("[ClearXR Dashboard] Render loop starting.");
+    log::info!("[ClearXR Dashboard] Render loop starting. screen_capture={}",
+        if screen_capture.is_some() { "ok" } else { "failed" }
+    );
 
     let mut diag_counter = 0u32;
 
@@ -121,12 +137,16 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
         diag_counter += 1;
 
         // Read controller input from pipe
+        let mut got_packet = false;
         if let Some(pkt) = pipe.try_read() {
-            if diag_counter % 360 == 0 {
+            got_packet = true;
+            if diag_counter <= 5 || diag_counter % 360 == 0 {
                 let active = pkt.active_hands;
+                let lx = pkt.left.pos_x; let ly = pkt.left.pos_y; let lz = pkt.left.pos_z;
+                let rx = pkt.right.pos_x; let ry = pkt.right.pos_y; let rz = pkt.right.pos_z;
                 log::info!(
-                    "[ClearXR Dashboard] Pipe received packet: active_hands=0x{:02x}",
-                    active
+                    "[ClearXR Dashboard] Pipe packet: active=0x{:02x} L_pos=[{:.2},{:.2},{:.2}] R_pos=[{:.2},{:.2},{:.2}]",
+                    active, lx, ly, lz, rx, ry, rz,
                 );
             }
             // Extract menu button for visibility toggle
@@ -146,14 +166,18 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
             secondary = result.secondary;
             scroll_delta = result.scroll;
 
-            if diag_counter % 360 == 0 {
+            if diag_counter <= 5 || diag_counter % 360 == 0 {
+                let header = shm.header_ref();
                 log::info!(
-                    "[ClearXR Dashboard] Ray-quad result: pointer_uv={:?} trigger={} scroll={:.1}",
-                    pointer_uv, trigger, scroll_delta
+                    "[ClearXR Dashboard] Ray result: uv={:?} panel_pos=[{:.2},{:.2},{:.2}] panel_size=[{:.2},{:.2}]",
+                    pointer_uv,
+                    header.panel_pos[0], header.panel_pos[1], header.panel_pos[2],
+                    header.panel_size[0], header.panel_size[1],
                 );
             }
-        } else if diag_counter % 360 == 0 {
-            log::info!("[ClearXR Dashboard] No pipe data this frame (pipe not connected or no data)");
+        }
+        if !got_packet && diag_counter % 360 == 0 {
+            log::info!("[ClearXR Dashboard] No pipe data this frame");
         }
 
         // Poll screen capture

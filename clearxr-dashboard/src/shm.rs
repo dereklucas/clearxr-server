@@ -46,15 +46,24 @@ impl ShmWriter {
         self.shmem.as_ptr()
     }
 
-    /// Create a new shared memory region for the given frame size.
+    /// Create or open the shared memory region for the given frame size.
+    /// If a previous run left SHM behind, we reuse it.
     pub fn create(width: u32, height: u32) -> Result<Self, ShmemError> {
         let pixel_size = (width * height * 4) as usize;
         let total_size = HEADER_SIZE + pixel_size;
 
-        let shmem = ShmemConf::new()
+        let shmem = match ShmemConf::new()
             .size(total_size)
             .os_id(SHM_NAME)
-            .create()?;
+            .create()
+        {
+            Ok(s) => s,
+            Err(ShmemError::MappingIdExists) => {
+                log::info!("[ClearXR Dashboard] SHM already exists, reusing.");
+                ShmemConf::new().os_id(SHM_NAME).open()?
+            }
+            Err(e) => return Err(e),
+        };
 
         // Initialize header
         let ptr = shmem.as_ptr();
@@ -64,8 +73,8 @@ impl ShmWriter {
             header.width = width;
             header.height = height;
             header.flags = 1; // visible by default
-            header.panel_pos = [0.0, 1.5, -2.5]; // default world position
-            header.panel_orient = [0.0, 0.0, 0.0, 1.0]; // identity
+            header.panel_pos = [0.0, 1.2, -2.0]; // 2m in front, chest height
+            header.panel_orient = [0.0, 0.0, 0.0, 1.0]; // identity (facing -Z)
             header.panel_size = [1.6, 1.0]; // 1.6m x 1.0m
         }
 

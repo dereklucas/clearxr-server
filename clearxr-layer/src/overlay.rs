@@ -175,12 +175,6 @@ impl DashboardOverlay {
         {
             if self.pipe.is_none() {
                 self.pipe = connect_pipe();
-                if pipe_count % 360 == 0 {
-                    log::info!(
-                        "[ClearXR Layer] Pipe connect attempt: {}",
-                        if self.pipe.is_some() { "SUCCESS" } else { "not available yet" }
-                    );
-                }
             }
             if let Some(handle) = self.pipe {
                 let bytes = unsafe {
@@ -199,13 +193,20 @@ impl DashboardOverlay {
                         ptr::null_mut(),
                     )
                 };
+                if pipe_count < 5 || pipe_count % 360 == 0 {
+                    let active = pkt.active_hands;
+                    layer_log!(info,
+                        "[ClearXR Layer] Pipe write: ok={} written={}/{} active=0x{:02x}",
+                        ok, written, bytes.len(), active
+                    );
+                }
                 if ok == 0 {
-                    // Pipe broken, try reconnecting next frame
-                    unsafe {
-                        windows_sys::Win32::Foundation::CloseHandle(handle);
-                    }
+                    layer_log!(info, "[ClearXR Layer] Pipe write FAILED, reconnecting.");
+                    unsafe { windows_sys::Win32::Foundation::CloseHandle(handle); }
                     self.pipe = None;
                 }
+            } else if pipe_count < 5 || pipe_count % 360 == 0 {
+                layer_log!(info, "[ClearXR Layer] send_controller_input: no pipe");
             }
         }
     }

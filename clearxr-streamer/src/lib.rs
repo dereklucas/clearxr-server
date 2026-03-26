@@ -68,7 +68,8 @@ pub fn run() {
             file_name: Some("streaming-session".to_string()),
         }))
         .level_for("mio", LevelFilter::Info)
-        .level_for("polling", LevelFilter::Info);
+        .level_for("polling", LevelFilter::Info)
+        .level_for("egui_ash_renderer", LevelFilter::Warn);
 
     if !mdns_logs_enabled() {
         log_builder = log_builder.level_for("mdns_sd", LevelFilter::Off);

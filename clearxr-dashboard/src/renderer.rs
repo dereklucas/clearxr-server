@@ -6,6 +6,7 @@
 use anyhow::Result;
 use ash::vk;
 use egui::{Context, Event, Pos2, PointerButton, RawInput, Rect, Vec2};
+use std::mem::ManuallyDrop;
 
 const MAX_TEXTURE_SIDE: usize = 2048;
 
@@ -37,7 +38,7 @@ pub struct HeadlessRenderer {
 
     // egui
     ctx: Context,
-    egui_renderer: egui_ash_renderer::Renderer,
+    egui_renderer: ManuallyDrop<egui_ash_renderer::Renderer>,
     pointer_pos: Option<Pos2>,
     prev_button: bool,
     prev_secondary: bool,
@@ -237,7 +238,7 @@ impl HeadlessRenderer {
             height,
             pixel_size,
             ctx,
-            egui_renderer,
+            egui_renderer: ManuallyDrop::new(egui_renderer),
             pointer_pos: None,
             prev_button: false,
             prev_secondary: false,
@@ -461,7 +462,13 @@ impl HeadlessRenderer {
 impl Drop for HeadlessRenderer {
     fn drop(&mut self) {
         unsafe {
+            log::info!("[ClearXR Dashboard] HeadlessRenderer dropping...");
             self.device.device_wait_idle().ok();
+
+            // CRITICAL: Drop the egui renderer FIRST — it uses the device internally.
+            // If we destroy the device before the egui renderer drops, it's use-after-free.
+            ManuallyDrop::drop(&mut self.egui_renderer);
+
             self.device.unmap_memory(self.staging_memory);
             self.device.destroy_buffer(self.staging_buffer, None);
             self.device.free_memory(self.staging_memory, None);
@@ -474,6 +481,7 @@ impl Drop for HeadlessRenderer {
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
+            log::info!("[ClearXR Dashboard] HeadlessRenderer destroyed.");
         }
     }
 }

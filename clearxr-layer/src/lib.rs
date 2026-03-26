@@ -806,6 +806,9 @@ unsafe fn find_vulkan_binding<'a>(
 }
 
 unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
+    static OPAQUE_DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let diag = OPAQUE_DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let mut menu_down = false;
     let mut pkt_copy = None;
     if let Some(ref mut ch) = state.opaque {
@@ -815,7 +818,11 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
             let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
             menu_down = left_menu || right_menu;
             pkt_copy = Some(pkt);
+        } else if diag % 360 == 0 {
+            layer_log!(info, "[ClearXR Layer] Opaque channel: poll returned no data (ch.latest is None).");
         }
+    } else if diag % 360 == 0 {
+        layer_log!(info, "[ClearXR Layer] Opaque channel: not initialized.");
     }
 
     if let Some(ref mut overlay) = state.overlay {
@@ -826,9 +833,10 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
                 overlay.visible()
             );
         }
-        // Feed controller input for ray-quad hit-testing
         if let Some(ref pkt) = pkt_copy {
             overlay.send_controller_input(pkt);
+        } else if diag % 360 == 0 {
+            layer_log!(info, "[ClearXR Layer] No controller packet to send this cycle.");
         }
     }
 }
