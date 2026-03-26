@@ -206,6 +206,9 @@ struct NextDispatch {
     stop_haptic_feedback: xr::pfn::StopHapticFeedback,
     path_to_string: xr::pfn::PathToString,
     string_to_path: xr::pfn::StringToPath,
+    create_action_space: xr::pfn::CreateActionSpace,
+    locate_space: xr::pfn::LocateSpace,
+    get_action_state_float: xr::pfn::GetActionStateFloat,
 }
 
 // ============================================================
@@ -269,6 +272,26 @@ struct LayerState {
     has_opaque_ext: bool,
     oculus_touch_profile: xr::Path,
     overlay: Option<DashboardOverlay>,
+    /// Action handles that are aim pose actions (path contains "/aim/pose")
+    aim_actions: HashSet<u64>,
+    /// Action handles that are trigger float actions (path contains "/trigger/value")
+    trigger_actions: HashMap<(u64, Hand), ()>,
+    /// Action handles that are squeeze float actions (path contains "/squeeze/value")
+    squeeze_actions: HashMap<(u64, Hand), ()>,
+    /// Space handle → (hand) for aim spaces created via xrCreateActionSpace
+    aim_spaces: HashMap<u64, Hand>,
+    /// Per-hand controller state captured from xrLocateSpace / xrGetActionStateFloat
+    controller_state: [ControllerHandState; 2], // 0=left, 1=right
+}
+
+/// Captured controller state for one hand.
+#[derive(Default, Clone)]
+struct ControllerHandState {
+    aim_pos: [f32; 3],
+    aim_orient: [f32; 4], // quaternion xyzw
+    trigger: f32,
+    squeeze: f32,
+    active: bool,
 }
 
 static LAYER: Mutex<Option<LayerState>> = Mutex::new(None);
@@ -276,6 +299,23 @@ static LAYER: Mutex<Option<LayerState>> = Mutex::new(None);
 // Store the next layer's getInstanceProcAddr for use during instance creation
 static NEXT_GPA: Mutex<Option<xr::pfn::GetInstanceProcAddr>> = Mutex::new(None);
 static NEXT_CREATE: Mutex<Option<CreateApiLayerInstanceFn>> = Mutex::new(None);
+
+// Hot-path state for xrLocateSpace / xrGetActionStateFloat hooks.
+// These are called dozens of times per frame — must be lock-free or near-lock-free.
+// Function pointers are write-once — use OnceLock (already imported above).
+// Maps and controller state use RwLock (readers don't block each other).
+use std::sync::RwLock;
+
+static CONTROLLER_STATE: RwLock<[ControllerHandState; 2]> = RwLock::new([
+    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, active: false },
+    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, active: false },
+]);
+// These maps are populated at init time and read-only during the frame loop.
+static AIM_SPACES: OnceLock<RwLock<HashMap<u64, Hand>>> = OnceLock::new();
+static TRIGGER_ACTIONS: OnceLock<RwLock<HashMap<(u64, Hand), ()>>> = OnceLock::new();
+static SQUEEZE_ACTIONS: OnceLock<RwLock<HashMap<(u64, Hand), ()>>> = OnceLock::new();
+static NEXT_LOCATE_SPACE: OnceLock<xr::pfn::LocateSpace> = OnceLock::new();
+static NEXT_GET_FLOAT: OnceLock<xr::pfn::GetActionStateFloat> = OnceLock::new();
 
 // ============================================================
 // DLL export: xrNegotiateLoaderApiLayerInterface
@@ -508,6 +548,14 @@ unsafe extern "system" fn layer_create_api_layer_instance(
             )
             .unwrap_or(xr::Path::NULL);
 
+            // Store function pointers in separate statics for hot-path hooks
+            // (must be done before dispatch is moved into LayerState)
+            let _ = NEXT_LOCATE_SPACE.set(dispatch.locate_space);
+            let _ = NEXT_GET_FLOAT.set(dispatch.get_action_state_float);
+            let _ = AIM_SPACES.set(RwLock::new(HashMap::new()));
+            let _ = TRIGGER_ACTIONS.set(RwLock::new(HashMap::new()));
+            let _ = SQUEEZE_ACTIONS.set(RwLock::new(HashMap::new()));
+
             // Store layer state
             *LAYER.lock().unwrap() = Some(LayerState {
                 instance,
@@ -519,6 +567,11 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                 has_opaque_ext: has_opaque,
                 oculus_touch_profile,
                 overlay: None,
+                aim_actions: HashSet::new(),
+                trigger_actions: HashMap::new(),
+                squeeze_actions: HashMap::new(),
+                aim_spaces: HashMap::new(),
+                controller_state: Default::default(),
             });
 
             layer_log!(
@@ -630,6 +683,9 @@ unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instan
         stop_haptic_feedback: load_fn(gpa, instance, b"xrStopHapticFeedback\0"),
         path_to_string: load_fn(gpa, instance, b"xrPathToString\0"),
         string_to_path: load_fn(gpa, instance, b"xrStringToPath\0"),
+        create_action_space: load_fn(gpa, instance, b"xrCreateActionSpace\0"),
+        locate_space: load_fn(gpa, instance, b"xrLocateSpace\0"),
+        get_action_state_float: load_fn(gpa, instance, b"xrGetActionStateFloat\0"),
     }
 }
 
@@ -748,6 +804,9 @@ unsafe extern "system" fn layer_get_instance_proc_addr(
     intercept!(b"xrGetActionStateBoolean", hook_get_action_state_boolean as xr::pfn::GetActionStateBoolean);
     intercept!(b"xrApplyHapticFeedback", hook_apply_haptic_feedback as xr::pfn::ApplyHapticFeedback);
     intercept!(b"xrStopHapticFeedback", hook_stop_haptic_feedback as xr::pfn::StopHapticFeedback);
+    intercept!(b"xrCreateActionSpace", hook_create_action_space as xr::pfn::CreateActionSpace);
+    intercept!(b"xrLocateSpace", hook_locate_space as xr::pfn::LocateSpace);
+    intercept!(b"xrGetActionStateFloat", hook_get_action_state_float as xr::pfn::GetActionStateFloat);
 
     // Pass through to next layer
     let guard = LAYER.lock().unwrap();
@@ -806,37 +865,80 @@ unsafe fn find_vulkan_binding<'a>(
 }
 
 unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
-    static OPAQUE_DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let diag = OPAQUE_DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    static DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let diag = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+    // Poll opaque channel for button overrides (menu button for visibility toggle)
     let mut menu_down = false;
-    let mut pkt_copy = None;
     if let Some(ref mut ch) = state.opaque {
         ch.poll();
         if let Some(pkt) = ch.latest {
             let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
             let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
             menu_down = left_menu || right_menu;
-            pkt_copy = Some(pkt);
-        } else if diag % 360 == 0 {
-            layer_log!(info, "[ClearXR Layer] Opaque channel: poll returned no data (ch.latest is None).");
         }
-    } else if diag % 360 == 0 {
-        layer_log!(info, "[ClearXR Layer] Opaque channel: not initialized.");
     }
+
+    // Build a controller packet from intercepted xrLocateSpace / xrGetActionStateFloat data
+    let cs = CONTROLLER_STATE.read().unwrap().clone();
+    let left = &cs[0];
+    let right = &cs[1];
+
+    let mut active_hands = 0u8;
+    if left.active { active_hands |= 0x01; }
+    if right.active { active_hands |= 0x02; }
+
+    let pkt = SpatialControllerPacket {
+        magic: 0x5343,
+        version: 1,
+        active_hands,
+        left: SpatialControllerHand {
+            buttons: 0,
+            _reserved: 0,
+            thumbstick_x: 0.0,
+            thumbstick_y: 0.0,
+            trigger: left.trigger,
+            grip: left.squeeze,
+            pos_x: left.aim_pos[0],
+            pos_y: left.aim_pos[1],
+            pos_z: left.aim_pos[2],
+            rot_x: left.aim_orient[0],
+            rot_y: left.aim_orient[1],
+            rot_z: left.aim_orient[2],
+            rot_w: left.aim_orient[3],
+        },
+        right: SpatialControllerHand {
+            buttons: 0,
+            _reserved: 0,
+            thumbstick_x: 0.0,
+            thumbstick_y: 0.0,
+            trigger: right.trigger,
+            grip: right.squeeze,
+            pos_x: right.aim_pos[0],
+            pos_y: right.aim_pos[1],
+            pos_z: right.aim_pos[2],
+            rot_x: right.aim_orient[0],
+            rot_y: right.aim_orient[1],
+            rot_z: right.aim_orient[2],
+            rot_w: right.aim_orient[3],
+        },
+    };
 
     if let Some(ref mut overlay) = state.overlay {
         if overlay.update_menu_button(menu_down) {
-            layer_log!(
-                info,
-                "[ClearXR Layer] Dashboard overlay visibility toggled -> {}.",
-                overlay.visible()
-            );
+            layer_log!(info, "[ClearXR Layer] Dashboard overlay visibility toggled -> {}.", overlay.visible());
         }
-        if let Some(ref pkt) = pkt_copy {
-            overlay.send_controller_input(pkt);
-        } else if diag % 360 == 0 {
-            layer_log!(info, "[ClearXR Layer] No controller packet to send this cycle.");
+        if active_hands != 0 {
+            overlay.send_controller_input(&pkt);
+        }
+        if diag < 5 || diag % 360 == 0 {
+            layer_log!(info,
+                "[ClearXR Layer] Controller state: active=0x{:02x} L=[{:.2},{:.2},{:.2}] R=[{:.2},{:.2},{:.2}] L_trig={:.2} R_trig={:.2}",
+                active_hands,
+                left.aim_pos[0], left.aim_pos[1], left.aim_pos[2],
+                right.aim_pos[0], right.aim_pos[1], right.aim_pos[2],
+                left.trigger, right.trigger
+            );
         }
     }
 }
@@ -1070,23 +1172,25 @@ unsafe extern "system" fn hook_suggest_bindings(
                 state.overrides.insert((action_raw, hand), bit);
             }
 
+            // Track aim pose actions for xrLocateSpace interception
+            if component == "/input/aim/pose" {
+                state.aim_actions.insert(action_raw);
+                layer_log!(info, "[ClearXR Layer] Tracked aim action: 0x{:x} {:?}", action_raw, hand);
+            }
+            // Track trigger/squeeze float actions
+            if component == "/input/trigger/value" {
+                state.trigger_actions.insert((action_raw, hand), ());
+                if let Some(lock) = TRIGGER_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert((action_raw, hand), ()); } }
+                layer_log!(info, "[ClearXR Layer] Tracked trigger action: 0x{:x} {:?}", action_raw, hand);
+            }
+            if component == "/input/squeeze/value" {
+                state.squeeze_actions.insert((action_raw, hand), ());
+                if let Some(lock) = SQUEEZE_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert((action_raw, hand), ()); } }
+                layer_log!(info, "[ClearXR Layer] Tracked squeeze action: 0x{:x} {:?}", action_raw, hand);
+            }
+
             if is_haptic_output_path(component) {
-                layer_log!(
-                    info,
-                    "[ClearXR Layer] Recorded haptic binding: action 0x{:x} {:?} {}",
-                    action_raw,
-                    hand,
-                    path_str
-                );
                 state.haptic_actions.insert((action_raw, hand));
-            } else if component.starts_with("/input/") {
-                layer_log!(
-                    info,
-                    "[ClearXR Layer] Saw input binding without override: action 0x{:x} {:?} {}",
-                    action_raw,
-                    hand,
-                    path_str
-                );
             }
         }
     }
@@ -1219,6 +1323,123 @@ unsafe extern "system" fn hook_end_frame(
     };
 
     (state.next.end_frame)(session, &wrapped_end_info)
+}
+
+unsafe extern "system" fn hook_create_action_space(
+    session: xr::Session,
+    create_info: *const xr::ActionSpaceCreateInfo,
+    space: *mut xr::Space,
+) -> xr::Result {
+    let mut guard = LAYER.lock().unwrap();
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return xr::Result::ERROR_HANDLE_INVALID,
+    };
+
+    let result = (state.next.create_action_space)(session, create_info, space);
+    if result != xr::Result::SUCCESS || create_info.is_null() || space.is_null() {
+        return result;
+    }
+
+    let ci = &*create_info;
+    let action_raw = ci.action.into_raw();
+
+    // If this action is a tracked aim action, record the space → hand mapping
+    if state.aim_actions.contains(&action_raw) {
+        if let Some(hand) = hand_from_path(state, ci.subaction_path) {
+            let space_raw = (*space).into_raw();
+            state.aim_spaces.insert(space_raw, hand);
+            // Also update the separate static for the hot-path hook
+            if let Some(lock) = AIM_SPACES.get() {
+                if let Ok(mut map) = lock.write() { map.insert(space_raw, hand); }
+            }
+            layer_log!(info,
+                "[ClearXR Layer] Aim space created: space=0x{:x} action=0x{:x} {:?}",
+                space_raw, action_raw, hand
+            );
+        }
+    }
+
+    result
+}
+
+unsafe extern "system" fn hook_locate_space(
+    space: xr::Space,
+    base_space: xr::Space,
+    time: xr::Time,
+    location: *mut xr::SpaceLocation,
+) -> xr::Result {
+    // Hot path — use OnceLock/RwLock, NOT the LAYER mutex. Zero contention on read path.
+    let next_fn = match NEXT_LOCATE_SPACE.get() {
+        Some(&f) => f,
+        None => return xr::Result::ERROR_HANDLE_INVALID,
+    };
+
+    let result = (next_fn)(space, base_space, time, location);
+    if result != xr::Result::SUCCESS || location.is_null() {
+        return result;
+    }
+
+    // Quick check: is this one of our tracked aim spaces? (read lock — no contention with other readers)
+    let space_raw = space.into_raw();
+    let hand = AIM_SPACES.get().and_then(|lock| lock.read().ok()).and_then(|map| map.get(&space_raw).copied());
+
+    if let Some(hand) = hand {
+        let loc = &*location;
+        let valid = loc.location_flags.contains(
+            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID
+        );
+        let idx = match hand { Hand::Left => 0, Hand::Right => 1 };
+        if let Ok(mut cs) = CONTROLLER_STATE.write() {
+            cs[idx].active = valid;
+            if valid {
+                cs[idx].aim_pos = [loc.pose.position.x, loc.pose.position.y, loc.pose.position.z];
+                cs[idx].aim_orient = [loc.pose.orientation.x, loc.pose.orientation.y, loc.pose.orientation.z, loc.pose.orientation.w];
+            }
+        }
+    }
+
+    result
+}
+
+unsafe extern "system" fn hook_get_action_state_float(
+    session: xr::Session,
+    get_info: *const xr::ActionStateGetInfo,
+    state_out: *mut xr::ActionStateFloat,
+) -> xr::Result {
+    // Hot path — use OnceLock/RwLock, NOT the LAYER mutex.
+    let next_fn = match NEXT_GET_FLOAT.get() {
+        Some(&f) => f,
+        None => return xr::Result::ERROR_HANDLE_INVALID,
+    };
+
+    let result = (next_fn)(session, get_info, state_out);
+    if result != xr::Result::SUCCESS || get_info.is_null() || state_out.is_null() {
+        return result;
+    }
+
+    let info = &*get_info;
+    let action_raw = info.action.into_raw();
+    let out = &*state_out;
+
+    // Read locks — no contention with other readers
+    let trigger_guard = TRIGGER_ACTIONS.get().and_then(|l| l.read().ok());
+    let squeeze_guard = SQUEEZE_ACTIONS.get().and_then(|l| l.read().ok());
+
+    for &hand in &[Hand::Left, Hand::Right] {
+        let idx = match hand { Hand::Left => 0, Hand::Right => 1 };
+        let is_trigger = trigger_guard.as_ref().map_or(false, |m| m.contains_key(&(action_raw, hand)));
+        let is_squeeze = squeeze_guard.as_ref().map_or(false, |m| m.contains_key(&(action_raw, hand)));
+
+        if is_trigger || is_squeeze {
+            if let Ok(mut cs) = CONTROLLER_STATE.write() {
+                if is_trigger { cs[idx].trigger = out.current_state; }
+                if is_squeeze { cs[idx].squeeze = out.current_state; }
+            }
+        }
+    }
+
+    result
 }
 
 unsafe extern "system" fn hook_apply_haptic_feedback(
