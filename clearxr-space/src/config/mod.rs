@@ -253,4 +253,95 @@ volume = 0.8
         // directories crate should return a path on all platforms
         assert!(Config::config_path().is_some());
     }
+
+    #[test]
+    fn config_anchor_mode_serialization() {
+        let config = Config::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("anchor"), "TOML should contain anchor field");
+        let loaded: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(loaded.panel.anchor, config.panel.anchor);
+    }
+
+    #[test]
+    fn config_opacity_range() {
+        let config = Config::default();
+        assert!(config.panel.opacity >= 0.0 && config.panel.opacity <= 1.0,
+            "Default opacity should be in [0, 1], got {}", config.panel.opacity);
+    }
+
+    #[test]
+    fn config_audio_defaults() {
+        let config = Config::default();
+        assert!((config.audio.volume - 0.8).abs() < f32::EPSILON);
+        assert!(config.audio.output_device.is_empty());
+        assert!(!config.audio.mic_enabled);
+    }
+
+    #[test]
+    fn config_all_anchor_modes_roundtrip() {
+        let modes = vec![
+            AnchorMode::World,
+            AnchorMode::Controller,
+            AnchorMode::Wrist,
+            AnchorMode::Theater,
+            AnchorMode::Head,
+        ];
+        for mode in modes {
+            let mut config = Config::default();
+            config.panel.anchor = mode.clone();
+            let toml_str = toml::to_string(&config).unwrap();
+            let loaded: Config = toml::from_str(&toml_str).unwrap();
+            assert_eq!(loaded.panel.anchor, mode, "Anchor mode {:?} should round-trip", mode);
+        }
+    }
+
+    #[test]
+    fn config_modified_values_roundtrip() {
+        let mut config = Config::default();
+        config.panel.opacity = 0.5;
+        config.panel.width = 2.4;
+        config.panel.height = 1.5;
+        config.panel.theater_distance = 8.0;
+        config.panel.theater_scale = 4.0;
+        config.audio.volume = 0.3;
+        config.audio.mic_enabled = true;
+        config.display.show_fps = false;
+        config.display.show_boundary = false;
+        config.display.theme = "dark".into();
+        config.shell.default_view = "desktop".into();
+        config.shell.haptics_enabled = false;
+
+        let toml_str = toml::to_string(&config).unwrap();
+        let loaded: Config = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(loaded.panel.opacity, 0.5);
+        assert_eq!(loaded.panel.width, 2.4);
+        assert_eq!(loaded.panel.height, 1.5);
+        assert_eq!(loaded.panel.theater_distance, 8.0);
+        assert_eq!(loaded.audio.volume, 0.3);
+        assert!(loaded.audio.mic_enabled);
+        assert!(!loaded.display.show_fps);
+        assert!(!loaded.display.show_boundary);
+        assert_eq!(loaded.display.theme, "dark");
+        assert_eq!(loaded.shell.default_view, "desktop");
+        assert!(!loaded.shell.haptics_enabled);
+    }
+
+    #[test]
+    fn config_empty_string_uses_all_defaults() {
+        // Completely empty TOML should use all defaults
+        let config: Config = toml::from_str("").unwrap();
+        let default = Config::default();
+        assert_eq!(config.panel.width, default.panel.width);
+        assert_eq!(config.audio.volume, default.audio.volume);
+        assert_eq!(config.display.theme, default.display.theme);
+        assert_eq!(config.shell.default_view, default.shell.default_view);
+    }
+
+    #[test]
+    fn config_panel_position_default() {
+        let config = Config::default();
+        assert_eq!(config.panel.position, [0.0, 1.6, -2.5]);
+    }
 }

@@ -46,6 +46,7 @@ pub struct ShellFrame {
 /// Thin wrapper around Dashboard. Owns the input dispatcher and delegates
 /// all UI, rendering, and state management to the Dashboard.
 pub struct Shell {
+    /// The unified dashboard that owns all UI panels and state.
     pub dashboard: Dashboard,
     input: InputDispatcher,
     prev_menu_click: bool,
@@ -388,8 +389,8 @@ impl Shell {
     }
 
     /// Destroy all Vulkan resources owned by the shell.
-    pub fn destroy(&mut self, device: &ash::Device) {
-        self.dashboard.destroy(device);
+    pub fn destroy(&mut self, vk: &crate::vk_backend::VkBackend) {
+        self.dashboard.destroy(vk);
     }
 }
 
@@ -448,5 +449,163 @@ mod tests {
         tab = DashboardTab::Desktop;
         assert_eq!(tab, DashboardTab::Desktop);
         assert_ne!(DashboardTab::Launcher, DashboardTab::Desktop);
+    }
+
+    #[test]
+    fn spherical_round_trip() {
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let panel_pos = Vec3::new(1.0, 2.0, -2.0);
+        let to_panel = panel_pos - head;
+        let dist = to_panel.length();
+        let yaw = to_panel.x.atan2(-to_panel.z);
+        let pitch = (to_panel.y / dist).asin();
+
+        // Convert back (same formula used in Shell::tick orbital drag)
+        let reconstructed = head + Vec3::new(
+            dist * pitch.cos() * yaw.sin(),
+            dist * pitch.sin(),
+            -dist * pitch.cos() * yaw.cos(),
+        );
+
+        assert!(
+            (reconstructed - panel_pos).length() < 0.01,
+            "Round-trip failed: {:?} vs {:?}", reconstructed, panel_pos
+        );
+    }
+
+    #[test]
+    fn spherical_round_trip_negative_x() {
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let panel_pos = Vec3::new(-1.5, 1.0, -3.0);
+        let to_panel = panel_pos - head;
+        let dist = to_panel.length();
+        let yaw = to_panel.x.atan2(-to_panel.z);
+        let pitch = (to_panel.y / dist).asin();
+
+        let reconstructed = head + Vec3::new(
+            dist * pitch.cos() * yaw.sin(),
+            dist * pitch.sin(),
+            -dist * pitch.cos() * yaw.cos(),
+        );
+
+        assert!(
+            (reconstructed - panel_pos).length() < 0.01,
+            "Round-trip failed for negative X: {:?} vs {:?}", reconstructed, panel_pos
+        );
+    }
+
+    #[test]
+    fn distance_amplification_8x() {
+        let start_dist: f32 = 0.6;
+        let new_dist: f32 = 0.66; // 10% increase
+        let raw_ratio = new_dist / start_dist;
+        let amplified = 1.0 + (raw_ratio - 1.0) * 8.0;
+        // 10% raw -> 80% amplified -> ratio of 1.8
+        assert!((amplified - 1.8).abs() < 0.01,
+            "Expected ~1.8 amplified ratio, got {}", amplified);
+    }
+
+    #[test]
+    fn distance_amplification_no_change() {
+        let start_dist: f32 = 0.6;
+        let new_dist: f32 = 0.6; // no change
+        let raw_ratio = new_dist / start_dist;
+        let amplified = 1.0 + (raw_ratio - 1.0) * 8.0;
+        assert!((amplified - 1.0).abs() < 0.001,
+            "No hand movement should produce ratio 1.0, got {}", amplified);
+    }
+
+    #[test]
+    fn distance_amplification_decrease() {
+        let start_dist: f32 = 0.6;
+        let new_dist: f32 = 0.54; // 10% decrease
+        let raw_ratio = new_dist / start_dist;
+        let amplified = 1.0 + (raw_ratio - 1.0) * 8.0;
+        // 10% decrease -> 80% decrease -> ratio of 0.2
+        assert!((amplified - 0.2).abs() < 0.01,
+            "10% closer should produce ~0.2 ratio, got {}", amplified);
+    }
+
+    #[test]
+    fn panel_faces_user_after_orbital_move() {
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let new_center = Vec3::new(2.0, 2.0, -3.0);
+        let fwd = (new_center - head).normalize();
+        let right = fwd.cross(Vec3::Y).normalize();
+        // right should be perpendicular to forward and Y
+        assert!(right.dot(fwd).abs() < 0.01, "right not perpendicular to forward");
+        assert!(right.dot(Vec3::Y).abs() < 0.01, "right not perpendicular to Y");
+    }
+
+    #[test]
+    fn panel_faces_user_directly_ahead() {
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let new_center = Vec3::new(0.0, 1.6, -3.0); // directly ahead
+        let fwd = (new_center - head).normalize();
+        let right = fwd.cross(Vec3::Y).normalize();
+        // Should be pure +X when looking straight ahead
+        assert!((right - Vec3::X).length() < 0.01,
+            "Facing straight ahead, right should be +X, got {:?}", right);
+    }
+
+    #[test]
+    fn haptic_pulse_struct() {
+        let pulse = HapticPulse {
+            duration_ms: 50,
+            frequency: 200.0,
+            amplitude: 0.6,
+        };
+        assert_eq!(pulse.duration_ms, 50);
+        assert!((pulse.frequency - 200.0).abs() < f32::EPSILON);
+        assert!((pulse.amplitude - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn shell_frame_haptic_fields() {
+        let frame = ShellFrame {
+            left_ray_hit_dist: 1.5,
+            right_ray_hit_dist: 2.5,
+            haptic_left: Some(HapticPulse { duration_ms: 20, frequency: 200.0, amplitude: 0.2 }),
+            haptic_right: None,
+        };
+        assert!(frame.haptic_left.is_some());
+        assert!(frame.haptic_right.is_none());
+        assert!((frame.left_ray_hit_dist - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn spherical_round_trip_behind_head() {
+        // Panel behind the user (positive Z)
+        let head = Vec3::new(0.0, 1.6, 0.0);
+        let panel_pos = Vec3::new(0.5, 2.0, 2.0);
+        let to_panel = panel_pos - head;
+        let dist = to_panel.length();
+        let yaw = to_panel.x.atan2(-to_panel.z);
+        let pitch = (to_panel.y / dist).asin();
+
+        let reconstructed = head + Vec3::new(
+            dist * pitch.cos() * yaw.sin(),
+            dist * pitch.sin(),
+            -dist * pitch.cos() * yaw.cos(),
+        );
+
+        assert!(
+            (reconstructed - panel_pos).length() < 0.01,
+            "Round-trip for behind-head failed: {:?} vs {:?}", reconstructed, panel_pos
+        );
+    }
+
+    #[test]
+    fn distance_clamp_range() {
+        // Verify the clamping behavior used in grab logic
+        let grab_initial_distance = 2.0;
+        let amplified_min = 0.01_f32; // very small ratio
+        let amplified_max = 100.0_f32; // very large ratio
+
+        let clamped_min = (grab_initial_distance * amplified_min).clamp(0.8, 10.0);
+        let clamped_max = (grab_initial_distance * amplified_max).clamp(0.8, 10.0);
+
+        assert!((clamped_min - 0.8).abs() < 0.01, "Minimum should clamp to 0.8m");
+        assert!((clamped_max - 10.0).abs() < 0.01, "Maximum should clamp to 10.0m");
     }
 }

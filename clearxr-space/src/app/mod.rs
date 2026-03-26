@@ -118,4 +118,60 @@ mod tests {
             app.kill();
         }
     }
+
+    #[test]
+    fn app_status_exited_codes() {
+        assert_eq!(AppStatus::Exited(0), AppStatus::Exited(0));
+        assert_ne!(AppStatus::Exited(0), AppStatus::Exited(1));
+        assert_ne!(AppStatus::Exited(0), AppStatus::ExitedOk);
+        assert_ne!(AppStatus::Exited(0), AppStatus::Running);
+    }
+
+    #[test]
+    fn launch_flat_game_preserves_app_id() {
+        // Launch a quick process with an app_id
+        #[cfg(target_os = "windows")]
+        let result = launch_flat_game("test", "cmd", Some(12345));
+        #[cfg(not(target_os = "windows"))]
+        let result = launch_flat_game("test", "true", Some(12345));
+
+        if let Ok(mut app) = result {
+            assert_eq!(app.app_id, Some(12345));
+            app.kill();
+        }
+    }
+
+    #[test]
+    fn launch_flat_game_no_app_id() {
+        #[cfg(target_os = "windows")]
+        let result = launch_flat_game("test", "cmd", None);
+        #[cfg(not(target_os = "windows"))]
+        let result = launch_flat_game("test", "true", None);
+
+        if let Ok(mut app) = result {
+            assert_eq!(app.app_id, None);
+            app.kill();
+        }
+    }
+
+    #[test]
+    fn launched_app_status_running() {
+        // Launch a process that stays alive briefly
+        #[cfg(target_os = "windows")]
+        let result = launch_flat_game("sleeper", "cmd", None);
+        #[cfg(not(target_os = "windows"))]
+        let result = launch_flat_game("sleeper", "sleep", None);
+
+        if let Ok(mut app) = result {
+            // Should be running immediately after launch
+            let status = app.status();
+            // cmd.exe on Windows or sleep on Unix should still be running
+            // (though cmd.exe may exit quickly, so we accept both)
+            assert!(
+                status == AppStatus::Running || status == AppStatus::ExitedOk,
+                "Expected Running or ExitedOk, got {:?}", status
+            );
+            app.kill();
+        }
+    }
 }

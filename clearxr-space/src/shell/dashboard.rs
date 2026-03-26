@@ -3,7 +3,7 @@
 //! Replaces 9 separate panels (launcher, desktop, toolbar, grab bar, FPS,
 //! tray, settings, notification, keyboard) with ONE draggable panel that
 //! renders ALL UI (tab bar, launcher grid, desktop chrome, settings, grab
-//! bar, notifications) via a single EguiGpuRenderer into one LauncherPanel
+//! bar, notifications) via a single EguiPanelRenderer into one LauncherPanel
 //! Vulkan texture.
 
 use ash::vk;
@@ -19,66 +19,90 @@ use crate::launcher_panel::LauncherPanel;
 use crate::panel::{PanelAnchor, PanelId, PanelTransform};
 use crate::shell::boundary::Boundary;
 use crate::shell::notifications::{Notification, NotificationQueue};
-use crate::ui::egui_gpu_renderer::EguiGpuRenderer;
+use crate::ui::egui_panel_renderer::EguiPanelRenderer;
 use crate::vk_backend::VkBackend;
 
+/// Panel ID for the main dashboard overlay.
 pub const DASHBOARD_PANEL_ID: PanelId = PanelId::new(1);
+/// Panel ID for the desktop screen-capture panel.
 pub const SCREEN_PANEL_ID: PanelId = PanelId::new(2);
 
+/// Active tab in the dashboard UI.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DashboardTab {
+    /// Game launcher grid.
     Launcher,
+    /// Desktop screen mirror.
     Desktop,
+    /// Configuration settings.
     Settings,
 }
 
 /// Actions the dashboard can produce each frame.
 pub enum DashboardAction {
+    /// No action.
     None,
+    /// Launch a Steam game by app ID.
     LaunchGame(u32),
+    /// Toggle dashboard visibility.
     ToggleVisibility,
+    /// Save the current configuration to disk.
     SaveConfig,
+    /// Capture a screenshot.
     Screenshot,
+    /// Cycle the panel anchor mode.
     CycleAnchor,
 }
 
+/// Unified VR dashboard: one egui frame rendering all UI (tabs, launcher, settings, grab bar).
 pub struct Dashboard {
-    // Rendering
+    /// Main dashboard panel (egui renders into this).
     pub panel: LauncherPanel,
-    egui: EguiGpuRenderer,
+    egui: EguiPanelRenderer,
 
-    // Screen capture (desktop tab)
+    /// Screen capture panel (desktop tab background).
     pub screen_panel: LauncherPanel,
+    /// Screen capture source for the desktop tab.
     pub screen_capture: ScreenCapture,
 
-    // State
+    /// Currently selected tab.
     pub active_tab: DashboardTab,
+    /// Whether the dashboard is visible.
     pub visible: bool,
     click_pending: bool,
 
-    // Launcher state
+    /// Discovered games from Steam library scan.
     pub games: Vec<Game>,
     search: String,
 
-    // Settings state
+    /// User-editable configuration (panel opacity, default view, etc.).
     pub config: Config,
 
-    // Grab (orbital drag)
+    /// Grab offset from controller to panel center (None = not grabbed).
     pub grab_offset: Option<Vec3>,
+    /// Index of the hand currently grabbing (0=left, 1=right), or None.
     pub grab_hand: Option<usize>,
+    /// Panel yaw angle (radians) at grab start.
     pub grab_initial_yaw: f32,
+    /// Panel pitch angle (radians) at grab start.
     pub grab_initial_pitch: f32,
+    /// Panel distance from head at grab start.
     pub grab_initial_distance: f32,
+    /// Controller aim yaw at grab start.
     pub grab_controller_start_yaw: f32,
+    /// Controller aim pitch at grab start.
     pub grab_controller_start_pitch: f32,
+    /// Controller distance from head at grab start.
     pub grab_controller_start_distance: f32,
+    /// Panel width at grab start (for distance-based scaling).
     pub base_width: f32,
+    /// Panel height at grab start (for distance-based scaling).
     pub base_height: f32,
 
-    // Notifications
+    /// Notification toast queue.
     pub notifications: NotificationQueue,
 
-    // App management
+    /// Currently launched game process, if any.
     pub launched_app: Option<LaunchedApp>,
 
     // FPS
@@ -86,25 +110,28 @@ pub struct Dashboard {
     fps_frame_count: u32,
     fps_current: f32,
 
-    // Screenshot
+    /// Whether a screenshot was requested this frame.
     pub screenshot_requested: bool,
+    /// Previous frame's both-triggers state (for edge detection).
     pub prev_both_triggers: bool,
 
-    // Anchor
+    /// Current panel anchor mode.
     pub anchor: PanelAnchor,
 
-    // Boundary
+    /// Play-space boundary configuration.
     pub boundary: Boundary,
+    /// Whether the boundary proximity warning has been shown.
     pub boundary_warning_shown: bool,
 }
 
 impl Dashboard {
+    /// Create the dashboard with game scanning, screen capture, and egui renderer.
     pub fn new(config: Config, vk: &VkBackend, render_pass: vk::RenderPass) -> Result<Self> {
         let width = 2048u32;
         let height = 1280u32;
 
         let panel = LauncherPanel::new(vk, render_pass, width, height, vk::Format::R8G8B8A8_SRGB)?;
-        let egui = EguiGpuRenderer::new(vk, width, height)?;
+        let egui = EguiPanelRenderer::new(vk, width, height)?;
 
         // Screen capture for desktop tab
         let screen_capture = ScreenCapture::new()?;
@@ -358,14 +385,17 @@ impl Dashboard {
 
     // ---- Pointer input ----
 
+    /// Inject pointer position from controller ray-cast (UV coordinates).
     pub fn pointer_move(&mut self, u: f32, v: f32) {
         self.egui.pointer_move(u, v);
     }
 
+    /// Clear pointer state (call at start of each frame).
     pub fn pointer_leave(&mut self) {
         self.egui.pointer_leave();
     }
 
+    /// Signal a click on the dashboard.
     pub fn click(&mut self) {
         self.click_pending = true;
     }
@@ -413,9 +443,10 @@ impl Dashboard {
     }
 
     /// Destroy all Vulkan resources.
-    pub fn destroy(&mut self, device: &ash::Device) {
-        self.panel.destroy(device);
-        self.screen_panel.destroy(device);
+    pub fn destroy(&mut self, vk: &crate::vk_backend::VkBackend) {
+        let device = vk.device();
+        self.panel.destroy(device, vk);
+        self.screen_panel.destroy(device, vk);
         self.egui.destroy(device);
     }
 }

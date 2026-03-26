@@ -912,7 +912,7 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
     if let Some(ref mut m) = mirror {
         m.destroy(vk.device());
     }
-    shell.destroy(vk.device());
+    shell.destroy(&vk);
     renderer.destroy(&vk);
 
     Ok(())

@@ -1,7 +1,8 @@
 /// Screen / window capture + input injection.
 ///
-/// macOS:   CoreGraphics CGDisplayCreateImage + CGEvent input injection
-/// Windows: DXGI Desktop Duplication (background thread) + SendInput
+/// macOS:   CoreGraphics CGDisplayCreateImage
+/// Windows: DXGI Desktop Duplication (background thread)
+/// Input injection (all platforms): enigo crate
 
 use anyhow::Result;
 use log::info;
@@ -73,16 +74,23 @@ impl ScreenCapture {
     /// Move the real mouse cursor to the position corresponding to (u,v) on the panel.
     /// u,v are in [0,1] panel-space coordinates.
     pub fn inject_mouse_move(&self, u: f32, v: f32) {
+        use enigo::{Enigo, Mouse, Settings, Coordinate};
         let x = (u * self.screen_width as f32) as i32;
         let y = (v * self.screen_height as f32) as i32;
-        platform_mouse_move(x, y);
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+        }
     }
 
     /// Click at the position corresponding to (u,v) on the panel.
     pub fn inject_mouse_click(&self, u: f32, v: f32) {
+        use enigo::{Enigo, Mouse, Settings, Coordinate, Button, Direction};
         let x = (u * self.screen_width as f32) as i32;
         let y = (v * self.screen_height as f32) as i32;
-        platform_mouse_click(x, y);
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+            let _ = enigo.button(Button::Left, Direction::Click);
+        }
     }
 }
 
@@ -210,161 +218,6 @@ fn get_screen_size() -> (u32, u32) {
         (1920, 1080)
     }
 }
-
-// ============================================================
-// Platform: mouse input injection
-// ============================================================
-
-#[cfg(target_os = "macos")]
-fn platform_mouse_move(x: i32, y: i32) {
-    use std::ffi::c_void;
-    type CGEventRef = *const c_void;
-    type CGEventSourceRef = *const c_void;
-    type CGFloat = f64;
-
-    #[repr(C)]
-    struct CGPoint {
-        x: CGFloat,
-        y: CGFloat,
-    }
-
-    extern "C" {
-        fn CGEventCreateMouseEvent(
-            source: CGEventSourceRef,
-            mouse_type: u32,
-            mouse_cursor_position: CGPoint,
-            mouse_button: u32,
-        ) -> CGEventRef;
-        fn CGEventPost(tap: u32, event: CGEventRef);
-        fn CFRelease(cf: *const c_void);
-    }
-
-    const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
-    const K_CG_HID_EVENT_TAP: u32 = 0;
-
-    unsafe {
-        let pt = CGPoint { x: x as CGFloat, y: y as CGFloat };
-        let event = CGEventCreateMouseEvent(
-            std::ptr::null(),
-            K_CG_EVENT_MOUSE_MOVED,
-            pt,
-            0, // kCGMouseButtonLeft
-        );
-        if !event.is_null() {
-            CGEventPost(K_CG_HID_EVENT_TAP, event);
-            CFRelease(event);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn platform_mouse_click(x: i32, y: i32) {
-    use std::ffi::c_void;
-    type CGEventRef = *const c_void;
-    type CGEventSourceRef = *const c_void;
-    type CGFloat = f64;
-
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct CGPoint {
-        x: CGFloat,
-        y: CGFloat,
-    }
-
-    extern "C" {
-        fn CGEventCreateMouseEvent(
-            source: CGEventSourceRef,
-            mouse_type: u32,
-            mouse_cursor_position: CGPoint,
-            mouse_button: u32,
-        ) -> CGEventRef;
-        fn CGEventPost(tap: u32, event: CGEventRef);
-        fn CFRelease(cf: *const c_void);
-    }
-
-    const K_CG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
-    const K_CG_EVENT_LEFT_MOUSE_UP: u32 = 2;
-    const K_CG_HID_EVENT_TAP: u32 = 0;
-
-    unsafe {
-        let pt = CGPoint { x: x as CGFloat, y: y as CGFloat };
-
-        let down = CGEventCreateMouseEvent(
-            std::ptr::null(), K_CG_EVENT_LEFT_MOUSE_DOWN, pt, 0,
-        );
-        if !down.is_null() {
-            CGEventPost(K_CG_HID_EVENT_TAP, down);
-            CFRelease(down);
-        }
-
-        let up = CGEventCreateMouseEvent(
-            std::ptr::null(), K_CG_EVENT_LEFT_MOUSE_UP, pt, 0,
-        );
-        if !up.is_null() {
-            CGEventPost(K_CG_HID_EVENT_TAP, up);
-            CFRelease(up);
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn platform_mouse_move(x: i32, y: i32) {
-    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
-    unsafe {
-        let _ = SetCursorPos(x, y);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn platform_mouse_click(x: i32, y: i32) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
-
-    unsafe {
-        let screen_w = GetSystemMetrics(SM_CXSCREEN) as i32;
-        let screen_h = GetSystemMetrics(SM_CYSCREEN) as i32;
-
-        // Absolute coordinates are 0..65535
-        let abs_x = (x * 65535 / screen_w) as i32;
-        let abs_y = (y * 65535 / screen_h) as i32;
-
-        let inputs = [
-            INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 {
-                    mi: MOUSEINPUT {
-                        dx: abs_x,
-                        dy: abs_y,
-                        dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN,
-                        ..Default::default()
-                    },
-                },
-            },
-            INPUT {
-                r#type: INPUT_MOUSE,
-                Anonymous: INPUT_0 {
-                    mi: MOUSEINPUT {
-                        dx: abs_x,
-                        dy: abs_y,
-                        dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP,
-                        ..Default::default()
-                    },
-                },
-            },
-        ];
-
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_mouse_move(_x: i32, _y: i32) {}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn platform_mouse_click(_x: i32, _y: i32) {}
 
 // ============================================================
 // Windows: DXGI Desktop Duplication (used inside capture thread)

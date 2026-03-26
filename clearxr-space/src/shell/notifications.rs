@@ -7,22 +7,31 @@ use std::time::{Duration, Instant};
 /// Priority level affects display duration and position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NotificationLevel {
+    /// Informational (4 second display).
     Info,
+    /// Warning (6 second display).
     Warning,
+    /// Success confirmation (3 second display).
     Success,
 }
 
 /// A queued notification.
 #[derive(Clone, Debug)]
 pub struct Notification {
+    /// Notification headline text.
     pub title: String,
+    /// Optional body text (may be empty).
     pub body: String,
+    /// Severity / display style.
     pub level: NotificationLevel,
+    /// When this notification was created.
     pub created: Instant,
+    /// How long to display before auto-dismissing.
     pub duration: Duration,
 }
 
 impl Notification {
+    /// Create an info-level notification (4 second display).
     pub fn info(title: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -33,6 +42,7 @@ impl Notification {
         }
     }
 
+    /// Create a warning-level notification (6 second display).
     pub fn warning(title: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -43,6 +53,7 @@ impl Notification {
         }
     }
 
+    /// Create a success-level notification (3 second display).
     pub fn success(title: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -74,6 +85,7 @@ pub struct NotificationQueue {
 }
 
 impl NotificationQueue {
+    /// Create a new queue that displays at most `max_visible` notifications at once.
     pub fn new(max_visible: usize) -> Self {
         Self {
             active: Vec::new(),
@@ -215,5 +227,57 @@ mod tests {
         q.push(Notification::info("B", ""));
         assert_eq!(q.count(), 1);
         assert_eq!(q.visible()[0].title, "B");
+    }
+
+    #[test]
+    fn notification_fifo_order() {
+        let mut q = NotificationQueue::new(10);
+        q.push(Notification::info("First", ""));
+        q.push(Notification::info("Second", ""));
+        q.push(Notification::info("Third", ""));
+        let vis = q.visible();
+        assert_eq!(vis[0].title, "First");
+        assert_eq!(vis[1].title, "Second");
+        assert_eq!(vis[2].title, "Third");
+    }
+
+    #[test]
+    fn notification_body_preserved() {
+        let n = Notification::info("Title", "Some body text");
+        assert_eq!(n.title, "Title");
+        assert_eq!(n.body, "Some body text");
+    }
+
+    #[test]
+    fn notification_levels_distinct() {
+        let info = Notification::info("", "");
+        let warn = Notification::warning("", "");
+        let success = Notification::success("", "");
+        assert_ne!(info.level, warn.level);
+        assert_ne!(info.level, success.level);
+        assert_ne!(warn.level, success.level);
+    }
+
+    #[test]
+    fn notification_not_expired_immediately() {
+        let n = Notification::info("Test", "Body");
+        assert!(!n.is_expired());
+        let w = Notification::warning("Test", "Body");
+        assert!(!w.is_expired());
+        let s = Notification::success("Test", "Body");
+        assert!(!s.is_expired());
+    }
+
+    #[test]
+    fn queue_visible_returns_all_active() {
+        let mut q = NotificationQueue::new(5);
+        q.push(Notification::info("A", "body1"));
+        q.push(Notification::warning("B", "body2"));
+        q.push(Notification::success("C", "body3"));
+        let vis = q.visible();
+        assert_eq!(vis.len(), 3);
+        assert_eq!(vis[0].body, "body1");
+        assert_eq!(vis[1].body, "body2");
+        assert_eq!(vis[2].body, "body3");
     }
 }

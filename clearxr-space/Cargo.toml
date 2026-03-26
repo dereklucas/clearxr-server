@@ -20,6 +20,9 @@ openxr = { version = "0.17", features = ["loaded"], optional = true }
 ash = "0.38"
 ash-window = "0.13"
 
+# Sub-allocating GPU memory (replaces manual vkAllocateMemory calls)
+gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
+
 # Math (matrices, vectors, quaternions for view transforms)
 glam = "0.27"
 
@@ -48,12 +51,18 @@ toml = "0.8"
 # Config file directory resolution
 directories = "5"
 
+# Cross-platform input simulation (mouse injection)
+enigo = "0.6"
+
 # Image encoding (PNG screenshots)
 image = "0.25"
 
 # egui immediate-mode UI (software-rasterized to RGBA, then uploaded to Vulkan texture)
 egui = "0.31"
 epaint = "0.31"
+
+# GPU-accelerated egui rendering into Vulkan images
+egui-ash-renderer = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
@@ -62,7 +71,6 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
-    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

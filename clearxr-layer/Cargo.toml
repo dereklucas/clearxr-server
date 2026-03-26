@@ -9,6 +9,10 @@ crate-type = ["cdylib"]
 name = "clear_xr_layer"
 
 [dependencies]
+anyhow = "1"
 openxr-sys = "0.10"
+ash = "0.38"
+egui = "0.31"
+epaint = "0.31"
 log = "0.4"
 env_logger = "0.11"

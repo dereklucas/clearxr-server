@@ -2,7 +2,7 @@
     "file_format_version": "1.0.0",
     "api_layer": {
         "name": "XR_APILAYER_CLEARXR_controller_fix",
-        "library_path": ".\\clear_xr_layer.dll",
+        "library_path": "C:\\Users\\derek\\cargo-build\\debug\\clear_xr_layer.dll",
         "api_version": "1.0.0",
         "implementation_version": "1",
         "description": "Clear XR - Injects controller touch/click events via NVCX opaque data channel",

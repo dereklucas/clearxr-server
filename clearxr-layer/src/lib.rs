@@ -6,12 +6,20 @@
 /// CloudXR bugs.
 
 mod opaque;
+#[path = "../../clearxr-space/src/ui/egui_gpu_renderer.rs"]
+mod egui_gpu_renderer;
+mod renderer;
+mod vk_backend;
 
 use opaque::*;
+use overlay::*;
 use openxr_sys as xr;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CStr};
-use std::sync::Mutex;
+use std::fs::{create_dir_all, File, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 // ============================================================
 // Layer-specific loader types (not in openxr-sys)
@@ -30,6 +38,7 @@ const MAX_LAYER_NAME: usize = 256;
 const MAX_SETTINGS_PATH: usize = 512;
 
 const LAYER_NAME: &str = "XR_APILAYER_CLEARXR_controller_fix";
+const BUILD_MARKER: &str = "OVERLAY_TRACE_BUILD_2026-03-25_00-05_ET";
 
 #[cfg(windows)]
 unsafe fn output_debug_string(message: &str) {
@@ -52,8 +61,56 @@ unsafe fn output_debug_string(message: &str) {
 #[cfg(not(windows))]
 unsafe fn output_debug_string(_message: &str) {}
 
+fn layer_log_file() -> &'static Mutex<Option<File>> {
+    static FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+    FILE.get_or_init(|| Mutex::new(open_layer_log_file()))
+}
+
+fn trace_log_file() -> &'static Mutex<Option<File>> {
+    static FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+    FILE.get_or_init(|| Mutex::new(open_trace_log_file()))
+}
+
+fn open_layer_log_file() -> Option<File> {
+    let base_dir = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))?;
+    let log_dir = base_dir.join("ClearXR").join("logs");
+    create_dir_all(&log_dir).ok()?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("clearxr-layer.log"))
+        .ok()
+}
+
+fn open_trace_log_file() -> Option<File> {
+    let log_dir = PathBuf::from(r"C:\Apps\clearxr-server\clearxr-layer\target-local");
+    create_dir_all(&log_dir).ok()?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("clearxr-layer-trace.log"))
+        .ok()
+}
+
+fn direct_trace(message: &str) {
+    if let Ok(mut file_guard) = trace_log_file().lock() {
+        if let Some(file) = file_guard.as_mut() {
+            let _ = writeln!(file, "{}", message);
+            let _ = file.flush();
+        }
+    }
+}
+
 pub(crate) fn debug_log(level: log::Level, message: &str) {
     log::log!(level, "{}", message);
+    if let Ok(mut file_guard) = layer_log_file().lock() {
+        if let Some(file) = file_guard.as_mut() {
+            let _ = writeln!(file, "[{}] {}", level, message);
+            let _ = file.flush();
+        }
+    }
     unsafe { output_debug_string(message); }
 }
 
@@ -71,6 +128,8 @@ macro_rules! layer_log {
         crate::debug_log(log::Level::Info, &message);
     }};
 }
+
+mod overlay;
 
 #[repr(C)]
 pub struct NegotiateLoaderInfo {
@@ -129,9 +188,21 @@ struct NextDispatch {
     get_instance_proc_addr: xr::pfn::GetInstanceProcAddr,
     destroy_instance: xr::pfn::DestroyInstance,
     get_system: xr::pfn::GetSystem,
+    get_system_properties: xr::pfn::GetSystemProperties,
     create_session: xr::pfn::CreateSession,
     destroy_session: xr::pfn::DestroySession,
+    end_frame: xr::pfn::EndFrame,
+    create_reference_space: xr::pfn::CreateReferenceSpace,
+    destroy_space: xr::pfn::DestroySpace,
+    enumerate_swapchain_formats: xr::pfn::EnumerateSwapchainFormats,
+    create_swapchain: xr::pfn::CreateSwapchain,
+    destroy_swapchain: xr::pfn::DestroySwapchain,
+    enumerate_swapchain_images: xr::pfn::EnumerateSwapchainImages,
+    acquire_swapchain_image: xr::pfn::AcquireSwapchainImage,
+    wait_swapchain_image: xr::pfn::WaitSwapchainImage,
+    release_swapchain_image: xr::pfn::ReleaseSwapchainImage,
     suggest_interaction_profile_bindings: xr::pfn::SuggestInteractionProfileBindings,
+    get_current_interaction_profile: xr::pfn::GetCurrentInteractionProfile,
     sync_actions: xr::pfn::SyncActions,
     get_action_state_boolean: xr::pfn::GetActionStateBoolean,
     apply_haptic_feedback: xr::pfn::ApplyHapticFeedback,
@@ -199,6 +270,8 @@ struct LayerState {
     haptic_actions: HashSet<(u64, Hand)>,
     /// Has the opaque channel extension been enabled?
     has_opaque_ext: bool,
+    oculus_touch_profile: xr::Path,
+    overlay: Option<DashboardOverlay>,
 }
 
 static LAYER: Mutex<Option<LayerState>> = Mutex::new(None);
@@ -226,6 +299,15 @@ pub unsafe extern "system" fn xrNegotiateLoaderApiLayerInterface(
 
     // Also log to a file via OutputDebugString (visible in DebugView/VS Output)
     layer_log!(info, "[ClearXR Layer] xrNegotiateLoaderApiLayerInterface called.");
+    direct_trace(&format!(
+        "BUILD {} negotiate entered",
+        BUILD_MARKER
+    ));
+    layer_log!(
+        warn,
+        "[ClearXR Layer] BUILD MARKER {} loaded from DLL. If you see this, the installed DLL is definitely updated.",
+        BUILD_MARKER
+    );
 
     if loader_info.is_null() || request.is_null() {
         layer_log!(error, "[ClearXR Layer] Negotiation received null pointers.");
@@ -297,6 +379,15 @@ unsafe extern "system" fn layer_create_api_layer_instance(
     instance_out: *mut xr::Instance,
 ) -> xr::Result {
     layer_log!(info, "[ClearXR Layer] layer_create_api_layer_instance called.");
+    direct_trace(&format!(
+        "BUILD {} create_api_layer_instance entered",
+        BUILD_MARKER
+    ));
+    layer_log!(
+        warn,
+        "[ClearXR Layer] BUILD MARKER {} reached layer_create_api_layer_instance.",
+        BUILD_MARKER
+    );
 
     if ci.is_null() || layer_ci.is_null() || instance_out.is_null() {
         layer_log!(error, "[ClearXR Layer] Null pointer passed to create instance (ci={} layer_ci={} out={})",
@@ -413,6 +504,12 @@ unsafe extern "system" fn layer_create_api_layer_instance(
 
             // Build dispatch table
             let dispatch = build_dispatch(next_gpa, instance);
+            let oculus_touch_profile = string_to_path(
+                &dispatch,
+                instance,
+                b"/interaction_profiles/oculus/touch_controller\0",
+            )
+            .unwrap_or(xr::Path::NULL);
 
             // Store layer state
             *LAYER.lock().unwrap() = Some(LayerState {
@@ -423,9 +520,15 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                 overrides: HashMap::new(),
                 haptic_actions: HashSet::new(),
                 has_opaque_ext: has_opaque,
+                oculus_touch_profile,
+                overlay: None,
             });
 
-            layer_log!(info, "[ClearXR Layer] Instance created, layer active.");
+            layer_log!(
+                info,
+                "[ClearXR Layer] Instance created, layer active. Oculus touch profile path={:?}",
+                oculus_touch_profile
+            );
             return xr::Result::SUCCESS;
         }
 
@@ -509,9 +612,21 @@ unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instan
         get_instance_proc_addr: gpa,
         destroy_instance: load_fn(gpa, instance, b"xrDestroyInstance\0"),
         get_system: load_fn(gpa, instance, b"xrGetSystem\0"),
+        get_system_properties: load_fn(gpa, instance, b"xrGetSystemProperties\0"),
         create_session: load_fn(gpa, instance, b"xrCreateSession\0"),
         destroy_session: load_fn(gpa, instance, b"xrDestroySession\0"),
+        end_frame: load_fn(gpa, instance, b"xrEndFrame\0"),
+        create_reference_space: load_fn(gpa, instance, b"xrCreateReferenceSpace\0"),
+        destroy_space: load_fn(gpa, instance, b"xrDestroySpace\0"),
+        enumerate_swapchain_formats: load_fn(gpa, instance, b"xrEnumerateSwapchainFormats\0"),
+        create_swapchain: load_fn(gpa, instance, b"xrCreateSwapchain\0"),
+        destroy_swapchain: load_fn(gpa, instance, b"xrDestroySwapchain\0"),
+        enumerate_swapchain_images: load_fn(gpa, instance, b"xrEnumerateSwapchainImages\0"),
+        acquire_swapchain_image: load_fn(gpa, instance, b"xrAcquireSwapchainImage\0"),
+        wait_swapchain_image: load_fn(gpa, instance, b"xrWaitSwapchainImage\0"),
+        release_swapchain_image: load_fn(gpa, instance, b"xrReleaseSwapchainImage\0"),
         suggest_interaction_profile_bindings: load_fn(gpa, instance, b"xrSuggestInteractionProfileBindings\0"),
+        get_current_interaction_profile: load_fn(gpa, instance, b"xrGetCurrentInteractionProfile\0"),
         sync_actions: load_fn(gpa, instance, b"xrSyncActions\0"),
         get_action_state_boolean: load_fn(gpa, instance, b"xrGetActionStateBoolean\0"),
         apply_haptic_feedback: load_fn(gpa, instance, b"xrApplyHapticFeedback\0"),
@@ -519,6 +634,47 @@ unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instan
         path_to_string: load_fn(gpa, instance, b"xrPathToString\0"),
         string_to_path: load_fn(gpa, instance, b"xrStringToPath\0"),
     }
+}
+
+unsafe fn string_to_path(
+    next: &NextDispatch,
+    instance: xr::Instance,
+    path: &[u8],
+) -> Option<xr::Path> {
+    let mut out = xr::Path::NULL;
+    let result = (next.string_to_path)(instance, path.as_ptr() as *const c_char, &mut out);
+    if result == xr::Result::SUCCESS {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+unsafe fn path_to_string(next: &NextDispatch, instance: xr::Instance, path: xr::Path) -> Option<String> {
+    if path == xr::Path::NULL {
+        return Some("<null>".to_string());
+    }
+
+    let mut buf = [0u8; 256];
+    let mut len: u32 = 0;
+    let result = (next.path_to_string)(
+        instance,
+        path,
+        buf.len() as u32,
+        &mut len,
+        buf.as_mut_ptr() as *mut c_char,
+    );
+    if result != xr::Result::SUCCESS || len == 0 {
+        return None;
+    }
+
+    std::str::from_utf8(&buf[..len as usize - 1]).ok().map(str::to_owned)
+}
+
+unsafe fn system_name_to_string(system_name: &[c_char]) -> String {
+    CStr::from_ptr(system_name.as_ptr())
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ============================================================
@@ -535,11 +691,47 @@ unsafe extern "system" fn layer_get_instance_proc_addr(
     }
 
     let name_str = CStr::from_ptr(name);
+    let tracked_name = name_str.to_bytes();
+    if matches!(
+        tracked_name,
+        b"xrCreateSession"
+            | b"xrDestroySession"
+            | b"xrEndFrame"
+            | b"xrBeginFrame"
+            | b"xrWaitFrame"
+            | b"xrCreateReferenceSpace"
+            | b"xrCreateSwapchain"
+    ) {
+        direct_trace(&format!(
+            "BUILD {} gpa query {} instance={:?}",
+            BUILD_MARKER,
+            name_str.to_string_lossy(),
+            instance
+        ));
+        layer_log!(
+            info,
+            "[ClearXR Layer] BUILD MARKER {} GPA query for {} (instance={:?}).",
+            BUILD_MARKER,
+            name_str.to_string_lossy(),
+            instance
+        );
+    }
 
     // Return our intercepted functions
     macro_rules! intercept {
         ($fn_name:expr, $fn_ptr:expr) => {
             if name_str.to_bytes() == $fn_name {
+                direct_trace(&format!(
+                    "BUILD {} intercept {}",
+                    BUILD_MARKER,
+                    name_str.to_string_lossy()
+                ));
+                layer_log!(
+                    info,
+                    "[ClearXR Layer] BUILD MARKER {} intercepting {}.",
+                    BUILD_MARKER,
+                    name_str.to_string_lossy()
+                );
                 *function = Some(std::mem::transmute($fn_ptr as *const ()));
                 return xr::Result::SUCCESS;
             }
@@ -549,9 +741,12 @@ unsafe extern "system" fn layer_get_instance_proc_addr(
     intercept!(b"xrGetInstanceProcAddr", layer_get_instance_proc_addr as xr::pfn::GetInstanceProcAddr);
     intercept!(b"xrDestroyInstance", hook_destroy_instance as xr::pfn::DestroyInstance);
     intercept!(b"xrGetSystem", hook_get_system as xr::pfn::GetSystem);
+    intercept!(b"xrGetSystemProperties", hook_get_system_properties as xr::pfn::GetSystemProperties);
     intercept!(b"xrCreateSession", hook_create_session as xr::pfn::CreateSession);
     intercept!(b"xrDestroySession", hook_destroy_session as xr::pfn::DestroySession);
+    intercept!(b"xrEndFrame", hook_end_frame as xr::pfn::EndFrame);
     intercept!(b"xrSuggestInteractionProfileBindings", hook_suggest_bindings as xr::pfn::SuggestInteractionProfileBindings);
+    intercept!(b"xrGetCurrentInteractionProfile", hook_get_current_interaction_profile as xr::pfn::GetCurrentInteractionProfile);
     intercept!(b"xrSyncActions", hook_sync_actions as xr::pfn::SyncActions);
     intercept!(b"xrGetActionStateBoolean", hook_get_action_state_boolean as xr::pfn::GetActionStateBoolean);
     intercept!(b"xrApplyHapticFeedback", hook_apply_haptic_feedback as xr::pfn::ApplyHapticFeedback);
@@ -597,6 +792,41 @@ unsafe fn hand_from_path(state: &LayerState, path: xr::Path) -> Option<Hand> {
         Some(Hand::Right)
     } else {
         None
+    }
+}
+
+unsafe fn find_vulkan_binding<'a>(
+    mut next: *const xr::BaseInStructure,
+) -> Option<&'a xr::GraphicsBindingVulkanKHR> {
+    while !next.is_null() {
+        let candidate = &*next;
+        if candidate.ty == xr::GraphicsBindingVulkanKHR::TYPE {
+            return Some(&*(next as *const xr::GraphicsBindingVulkanKHR));
+        }
+        next = candidate.next;
+    }
+    None
+}
+
+unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
+    let mut menu_down = false;
+    if let Some(ref mut ch) = state.opaque {
+        ch.poll();
+        if let Some(pkt) = ch.latest {
+            let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
+            let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
+            menu_down = left_menu || right_menu;
+        }
+    }
+
+    if let Some(ref mut overlay) = state.overlay {
+        if overlay.update_menu_button(menu_down) {
+            layer_log!(
+                info,
+                "[ClearXR Layer] Dashboard overlay visibility toggled -> {}.",
+                overlay.visible()
+            );
+        }
     }
 }
 
@@ -663,20 +893,127 @@ unsafe extern "system" fn hook_create_session(
     ci: *const xr::SessionCreateInfo,
     session: *mut xr::Session,
 ) -> xr::Result {
+    let mut guard = LAYER.lock().unwrap();
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return xr::Result::ERROR_HANDLE_INVALID,
+    };
+    layer_log!(
+        info,
+        "[ClearXR Layer] hook_create_session entered (instance={:?}, ci_null={}, session_null={}).",
+        instance,
+        ci.is_null(),
+        session.is_null()
+    );
+    direct_trace(&format!(
+        "BUILD {} hook_create_session entered instance={:?} ci_null={} session_null={}",
+        BUILD_MARKER,
+        instance,
+        ci.is_null(),
+        session.is_null()
+    ));
+    let result = (state.next.create_session)(instance, ci, session);
+    layer_log!(
+        info,
+        "[ClearXR Layer] hook_create_session next returned {:?} (session={:?}).",
+        result,
+        if session.is_null() { xr::Session::NULL } else { *session }
+    );
+    if result != xr::Result::SUCCESS {
+        return result;
+    }
+    if ci.is_null() || session.is_null() {
+        return result;
+    }
+
+    if let Some(binding) = find_vulkan_binding((*ci).next as *const xr::BaseInStructure) {
+        layer_log!(
+            info,
+            "[ClearXR Layer] hook_create_session found Vulkan binding: queue_family={} queue_index={}.",
+            binding.queue_family_index,
+            binding.queue_index
+        );
+        match DashboardOverlay::new(&state.next, *session, binding) {
+            Ok(overlay) => {
+                state.overlay = Some(overlay);
+                layer_log!(
+                    info,
+                    "[ClearXR Layer] Dashboard overlay attached to session {:?} using Vulkan binding; default visible.",
+                    *session
+                );
+            }
+            Err(err) => {
+                layer_log!(warn, "[ClearXR Layer] Dashboard overlay disabled: {}", err);
+                state.overlay = None;
+            }
+        }
+    } else {
+        let mut chain = (*ci).next as *const xr::BaseInStructure;
+        while !chain.is_null() {
+            let candidate = &*chain;
+            layer_log!(
+                info,
+                "[ClearXR Layer] hook_create_session saw create-info chain struct {:?}.",
+                candidate.ty
+            );
+            chain = candidate.next;
+        }
+        layer_log!(
+            warn,
+            "[ClearXR Layer] Session created without XR_KHR_vulkan_enable binding; dashboard overlay spike is inactive."
+        );
+        state.overlay = None;
+    }
+
+    let _ = instance;
+    result
+}
+
+unsafe extern "system" fn hook_get_system_properties(
+    instance: xr::Instance,
+    system_id: xr::SystemId,
+    properties: *mut xr::SystemProperties,
+) -> xr::Result {
     let guard = LAYER.lock().unwrap();
     let state = match guard.as_ref() {
         Some(s) => s,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
-    (state.next.create_session)(instance, ci, session)
+
+    let result = (state.next.get_system_properties)(instance, system_id, properties);
+    if result != xr::Result::SUCCESS || properties.is_null() {
+        return result;
+    }
+
+    let props = &*properties;
+    let system_name = system_name_to_string(&props.system_name);
+    layer_log!(
+        info,
+        "[ClearXR Layer] xrGetSystemProperties system_id={} vendor_id={} system_name={:?} orientation_tracking={} position_tracking={}",
+        system_id.into_raw(),
+        props.vendor_id,
+        system_name,
+        props.tracking_properties.orientation_tracking,
+        props.tracking_properties.position_tracking
+    );
+
+    result
 }
 
 unsafe extern "system" fn hook_destroy_session(session: xr::Session) -> xr::Result {
-    let guard = LAYER.lock().unwrap();
-    let state = match guard.as_ref() {
+    let mut guard = LAYER.lock().unwrap();
+    let state = match guard.as_mut() {
         Some(s) => s,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
+    if let Some(mut overlay) = state.overlay.take() {
+        if overlay.is_for_session(session) {
+            overlay.destroy(&state.next);
+            layer_log!(info, "[ClearXR Layer] Dashboard overlay detached from session {:?}.", session);
+        } else {
+            state.overlay = Some(overlay);
+        }
+    }
     (state.next.destroy_session)(session)
 }
 
@@ -731,12 +1068,71 @@ unsafe extern "system" fn hook_suggest_bindings(
                     path_str
                 );
                 state.haptic_actions.insert((action_raw, hand));
+            } else if component.starts_with("/input/") {
+                layer_log!(
+                    info,
+                    "[ClearXR Layer] Saw input binding without override: action 0x{:x} {:?} {}",
+                    action_raw,
+                    hand,
+                    path_str
+                );
             }
         }
     }
 
     // Pass through to next layer
     (state.next.suggest_interaction_profile_bindings)(instance, suggested_bindings)
+}
+
+unsafe extern "system" fn hook_get_current_interaction_profile(
+    session: xr::Session,
+    top_level_user_path: xr::Path,
+    interaction_profile: *mut xr::InteractionProfileState,
+) -> xr::Result {
+    let mut guard = LAYER.lock().unwrap();
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return xr::Result::ERROR_HANDLE_INVALID,
+    };
+
+    let result = (state.next.get_current_interaction_profile)(
+        session,
+        top_level_user_path,
+        interaction_profile,
+    );
+    if result != xr::Result::SUCCESS || interaction_profile.is_null() {
+        return result;
+    }
+
+    let current = &mut *interaction_profile;
+    let top_level_user_path_str = path_to_string(&state.next, state.instance, top_level_user_path)
+        .unwrap_or_else(|| format!("<unresolved {:?}>", top_level_user_path));
+    let current_profile_str = path_to_string(&state.next, state.instance, current.interaction_profile)
+        .unwrap_or_else(|| format!("<unresolved {:?}>", current.interaction_profile));
+    layer_log!(
+        info,
+        "[ClearXR Layer] xrGetCurrentInteractionProfile top_level_user_path={} returned_profile={}",
+        top_level_user_path_str,
+        current_profile_str
+    );
+
+    if current.interaction_profile == xr::Path::NULL && state.oculus_touch_profile != xr::Path::NULL {
+        current.interaction_profile = state.oculus_touch_profile;
+        let substituted_profile_str = path_to_string(
+            &state.next,
+            state.instance,
+            current.interaction_profile,
+        )
+        .unwrap_or_else(|| format!("<unresolved {:?}>", current.interaction_profile));
+        layer_log!(
+            info,
+            "[ClearXR Layer] Substituted Oculus Touch interaction profile for top-level path {} -> {}.",
+            top_level_user_path_str,
+            substituted_profile_str
+        );
+    }
+
+    result
 }
 
 unsafe extern "system" fn hook_sync_actions(
@@ -752,12 +1148,75 @@ unsafe extern "system" fn hook_sync_actions(
     // Pass through first
     let result = (state.next.sync_actions)(session, sync_info);
 
-    // Then poll the opaque channel
-    if let Some(ref mut ch) = state.opaque {
-        ch.poll();
-    }
+    poll_opaque_and_update_overlay(state);
 
     result
+}
+
+unsafe extern "system" fn hook_end_frame(
+    session: xr::Session,
+    frame_end_info: *const xr::FrameEndInfo,
+) -> xr::Result {
+    let mut guard = LAYER.lock().unwrap();
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return xr::Result::ERROR_HANDLE_INVALID,
+    };
+    if frame_end_info.is_null() {
+        return xr::Result::ERROR_VALIDATION_FAILURE;
+    }
+    layer_log!(
+        info,
+        "[ClearXR Layer] hook_end_frame entered for session {:?}.",
+        session
+    );
+    direct_trace(&format!(
+        "BUILD {} hook_end_frame entered session={:?}",
+        BUILD_MARKER,
+        session
+    ));
+
+    poll_opaque_and_update_overlay(state);
+
+    let overlay = match state.overlay.as_ref() {
+        Some(overlay) if overlay.is_for_session(session) && overlay.visible() => overlay,
+        _ => {
+            layer_log!(
+                info,
+                "[ClearXR Layer] hook_end_frame passing through without overlay."
+            );
+            return (state.next.end_frame)(session, frame_end_info);
+        }
+    };
+
+    let end_info = &*frame_end_info;
+    let base_layers = if end_info.layer_count == 0 || end_info.layers.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(end_info.layers, end_info.layer_count as usize)
+    };
+    let mut layers: Vec<*const xr::CompositionLayerBaseHeader> =
+        Vec::with_capacity(base_layers.len() + 1);
+    layers.extend_from_slice(base_layers);
+
+    let quad = overlay.quad_layer();
+    layers.push(&quad as *const xr::CompositionLayerQuad as *const xr::CompositionLayerBaseHeader);
+
+    let wrapped_end_info = xr::FrameEndInfo {
+        ty: end_info.ty,
+        next: end_info.next,
+        display_time: end_info.display_time,
+        environment_blend_mode: end_info.environment_blend_mode,
+        layer_count: layers.len() as u32,
+        layers: layers.as_ptr(),
+    };
+
+    layer_log!(
+        info,
+        "[ClearXR Layer] hook_end_frame appending dashboard quad to {} app layers.",
+        base_layers.len()
+    );
+    (state.next.end_frame)(session, &wrapped_end_info)
 }
 
 unsafe extern "system" fn hook_apply_haptic_feedback(

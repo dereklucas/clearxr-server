@@ -7,6 +7,8 @@
 use anyhow::Result;
 use ash::vk;
 use glam::Vec3;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
+use gpu_allocator::MemoryLocation;
 
 use crate::renderer::{load_spv, PushConstants};
 use crate::vk_backend::VkBackend;
@@ -28,18 +30,21 @@ pub struct PanelPushConstants {
     pub panel_up: [f32; 4],     // xyz = panel up axis (unit), w = dot_v
 }
 
+/// A Vulkan-backed texture panel for rendering 3D UI surfaces.
 pub struct LauncherPanel {
-    // Texture
+    /// The underlying Vulkan texture image.
     pub texture: vk::Image,
-    texture_memory: vk::DeviceMemory,
+    texture_alloc: Option<Allocation>,
     texture_view: vk::ImageView,
     sampler: vk::Sampler,
+    /// Texture width in pixels.
     pub tex_width: u32,
+    /// Texture height in pixels.
     pub tex_height: u32,
 
     // Staging buffer for CPU -> GPU texture uploads
     staging_buffer: vk::Buffer,
-    staging_memory: vk::DeviceMemory,
+    staging_alloc: Option<Allocation>,
     staging_mapped: *mut u8,
     _staging_size: vk::DeviceSize,
 
@@ -52,17 +57,20 @@ pub struct LauncherPanel {
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
 
-    // Panel placement in world space
+    /// Panel center position in world space.
     pub center: Vec3,
+    /// Panel width in world-space meters.
     pub width: f32,
+    /// Panel height in world-space meters.
     pub height: f32,
+    /// Panel opacity (0.0 = transparent, 1.0 = opaque).
     pub opacity: f32,
     /// Panel right axis in world space (default: +X)
     pub right_dir: Vec3,
     /// Panel up axis in world space (default: +Y)
     pub up_dir: Vec3,
 
-    // Has the texture been uploaded at least once?
+    /// Whether the texture has been uploaded at least once.
     pub texture_initialized: bool,
 
     // Has new pixel data been staged but not yet uploaded to the GPU?
@@ -79,6 +87,7 @@ unsafe impl Send for LauncherPanel {}
 unsafe impl Sync for LauncherPanel {}
 
 impl LauncherPanel {
+    /// Create a new panel with a Vulkan texture, staging buffer, and graphics pipeline.
     pub fn new(
         vk: &VkBackend,
         render_pass: vk::RenderPass,
@@ -108,20 +117,20 @@ impl LauncherPanel {
         };
         let texture = unsafe { device.create_image(&img_ci, None)? };
         let mem_reqs = unsafe { device.get_image_memory_requirements(texture) };
-        let mem_type = vk
-            .find_memory_type(mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            .ok_or_else(|| anyhow::anyhow!("No device-local memory for panel texture"))?;
-        let texture_memory = unsafe {
-            device.allocate_memory(
-                &vk::MemoryAllocateInfo {
-                    allocation_size: mem_reqs.size,
-                    memory_type_index: mem_type,
-                    ..Default::default()
-                },
-                None,
+        let texture_alloc = vk.allocate(&AllocationCreateDesc {
+            name: "panel_texture",
+            requirements: mem_reqs,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        unsafe {
+            device.bind_image_memory(
+                texture,
+                texture_alloc.memory(),
+                texture_alloc.offset(),
             )?
         };
-        unsafe { device.bind_image_memory(texture, texture_memory, 0)? };
 
         // ---- Image view ----
         let texture_view = unsafe {
@@ -165,26 +174,24 @@ impl LauncherPanel {
         };
         let staging_buffer = unsafe { device.create_buffer(&buf_ci, None)? };
         let buf_reqs = unsafe { device.get_buffer_memory_requirements(staging_buffer) };
-        let buf_mem_type = vk
-            .find_memory_type(
-                buf_reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
-            .ok_or_else(|| anyhow::anyhow!("No host-visible memory for staging buffer"))?;
-        let staging_memory = unsafe {
-            device.allocate_memory(
-                &vk::MemoryAllocateInfo {
-                    allocation_size: buf_reqs.size,
-                    memory_type_index: buf_mem_type,
-                    ..Default::default()
-                },
-                None,
+        let staging_alloc = vk.allocate(&AllocationCreateDesc {
+            name: "panel_staging",
+            requirements: buf_reqs,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        unsafe {
+            device.bind_buffer_memory(
+                staging_buffer,
+                staging_alloc.memory(),
+                staging_alloc.offset(),
             )?
         };
-        unsafe { device.bind_buffer_memory(staging_buffer, staging_memory, 0)? };
-        let staging_mapped = unsafe {
-            device.map_memory(staging_memory, 0, staging_size, vk::MemoryMapFlags::empty())?
-        } as *mut u8;
+        let staging_mapped = staging_alloc
+            .mapped_ptr()
+            .ok_or_else(|| anyhow::anyhow!("Staging buffer not host-mapped"))?
+            .as_ptr() as *mut u8;
 
         // ---- Descriptor set layout (one combined image sampler) ----
         let binding = vk::DescriptorSetLayoutBinding {
@@ -245,13 +252,13 @@ impl LauncherPanel {
 
         Ok(Self {
             texture,
-            texture_memory,
+            texture_alloc: Some(texture_alloc),
             texture_view,
             sampler,
             tex_width,
             tex_height,
             staging_buffer,
-            staging_memory,
+            staging_alloc: Some(staging_alloc),
             staging_mapped,
             _staging_size: staging_size,
             descriptor_set_layout,
@@ -621,7 +628,8 @@ impl LauncherPanel {
         }
     }
 
-    pub fn destroy(&mut self, device: &ash::Device) {
+    /// Release all Vulkan resources owned by this panel.
+    pub fn destroy(&mut self, device: &ash::Device, vk: &VkBackend) {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.pipeline_layout, None);
@@ -629,11 +637,14 @@ impl LauncherPanel {
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
             device.destroy_sampler(self.sampler, None);
             device.destroy_image_view(self.texture_view, None);
-            device.unmap_memory(self.staging_memory);
             device.destroy_buffer(self.staging_buffer, None);
-            device.free_memory(self.staging_memory, None);
-            device.destroy_image(self.texture, None);
-            device.free_memory(self.texture_memory, None);
+        }
+        if let Some(alloc) = self.staging_alloc.take() {
+            let _ = vk.free(alloc);
+        }
+        unsafe { device.destroy_image(self.texture, None) };
+        if let Some(alloc) = self.texture_alloc.take() {
+            let _ = vk.free(alloc);
         }
     }
 }

@@ -9,6 +9,8 @@ use ash::vk;
 use ash::vk::Handle; // for from_raw on non-dispatchable handles
 #[cfg(all(feature = "xr", target_os = "windows"))]
 use glam::Mat4;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
+use gpu_allocator::MemoryLocation;
 #[cfg(all(feature = "xr", target_os = "windows"))]
 use log::info;
 #[cfg(all(feature = "xr", target_os = "windows"))]
@@ -62,7 +64,7 @@ impl Default for HandData {
 #[allow(dead_code)] // Will be used when hand rendering is enabled
 pub struct HandUbo {
     pub buffer: vk::Buffer,
-    pub memory: vk::DeviceMemory,
+    alloc: Option<Allocation>,
     pub mapped: *mut HandData,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
     pub descriptor_pool: vk::DescriptorPool,
@@ -88,24 +90,19 @@ impl HandUbo {
         let buffer = unsafe { device.create_buffer(&buf_ci, None)? };
         let mem_reqs = unsafe { device.get_buffer_memory_requirements(buffer) };
 
-        let mem_type_idx = vk
-            .find_memory_type(
-                mem_reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
-            .ok_or_else(|| anyhow::anyhow!("No suitable memory type for hand UBO"))?;
+        let alloc = vk.allocate(&AllocationCreateDesc {
+            name: "hand_ubo",
+            requirements: mem_reqs,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        unsafe { device.bind_buffer_memory(buffer, alloc.memory(), alloc.offset())? };
 
-        let alloc_ci = vk::MemoryAllocateInfo {
-            allocation_size: mem_reqs.size,
-            memory_type_index: mem_type_idx,
-            ..Default::default()
-        };
-        let memory = unsafe { device.allocate_memory(&alloc_ci, None)? };
-        unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
-
-        let mapped = unsafe {
-            device.map_memory(memory, 0, ubo_size, vk::MemoryMapFlags::empty())?
-        } as *mut HandData;
+        let mapped = alloc
+            .mapped_ptr()
+            .ok_or_else(|| anyhow::anyhow!("Hand UBO not host-mapped"))?
+            .as_ptr() as *mut HandData;
 
         unsafe { std::ptr::write(mapped, HandData::default()) };
 
@@ -166,7 +163,7 @@ impl HandUbo {
 
         Ok(Self {
             buffer,
-            memory,
+            alloc: Some(alloc),
             mapped,
             descriptor_set_layout,
             descriptor_pool,
@@ -178,13 +175,14 @@ impl HandUbo {
         unsafe { std::ptr::copy_nonoverlapping(data, self.mapped, 1) };
     }
 
-    pub fn destroy(&mut self, device: &ash::Device) {
+    pub fn destroy(&mut self, device: &ash::Device, vk: &VkBackend) {
         unsafe {
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            device.unmap_memory(self.memory);
             device.destroy_buffer(self.buffer, None);
-            device.free_memory(self.memory, None);
+        }
+        if let Some(alloc) = self.alloc.take() {
+            let _ = vk.free(alloc);
         }
     }
 }
@@ -236,7 +234,7 @@ pub struct Renderer {
     fence: vk::Fence,
     // Hand tracking UBO resources
     hand_ubo: vk::Buffer,
-    hand_ubo_memory: vk::DeviceMemory,
+    hand_ubo_alloc: Option<Allocation>,
     hand_ubo_mapped: *mut HandData,
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
@@ -314,24 +312,19 @@ impl Renderer {
         let hand_ubo = unsafe { device.create_buffer(&buf_ci, None)? };
         let mem_reqs = unsafe { device.get_buffer_memory_requirements(hand_ubo) };
 
-        let mem_type_idx = vk
-            .find_memory_type(
-                mem_reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
-            .ok_or_else(|| anyhow::anyhow!("No suitable memory type for hand UBO"))?;
+        let hand_ubo_alloc = vk.allocate(&AllocationCreateDesc {
+            name: "renderer_hand_ubo",
+            requirements: mem_reqs,
+            location: MemoryLocation::CpuToGpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })?;
+        unsafe { device.bind_buffer_memory(hand_ubo, hand_ubo_alloc.memory(), hand_ubo_alloc.offset())? };
 
-        let alloc_ci = vk::MemoryAllocateInfo {
-            allocation_size: mem_reqs.size,
-            memory_type_index: mem_type_idx,
-            ..Default::default()
-        };
-        let hand_ubo_memory = unsafe { device.allocate_memory(&alloc_ci, None)? };
-        unsafe { device.bind_buffer_memory(hand_ubo, hand_ubo_memory, 0)? };
-
-        let hand_ubo_mapped = unsafe {
-            device.map_memory(hand_ubo_memory, 0, ubo_size, vk::MemoryMapFlags::empty())?
-        } as *mut HandData;
+        let hand_ubo_mapped = hand_ubo_alloc
+            .mapped_ptr()
+            .ok_or_else(|| anyhow::anyhow!("Hand UBO not host-mapped"))?
+            .as_ptr() as *mut HandData;
 
         // Zero-initialise the UBO
         unsafe {
@@ -426,7 +419,7 @@ impl Renderer {
             command_buffer,
             fence,
             hand_ubo,
-            hand_ubo_memory,
+            hand_ubo_alloc: Some(hand_ubo_alloc),
             hand_ubo_mapped,
             descriptor_set_layout,
             descriptor_pool,
@@ -572,17 +565,14 @@ impl Renderer {
         };
         let buffer = unsafe { device.create_buffer(&buf_ci, None).ok()? };
         let mem_reqs = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let mem_type = vk.find_memory_type(
-            mem_reqs.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )?;
-        let alloc = vk::MemoryAllocateInfo {
-            allocation_size: mem_reqs.size,
-            memory_type_index: mem_type,
-            ..Default::default()
-        };
-        let memory = unsafe { device.allocate_memory(&alloc, None).ok()? };
-        unsafe { device.bind_buffer_memory(buffer, memory, 0).ok()? };
+        let readback_alloc = vk.allocate(&AllocationCreateDesc {
+            name: "screenshot_readback",
+            requirements: mem_reqs,
+            location: MemoryLocation::GpuToCpu,
+            linear: true,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        }).ok()?;
+        unsafe { device.bind_buffer_memory(buffer, readback_alloc.memory(), readback_alloc.offset()).ok()? };
 
         // Allocate a one-shot command buffer
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -682,11 +672,10 @@ impl Renderer {
             device.queue_submit(vk.queue(), &[submit], fence).ok()?;
             device.wait_for_fences(&[fence], true, u64::MAX).ok()?;
 
-            // Map and read
-            let ptr = device.map_memory(memory, 0, size as u64, vk::MemoryMapFlags::empty()).ok()?;
+            // Read via mapped pointer (gpu-allocator maps GpuToCpu automatically)
+            let mapped = readback_alloc.mapped_ptr()?.as_ptr() as *const u8;
             let mut pixels = vec![0u8; size];
-            std::ptr::copy_nonoverlapping(ptr as *const u8, pixels.as_mut_ptr(), size);
-            device.unmap_memory(memory);
+            std::ptr::copy_nonoverlapping(mapped, pixels.as_mut_ptr(), size);
 
             // Swap B and R channels if the swapchain format is BGRA
             if format == vk::Format::B8G8R8A8_SRGB || format == vk::Format::B8G8R8A8_UNORM {
@@ -695,11 +684,13 @@ impl Renderer {
                 }
             }
 
-            // Cleanup
+            // Cleanup Vulkan objects
             device.destroy_fence(fence, None);
             device.free_command_buffers(vk.command_pool, &[cmd]);
             device.destroy_buffer(buffer, None);
-            device.free_memory(memory, None);
+
+            // Free the allocation via the sub-allocator
+            let _ = vk.free(readback_alloc);
 
             Some((pixels, width, height))
         }
@@ -725,9 +716,10 @@ impl Renderer {
             device.destroy_render_pass(self.render_pass, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);
             device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            device.unmap_memory(self.hand_ubo_memory);
             device.destroy_buffer(self.hand_ubo, None);
-            device.free_memory(self.hand_ubo_memory, None);
+        }
+        if let Some(alloc) = self.hand_ubo_alloc.take() {
+            let _ = vk.free(alloc);
         }
     }
 }

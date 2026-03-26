@@ -385,4 +385,103 @@ mod tests {
         let expected = Vec3::new(0.5, 1.3, 2.0);
         assert!((t.center - expected).length() < 0.01, "Head anchor offset wrong: {:?}", t.center);
     }
+
+    #[test]
+    fn panel_transform_default_values() {
+        let t = PanelTransform::default();
+        assert_eq!(t.anchor, PanelAnchor::World);
+        assert!(!t.grabbable);
+        assert!(t.width > 0.0);
+        assert!(t.height > 0.0);
+        assert!(t.opacity > 0.0 && t.opacity <= 1.0);
+    }
+
+    #[test]
+    fn panel_id_equality() {
+        let a = PanelId::new(1);
+        let b = PanelId::new(1);
+        let c = PanelId::new(2);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn hit_test_zero_size_panel() {
+        let panel = PanelTransform {
+            center: Vec3::new(0.0, 0.0, -2.0),
+            right_dir: Vec3::X,
+            up_dir: Vec3::Y,
+            width: 0.0,
+            height: 0.0,
+            opacity: 1.0,
+            anchor: PanelAnchor::World,
+            grabbable: false,
+        };
+        let origin = Vec3::ZERO;
+        let dir = Vec3::new(0.0, 0.0, -1.0);
+        // Zero-size panel: hit_test should not panic
+        let _ = panel.hit_test(origin, dir);
+    }
+
+    #[test]
+    fn hit_test_large_distance() {
+        let panel = PanelTransform {
+            center: Vec3::new(0.0, 0.0, -100.0),
+            right_dir: Vec3::X,
+            up_dir: Vec3::Y,
+            width: 200.0,
+            height: 200.0,
+            opacity: 1.0,
+            anchor: PanelAnchor::World,
+            grabbable: false,
+        };
+        let origin = Vec3::ZERO;
+        let dir = Vec3::new(0.0, 0.0, -1.0);
+        let result = panel.hit_test(origin, dir);
+        assert!(result.is_some());
+        let (u, v, t) = result.unwrap();
+        assert!((u - 0.5).abs() < 0.01);
+        assert!((v - 0.5).abs() < 0.01);
+        assert!((t - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn hit_test_rotated_panel() {
+        // Panel facing +X instead of +Z
+        let panel = PanelTransform {
+            center: Vec3::new(2.0, 0.0, 0.0),
+            right_dir: Vec3::NEG_Z,
+            up_dir: Vec3::Y,
+            width: 2.0,
+            height: 2.0,
+            opacity: 1.0,
+            anchor: PanelAnchor::World,
+            grabbable: false,
+        };
+        // Ray from origin pointing +X
+        let origin = Vec3::ZERO;
+        let dir = Vec3::new(1.0, 0.0, 0.0);
+        let result = panel.hit_test(origin, dir);
+        assert!(result.is_some(), "Ray should hit rotated panel");
+        let (u, v, t) = result.unwrap();
+        assert!((u - 0.5).abs() < 0.01);
+        assert!((v - 0.5).abs() < 0.01);
+        assert!((t - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cycle_anchor_full_loop_returns_to_world() {
+        let mut t = PanelTransform::default();
+        for _ in 0..5 {
+            t.cycle_anchor();
+        }
+        assert_eq!(t.anchor, PanelAnchor::World, "5 cycles should return to World");
+    }
+
+    #[test]
+    fn hand_enum_equality() {
+        assert_eq!(Hand::Left, Hand::Left);
+        assert_eq!(Hand::Right, Hand::Right);
+        assert_ne!(Hand::Left, Hand::Right);
+    }
 }
