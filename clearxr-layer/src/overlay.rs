@@ -168,10 +168,19 @@ impl DashboardOverlay {
 
     /// Forward controller data to the dashboard process via named pipe.
     pub fn send_controller_input(&mut self, pkt: &SpatialControllerPacket) {
+        static PIPE_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let pipe_count = PIPE_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         #[cfg(target_os = "windows")]
         {
             if self.pipe.is_none() {
                 self.pipe = connect_pipe();
+                if pipe_count % 360 == 0 {
+                    log::info!(
+                        "[ClearXR Layer] Pipe connect attempt: {}",
+                        if self.pipe.is_some() { "SUCCESS" } else { "not available yet" }
+                    );
+                }
             }
             if let Some(handle) = self.pipe {
                 let bytes = unsafe {

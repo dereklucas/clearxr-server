@@ -114,11 +114,21 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
 
     log::info!("[ClearXR Dashboard] Render loop starting.");
 
+    let mut diag_counter = 0u32;
+
     while keep_running.load(Ordering::Relaxed) {
         let frame_start = std::time::Instant::now();
+        diag_counter += 1;
 
         // Read controller input from pipe
         if let Some(pkt) = pipe.try_read() {
+            if diag_counter % 360 == 0 {
+                let active = pkt.active_hands;
+                log::info!(
+                    "[ClearXR Dashboard] Pipe received packet: active_hands=0x{:02x}",
+                    active
+                );
+            }
             // Extract menu button for visibility toggle
             let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
             let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
@@ -135,6 +145,15 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
             trigger = result.trigger;
             secondary = result.secondary;
             scroll_delta = result.scroll;
+
+            if diag_counter % 360 == 0 {
+                log::info!(
+                    "[ClearXR Dashboard] Ray-quad result: pointer_uv={:?} trigger={} scroll={:.1}",
+                    pointer_uv, trigger, scroll_delta
+                );
+            }
+        } else if diag_counter % 360 == 0 {
+            log::info!("[ClearXR Dashboard] No pipe data this frame (pipe not connected or no data)");
         }
 
         // Poll screen capture
