@@ -12,22 +12,15 @@ fn main() {
     let vendor_root = manifest_dir.join("..").join("vendor");
     let clearxr_space_root = manifest_dir.join("..").join("clearxr-space");
     let clearxr_layer_root = manifest_dir.join("..").join("clearxr-layer");
-    let workspace_target_dir = PathBuf::from(
-        env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string()),
-    );
     println!("cargo:rerun-if-changed={}", vendor_root.display());
     println!(
         "cargo:rerun-if-changed={}",
         clearxr_layer_root.join("clear-xr-layer.json").display()
     );
-    for candidate in clearxr_exe_candidates(&workspace_target_dir, &clearxr_space_root, &profile) {
+    for candidate in clearxr_exe_candidates(&clearxr_space_root, &profile) {
         println!("cargo:rerun-if-changed={}", candidate.display());
     }
-    for candidate in clearxr_layer_dll_candidates(
-        &workspace_target_dir,
-        &clearxr_layer_root,
-        &profile,
-    ) {
+    for candidate in clearxr_layer_dll_candidates(&clearxr_layer_root, &profile) {
         println!("cargo:rerun-if-changed={}", candidate.display());
     }
 
@@ -63,10 +56,6 @@ fn stage_vendor_runtime(
                 "could not locate target profile directory",
             )
         })?;
-    let workspace_target_dir = target_dir
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "could not locate target root"))?;
 
     copy_vendor_item(&vendor_root.join("Server"), &target_dir.join("Server"))?;
     copy_vendor_item(
@@ -82,13 +71,11 @@ fn stage_vendor_runtime(
         &target_dir.join("openxr_loader.dll"),
     )?;
 
-    if let Some(clearxr_exe) = find_clearxr_exe(&workspace_target_dir, clearxr_space_root, &profile)
-    {
+    if let Some(clearxr_exe) = find_clearxr_exe(clearxr_space_root, &profile) {
         copy_vendor_item(&clearxr_exe, &target_dir.join("clear-xr.exe"))?;
     } else {
         println!(
-            "cargo:warning=clear-xr.exe was not found under {} or {}. Build clearxr-space first if you want clearxr-streamer to stage it automatically.",
-            workspace_target_dir.display(),
+            "cargo:warning=clear-xr.exe was not found under {}. Build clearxr-space first if you want clearxr-streamer to stage it automatically.",
             clearxr_space_root.join("target").display()
         );
     }
@@ -97,14 +84,11 @@ fn stage_vendor_runtime(
         &clearxr_layer_root.join("clear-xr-layer.json"),
         &target_dir.join("clear-xr-layer.json"),
     )?;
-    if let Some(layer_dll) =
-        find_clearxr_layer_dll(&workspace_target_dir, clearxr_layer_root, profile)
-    {
+    if let Some(layer_dll) = find_clearxr_layer_dll(clearxr_layer_root, profile) {
         copy_vendor_item(&layer_dll, &target_dir.join("clear_xr_layer.dll"))?;
     } else {
         println!(
-            "cargo:warning=clear_xr_layer.dll was not found under {} or {}. Build clearxr-layer first if you want clearxr-streamer to stage it automatically.",
-            workspace_target_dir.display(),
+            "cargo:warning=clear_xr_layer.dll was not found under {}. Build clearxr-layer first if you want clearxr-streamer to stage it automatically.",
             clearxr_layer_root.join("target").display()
         );
     }
@@ -112,68 +96,40 @@ fn stage_vendor_runtime(
     Ok(())
 }
 
-fn find_clearxr_exe(
-    workspace_target_dir: &Path,
-    clearxr_space_root: &Path,
-    profile: &str,
-) -> Option<PathBuf> {
-    clearxr_exe_candidates(workspace_target_dir, clearxr_space_root, profile)
+fn find_clearxr_exe(clearxr_space_root: &Path, profile: &str) -> Option<PathBuf> {
+    clearxr_exe_candidates(clearxr_space_root, profile)
         .into_iter()
         .find(|path| path.exists())
 }
 
-fn clearxr_exe_candidates(
-    workspace_target_dir: &Path,
-    clearxr_space_root: &Path,
-    profile: &str,
-) -> Vec<PathBuf> {
+fn clearxr_exe_candidates(clearxr_space_root: &Path, profile: &str) -> Vec<PathBuf> {
     let target_root = clearxr_space_root.join("target");
-    let mut candidates = vec![
-        workspace_target_dir.join(profile).join("clear-xr.exe"),
-        workspace_target_dir.join("clear-xr.exe"),
-        target_root.join(profile).join("clear-xr.exe"),
-    ];
+    let mut candidates = vec![target_root.join(profile).join("clear-xr.exe")];
 
     if profile != "release" {
-        candidates.push(workspace_target_dir.join("release").join("clear-xr.exe"));
         candidates.push(target_root.join("release").join("clear-xr.exe"));
     }
     if profile != "debug" {
-        candidates.push(workspace_target_dir.join("debug").join("clear-xr.exe"));
         candidates.push(target_root.join("debug").join("clear-xr.exe"));
     }
 
     candidates
 }
 
-fn find_clearxr_layer_dll(
-    workspace_target_dir: &Path,
-    clearxr_layer_root: &Path,
-    profile: &str,
-) -> Option<PathBuf> {
-    clearxr_layer_dll_candidates(workspace_target_dir, clearxr_layer_root, profile)
+fn find_clearxr_layer_dll(clearxr_layer_root: &Path, profile: &str) -> Option<PathBuf> {
+    clearxr_layer_dll_candidates(clearxr_layer_root, profile)
         .into_iter()
         .find(|path| path.exists())
 }
 
-fn clearxr_layer_dll_candidates(
-    workspace_target_dir: &Path,
-    clearxr_layer_root: &Path,
-    profile: &str,
-) -> Vec<PathBuf> {
+fn clearxr_layer_dll_candidates(clearxr_layer_root: &Path, profile: &str) -> Vec<PathBuf> {
     let target_root = clearxr_layer_root.join("target");
-    let mut candidates = vec![
-        workspace_target_dir.join(profile).join("clear_xr_layer.dll"),
-        workspace_target_dir.join("clear_xr_layer.dll"),
-        target_root.join(profile).join("clear_xr_layer.dll"),
-    ];
+    let mut candidates = vec![target_root.join(profile).join("clear_xr_layer.dll")];
 
     if profile != "release" {
-        candidates.push(workspace_target_dir.join("release").join("clear_xr_layer.dll"));
         candidates.push(target_root.join("release").join("clear_xr_layer.dll"));
     }
     if profile != "debug" {
-        candidates.push(workspace_target_dir.join("debug").join("clear_xr_layer.dll"));
         candidates.push(target_root.join("debug").join("clear_xr_layer.dll"));
     }
 
@@ -181,10 +137,6 @@ fn clearxr_layer_dll_candidates(
 }
 
 fn copy_vendor_item(source: &Path, destination: &Path) -> io::Result<()> {
-    if same_path(source, destination) {
-        return Ok(());
-    }
-
     if source.is_dir() {
         copy_dir_recursive(source, destination)
     } else {
@@ -197,10 +149,6 @@ fn copy_vendor_item(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> io::Result<()> {
-    if same_path(source, destination) {
-        return Ok(());
-    }
-
     fs::create_dir_all(destination)?;
 
     for entry in fs::read_dir(source)? {
@@ -219,15 +167,4 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> io::Result<()> {
     }
 
     Ok(())
-}
-
-fn same_path(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
 }

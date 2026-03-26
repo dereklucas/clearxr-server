@@ -6,9 +6,6 @@
 /// CloudXR bugs.
 
 mod opaque;
-#[path = "../../clearxr-space/src/ui/egui_gpu_renderer.rs"]
-mod egui_gpu_renderer;
-mod renderer;
 mod vk_backend;
 
 use opaque::*;
@@ -810,12 +807,14 @@ unsafe fn find_vulkan_binding<'a>(
 
 unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     let mut menu_down = false;
+    let mut pkt_copy = None;
     if let Some(ref mut ch) = state.opaque {
         ch.poll();
         if let Some(pkt) = ch.latest {
             let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
             let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
             menu_down = left_menu || right_menu;
+            pkt_copy = Some(pkt);
         }
     }
 
@@ -826,6 +825,10 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
                 "[ClearXR Layer] Dashboard overlay visibility toggled -> {}.",
                 overlay.visible()
             );
+        }
+        // Feed controller input for ray-quad hit-testing
+        if let Some(ref pkt) = pkt_copy {
+            overlay.send_controller_input(pkt);
         }
     }
 }
@@ -1165,26 +1168,21 @@ unsafe extern "system" fn hook_end_frame(
     if frame_end_info.is_null() {
         return xr::Result::ERROR_VALIDATION_FAILURE;
     }
-    layer_log!(
-        info,
-        "[ClearXR Layer] hook_end_frame entered for session {:?}.",
-        session
-    );
-    direct_trace(&format!(
-        "BUILD {} hook_end_frame entered session={:?}",
-        BUILD_MARKER,
-        session
-    ));
 
     poll_opaque_and_update_overlay(state);
 
-    let overlay = match state.overlay.as_ref() {
-        Some(overlay) if overlay.is_for_session(session) && overlay.visible() => overlay,
+    let overlay_quad = match state.overlay.as_mut() {
+        Some(overlay) if overlay.is_for_session(session) && overlay.visible() => {
+            if let Err(err) = overlay.render_frame(&state.next) {
+                layer_log!(
+                    warn,
+                    "[ClearXR Layer] Dashboard overlay render failed: {}",
+                    err
+                );
+            }
+            overlay.quad_layer()
+        }
         _ => {
-            layer_log!(
-                info,
-                "[ClearXR Layer] hook_end_frame passing through without overlay."
-            );
             return (state.next.end_frame)(session, frame_end_info);
         }
     };
@@ -1199,8 +1197,9 @@ unsafe extern "system" fn hook_end_frame(
         Vec::with_capacity(base_layers.len() + 1);
     layers.extend_from_slice(base_layers);
 
-    let quad = overlay.quad_layer();
-    layers.push(&quad as *const xr::CompositionLayerQuad as *const xr::CompositionLayerBaseHeader);
+    layers.push(
+        &overlay_quad as *const xr::CompositionLayerQuad as *const xr::CompositionLayerBaseHeader
+    );
 
     let wrapped_end_info = xr::FrameEndInfo {
         ty: end_info.ty,
@@ -1211,11 +1210,6 @@ unsafe extern "system" fn hook_end_frame(
         layers: layers.as_ptr(),
     };
 
-    layer_log!(
-        info,
-        "[ClearXR Layer] hook_end_frame appending dashboard quad to {} app layers.",
-        base_layers.len()
-    );
     (state.next.end_frame)(session, &wrapped_end_info)
 }
 

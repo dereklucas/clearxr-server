@@ -1,5 +1,6 @@
 .claude/**
 **/target/
+**/target-local/
 vendor/**
 !vendor/openxr_loader.dll
 !vendor/Server/
@@ -7,3 +8,4 @@ vendor/Server/**
 !vendor/Server/cloudxr-runtime.yaml
 Stream-Manager-*
 cloudxr-runtime_*
+/target-scratch-layer

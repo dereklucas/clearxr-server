@@ -48,6 +48,14 @@ impl VkBackend {
         &self.device
     }
 
+    pub fn instance_ref(&self) -> &Instance {
+        &self.instance
+    }
+
+    pub fn physical_device(&self) -> vk::PhysicalDevice {
+        self.physical_device
+    }
+
     pub fn queue(&self) -> vk::Queue {
         self.queue
     }

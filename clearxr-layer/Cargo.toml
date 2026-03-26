@@ -2,7 +2,7 @@
 name = "clear-xr-layer"
 version = "0.1.0"
 edition = "2021"
-description = "OpenXR API layer that injects controller events from NV opaque data channel"
+description = "OpenXR API layer — thin overlay that reads dashboard frames from shared memory"
 
 [lib]
 crate-type = ["cdylib"]
@@ -12,7 +12,14 @@ name = "clear_xr_layer"
 anyhow = "1"
 openxr-sys = "0.10"
 ash = "0.38"
-egui = "0.31"
-epaint = "0.31"
 log = "0.4"
 env_logger = "0.11"
+shared_memory = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }

@@ -1,0 +1,37 @@
+[package]
+name = "clearxr-dashboard"
+version = "0.1.0"
+edition = "2021"
+description = "Headless dashboard renderer for ClearXR — runs in the streamer process, shares frames with the layer via SHM"
+
+[lib]
+name = "clearxr_dashboard"
+
+[dependencies]
+ash = "0.38"
+egui = "0.31"
+egui-ash-renderer = "0.8"
+epaint = "0.31"
+steamlocate = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "6"
+shared_memory = "0.12"
+log = "0.4"
+anyhow = "1"
+env_logger = "0.11"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Security",
+    "Win32_Foundation",
+] }

@@ -37,7 +37,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            bundle_id: "vgood.clearxr.client".to_string(),
+            bundle_id: "app.clearxr.client".to_string(),
             host_address: "127.0.0.1".to_string(),
             port: 55_000,
             force_qr_code: false,

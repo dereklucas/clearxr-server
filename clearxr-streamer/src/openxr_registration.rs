@@ -32,12 +32,14 @@ const DEREGISTER_LAYER_ELEVATED_ARG: &str = "--clearxr-deregister-layer-elevated
 #[derive(Debug, Clone)]
 struct LayerRegistration {
     scope: String,
+    order: u32,
 }
 
 #[derive(Debug, Clone)]
 struct LayerRegistryEntry {
     registry_name: String,
     manifest_path: PathBuf,
+    order: u32,
 }
 
 pub fn get_openxr_registration_status() -> Result<OpenXrRegistrationStatus> {
@@ -99,8 +101,8 @@ fn get_openxr_registration_status_impl() -> Result<OpenXrRegistrationStatus> {
         )
     } else if let Some(registration) = &layer_registration {
         format!(
-            "Clear XR layer is registered in {}.",
-            registration.scope
+            "Clear XR layer is registered in {} at position {}.",
+            registration.scope, registration.order
         )
     } else {
         "Clear XR layer is not registered yet.".to_string()
@@ -130,46 +132,31 @@ fn register_openxr_runtime_and_layer_impl() -> Result<OpenXrRegistrationStatus> 
         .context("failed to open the current-user OpenXR layer registry key")?;
     let current_user_entries = read_layer_registry_entries(&layer_key)
         .context("failed to enumerate current-user OpenXR layer entries")?;
-    let stale_entries = find_matching_layer_entries(&current_user_entries, &layer_manifest_path);
-    for entry in stale_entries
-        .iter()
-        .filter(|entry| !paths_match(&entry.manifest_path, &layer_manifest_path))
-    {
+    if let Some(existing) = find_layer_entry(&current_user_entries, &layer_manifest_path) {
         info!(
-            "Removing stale Clear XR OpenXR layer registration in HKEY_CURRENT_USER ({})",
-            entry.manifest_path.display()
+            "Clear XR OpenXR layer is already registered in HKEY_CURRENT_USER at position {} ({})",
+            existing.order, layer_manifest
         );
-        layer_key
-            .remove_value(&entry.registry_name)
-            .context("failed to remove a stale Clear XR OpenXR layer registration")?;
-    }
-
-    if let Some(existing) = find_layer_entry(&read_layer_registry_entries(&layer_key)?, &layer_manifest_path) {
-        info!(
-            "Clear XR OpenXR layer is already registered in HKEY_CURRENT_USER ({})",
-            existing.manifest_path.display()
-        );
-        if existing.registry_name != layer_manifest {
-            layer_key
-                .remove_value(&existing.registry_name)
-                .context("failed to replace the current-user Clear XR OpenXR layer registration")?;
-            layer_key
-                .set_value(&layer_manifest, &Value::from(0u32))
-                .context("failed to normalize the current-user Clear XR OpenXR layer registration")?;
-        } else {
-            layer_key
-                .set_value(&layer_manifest, &Value::from(0u32))
-                .context("failed to keep the current-user Clear XR OpenXR layer enabled")?;
-        }
     } else {
+        let next_order = next_layer_order(&current_user_entries);
+        for entry in &current_user_entries {
+            info!(
+                "Found existing OpenXR layer entry in HKEY_CURRENT_USER at position {}: {}",
+                entry.order,
+                entry.manifest_path.display()
+            );
+        }
         info!(
-            "Registering Clear XR OpenXR layer in HKEY_CURRENT_USER ({})",
-            layer_manifest
+            "Registering Clear XR OpenXR layer in HKEY_CURRENT_USER at position {} ({})",
+            next_order, layer_manifest
         );
         layer_key
-            .set_value(&layer_manifest, &Value::from(0u32))
+            .set_value(&layer_manifest, &Value::from(next_order))
             .context("failed to register the Clear XR OpenXR layer")?;
-        info!("Registered Clear XR OpenXR layer successfully");
+        info!(
+            "Registered Clear XR OpenXR layer successfully at position {}",
+            next_order
+        );
     }
 
     let current_runtime = read_active_runtime_path();
@@ -468,9 +455,10 @@ fn read_layer_registration(layer_manifest_path: &Path) -> Option<LayerRegistrati
         .ok()
         .and_then(|key| read_layer_registry_entries(&key).ok())
         .and_then(|entries| find_layer_entry(&entries, layer_manifest_path).cloned());
-    if current_user_entry.is_some() {
+    if let Some(entry) = current_user_entry {
         return Some(LayerRegistration {
             scope: "HKEY_CURRENT_USER".to_string(),
+            order: entry.order,
         });
     }
 
@@ -479,24 +467,37 @@ fn read_layer_registration(layer_manifest_path: &Path) -> Option<LayerRegistrati
         .ok()
         .and_then(|key| read_layer_registry_entries(&key).ok())
         .and_then(|entries| find_layer_entry(&entries, layer_manifest_path).cloned());
-    local_machine_entry.map(|_| LayerRegistration {
+    local_machine_entry.map(|entry| LayerRegistration {
         scope: "HKEY_LOCAL_MACHINE".to_string(),
+        order: entry.order,
     })
 }
 
 #[cfg(windows)]
 fn read_layer_registry_entries(key: &Key) -> Result<Vec<LayerRegistryEntry>> {
     let mut entries = Vec::new();
-    for (name, _value) in key.values()? {
+    for (name, value) in key.values()? {
         let manifest_path = match path_from_registry_string(&name) {
             Some(path) => path,
             None => continue,
         };
+        let order = match u32::try_from(value) {
+            Ok(order) => order,
+            Err(_) => continue,
+        };
         entries.push(LayerRegistryEntry {
             registry_name: name,
             manifest_path,
+            order,
         });
     }
+
+    entries.sort_by(|left, right| {
+        left.order.cmp(&right.order).then_with(|| {
+            normalize_for_compare(&left.manifest_path)
+                .cmp(&normalize_for_compare(&right.manifest_path))
+        })
+    });
     Ok(entries)
 }
 
@@ -522,6 +523,15 @@ fn find_matching_layer_entries<'a>(
 }
 
 #[cfg(windows)]
+fn next_layer_order(entries: &[LayerRegistryEntry]) -> u32 {
+    entries
+        .iter()
+        .map(|entry| entry.order)
+        .max()
+        .map_or(0, |order| order.saturating_add(1))
+}
+
+#[cfg(windows)]
 fn remove_matching_layer_registrations(
     root: &Key,
     scope: &str,
@@ -537,8 +547,9 @@ fn remove_matching_layer_registrations(
 
     for entry in matches {
         info!(
-            "Removing Clear XR OpenXR layer registration from {} ({})",
+            "Removing Clear XR OpenXR layer registration from {} at position {} ({})",
             scope,
+            entry.order,
             entry.manifest_path.display()
         );
         key.remove_value(&entry.registry_name)?;
@@ -797,7 +808,8 @@ fn version_components(version: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_release_versions, normalize_for_compare, runtime_manifest_search_roots,
+        compare_release_versions, next_layer_order, normalize_for_compare,
+        runtime_manifest_search_roots, LayerRegistryEntry,
     };
 
     #[test]
@@ -829,4 +841,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn next_layer_order_appends_after_highest_existing_position() {
+        let entries = vec![
+            LayerRegistryEntry {
+                registry_name: r"C:\layers\first.json".to_string(),
+                manifest_path: std::path::PathBuf::from(r"C:\layers\first.json"),
+                order: 0,
+            },
+            LayerRegistryEntry {
+                registry_name: r"C:\layers\second.json".to_string(),
+                manifest_path: std::path::PathBuf::from(r"C:\layers\second.json"),
+                order: 2,
+            },
+        ];
+
+        assert_eq!(next_layer_order(&entries), 3);
+    }
 }

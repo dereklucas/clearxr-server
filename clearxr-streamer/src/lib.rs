@@ -2,6 +2,7 @@ mod app_state;
 mod bonjour;
 mod cloudxr;
 mod commands;
+pub mod dashboard_service;
 mod job_object;
 mod models;
 mod openxr_registration;

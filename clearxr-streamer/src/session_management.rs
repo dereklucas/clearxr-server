@@ -28,6 +28,7 @@ use crate::settings::load_settings;
 struct SessionRuntimeState {
     previous_session_status: Option<String>,
     clearxr_process: Option<StdChild>,
+    dashboard: Option<clearxr_dashboard::DashboardService>,
 }
 
 impl Default for SessionRuntimeState {
@@ -35,6 +36,7 @@ impl Default for SessionRuntimeState {
         Self {
             previous_session_status: None,
             clearxr_process: None,
+            dashboard: None,
         }
     }
 }
@@ -578,6 +580,18 @@ fn spawn_default_app_launch_if_enabled(
                 clearxr_exe_path.display()
             );
             return;
+        }
+
+        // Start the dashboard rendering service (SHM + named pipe for layer overlay)
+        if runtime_state.dashboard.is_none() {
+            match crate::dashboard_service::start() {
+                Ok(service) => {
+                    runtime_state.dashboard = Some(service);
+                }
+                Err(error) => {
+                    warn!("Failed to start dashboard service: {error}");
+                }
+            }
         }
 
         match StdCommand::new(&clearxr_exe_path).spawn() {
