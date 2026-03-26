@@ -37,6 +37,10 @@ pub struct EguiPanelRenderer {
     // Pointer input state
     pointer_pos: Option<Pos2>,
     has_rendered: bool,
+
+    // Button state tracking (for edge detection)
+    prev_button_pressed: bool,
+    prev_secondary_pressed: bool,
 }
 
 unsafe impl Send for EguiPanelRenderer {}
@@ -98,6 +102,8 @@ impl EguiPanelRenderer {
             fence,
             pointer_pos: None,
             has_rendered: false,
+            prev_button_pressed: false,
+            prev_secondary_pressed: false,
         })
     }
 
@@ -116,6 +122,11 @@ impl EguiPanelRenderer {
         self.pointer_pos = None;
     }
 
+    /// Returns true if egui wants keyboard input (e.g. a TextEdit has focus).
+    pub fn wants_keyboard_input(&self) -> bool {
+        self.ctx.wants_keyboard_input()
+    }
+
     // ------------------------------------------------------------------ //
     //  Frame rendering
     // ------------------------------------------------------------------ //
@@ -124,14 +135,23 @@ impl EguiPanelRenderer {
     ///
     /// The target image must have `COLOR_ATTACHMENT` usage and `R8G8B8A8_SRGB`
     /// format. After this call the image is in `SHADER_READ_ONLY_OPTIMAL`.
-    ///
     /// Returns `true` if the image was updated.
+    ///
+    /// `click` – true for one frame to send instant press+release (for egui buttons).
+    /// `button_pressed` – true while the primary trigger is held (for drag/select).
+    /// `secondary_pressed` – true while the grip/squeeze is held (right-click).
+    /// `scroll_delta` – vertical scroll amount from thumbstick (pixels).
+    /// `pending_text` – characters queued by the virtual keyboard.
     pub fn run(
         &mut self,
         vk: &VkBackend,
         target_image: vk::Image,
         target_view_format: vk::Format,
         click: bool,
+        button_pressed: bool,
+        secondary_pressed: bool,
+        scroll_delta: f32,
+        pending_text: &[String],
         build_ui: impl FnMut(&Context),
     ) -> bool {
         // ---- Build egui RawInput ----
@@ -145,6 +165,8 @@ impl EguiPanelRenderer {
 
         if let Some(pos) = self.pointer_pos {
             raw_input.events.push(Event::PointerMoved(pos));
+
+            // Instant click: press+release in one frame (for egui buttons/tabs)
             if click {
                 raw_input.events.push(Event::PointerButton {
                     pos,
@@ -158,6 +180,60 @@ impl EguiPanelRenderer {
                     pressed: false,
                     modifiers: Default::default(),
                 });
+            }
+
+            // Continuous primary button: send press/release on state change (for drag/select)
+            if button_pressed != self.prev_button_pressed {
+                raw_input.events.push(Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: button_pressed,
+                    modifiers: Default::default(),
+                });
+            }
+
+            // Secondary button (right-click): send press/release on state change
+            if secondary_pressed != self.prev_secondary_pressed {
+                raw_input.events.push(Event::PointerButton {
+                    pos,
+                    button: PointerButton::Secondary,
+                    pressed: secondary_pressed,
+                    modifiers: Default::default(),
+                });
+            }
+        }
+        self.prev_button_pressed = button_pressed;
+        self.prev_secondary_pressed = secondary_pressed;
+
+        // Thumbstick scroll
+        if scroll_delta.abs() > 0.01 {
+            raw_input.events.push(Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, scroll_delta),
+                modifiers: Default::default(),
+            });
+        }
+
+        // Virtual keyboard text input
+        for text in pending_text {
+            if text == "\x08" {
+                // Backspace sentinel from virtual keyboard
+                raw_input.events.push(Event::Key {
+                    key: egui::Key::Backspace,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                    physical_key: None,
+                });
+                raw_input.events.push(Event::Key {
+                    key: egui::Key::Backspace,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: Default::default(),
+                    physical_key: None,
+                });
+            } else {
+                raw_input.events.push(Event::Text(text.clone()));
             }
         }
 

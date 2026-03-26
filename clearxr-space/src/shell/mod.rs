@@ -84,7 +84,7 @@ impl Shell {
     pub fn tick(&mut self, vk: &VkBackend, controller: &ControllerState) -> ShellFrame {
         let mut haptic: [Option<HapticPulse>; 2] = [None, None];
 
-        // 1. Clear pointer state
+        // 1. Clear pointer state + release stuck buttons if not pointing at anything
         self.dashboard.pointer_leave();
         self.dashboard.panel.dot_uv = None;
 
@@ -159,6 +159,7 @@ impl Shell {
                         }
                     } else if *panel_id == SCREEN_PANEL_ID {
                         self.dashboard.screen_capture.inject_mouse_move(*u, *v);
+                        self.dashboard.last_screen_uv = (*u, *v);
                     }
                 }
                 InputEvent::PointerDown { hand, u, v } => {
@@ -172,9 +173,17 @@ impl Shell {
                         amplitude: 0.2,
                     });
                     if *panel_id == DASHBOARD_PANEL_ID {
-                        self.dashboard.click();
+                        self.dashboard.click();        // instant for egui buttons
+                        self.dashboard.trigger_down(); // continuous for drag/select
                     } else if *panel_id == SCREEN_PANEL_ID {
-                        self.dashboard.screen_capture.inject_mouse_click(*u, *v);
+                        self.dashboard.screen_capture.inject_mouse_down(*u, *v);
+                    }
+                }
+                InputEvent::PointerUp { hand: _, u: _, v: _ } => {
+                    if *panel_id == DASHBOARD_PANEL_ID {
+                        self.dashboard.trigger_up();
+                    } else if *panel_id == SCREEN_PANEL_ID {
+                        self.dashboard.screen_capture.inject_mouse_up();
                     }
                 }
                 InputEvent::GrabStart {
@@ -221,6 +230,26 @@ impl Shell {
                 }
                 _ => {}
             }
+        }
+
+        // 4b. Safety: release trigger/secondary if no hand is actually pressing
+        // (prevents stuck buttons when pointer leaves all panels)
+        let any_trigger = (controller.left.active && controller.left.trigger > 0.5)
+            || (controller.right.active && controller.right.trigger > 0.5);
+        if !any_trigger && self.dashboard.trigger_pressed {
+            self.dashboard.trigger_up();
+        }
+        let any_grip = (controller.left.active && controller.left.squeeze > 0.5)
+            || (controller.right.active && controller.right.squeeze > 0.5);
+        if !any_grip && self.dashboard.secondary_pressed {
+            if self.dashboard.active_tab == DashboardTab::Desktop {
+                self.dashboard.screen_capture.inject_right_mouse_up();
+            }
+            self.dashboard.secondary_up();
+        }
+        // Also safety-release left mouse on desktop
+        if !any_trigger && self.dashboard.active_tab == DashboardTab::Desktop {
+            self.dashboard.screen_capture.inject_mouse_up();
         }
 
         // 5. Grab continue/release (orbital drag around user's head)
@@ -280,6 +309,45 @@ impl Shell {
                     frequency: 150.0,
                     amplitude: 0.3,
                 });
+            }
+        }
+
+        // 5b. Grip right-click (when not grabbing)
+        if self.dashboard.grab_hand.is_none() {
+            let is_desktop = self.dashboard.active_tab == DashboardTab::Desktop;
+            for (_hand_idx, hand) in [(0usize, &controller.left), (1usize, &controller.right)] {
+                if hand.active && hand.squeeze >= 0.5 {
+                    if is_desktop {
+                        // Right-click on desktop via screen capture
+                        // Use the last known pointer UV for positioning
+                        let (u, v) = self.dashboard.last_screen_uv;
+                        self.dashboard.screen_capture.inject_right_mouse_down(u, v);
+                    }
+                    self.dashboard.secondary_down();
+                } else if hand.active && hand.squeeze < 0.3 && self.dashboard.secondary_pressed {
+                    if is_desktop {
+                        self.dashboard.screen_capture.inject_right_mouse_up();
+                    }
+                    self.dashboard.secondary_up();
+                }
+            }
+        }
+
+        // 5c. Thumbstick scroll (when not grabbing)
+        if self.dashboard.grab_hand.is_none() {
+            let is_desktop = self.dashboard.active_tab == DashboardTab::Desktop;
+            let hands = [&controller.left, &controller.right];
+            for hand in hands {
+                if hand.active && (hand.thumbstick[0].abs() > 0.2 || hand.thumbstick[1].abs() > 0.2) {
+                    if is_desktop {
+                        // Scroll on desktop via screen capture
+                        let dy = -(hand.thumbstick[1] * 3.0) as i32;
+                        let dx = -(hand.thumbstick[0] * 3.0) as i32;
+                        self.dashboard.screen_capture.inject_scroll(dx, dy);
+                    }
+                    // Also send to egui for dashboard scroll
+                    self.dashboard.scroll_delta = hand.thumbstick[1] * 20.0;
+                }
             }
         }
 

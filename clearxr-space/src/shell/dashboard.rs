@@ -69,7 +69,22 @@ pub struct Dashboard {
     pub active_tab: DashboardTab,
     /// Whether the dashboard is visible.
     pub visible: bool,
-    click_pending: bool,
+    /// One-shot click flag for egui buttons (press+release in one frame).
+    pub click_pending: bool,
+    /// True while primary trigger is held down on the dashboard (for drag/select).
+    pub trigger_pressed: bool,
+    /// True while grip/squeeze is held on the dashboard (right-click).
+    pub secondary_pressed: bool,
+    /// Vertical scroll delta from thumbstick this frame (pixels).
+    pub scroll_delta: f32,
+    /// Last known pointer UV on the screen panel (for right-click positioning).
+    pub last_screen_uv: (f32, f32),
+    /// Whether the virtual keyboard is visible.
+    pub keyboard_visible: bool,
+    /// Whether the virtual keyboard shift key is active.
+    keyboard_shift: bool,
+    /// Characters pending injection from the virtual keyboard (consumed next frame).
+    pending_keys: Vec<String>,
 
     /// Discovered games from Steam library scan.
     pub games: Vec<Game>,
@@ -163,6 +178,13 @@ impl Dashboard {
             active_tab,
             visible: true,
             click_pending: false,
+            trigger_pressed: false,
+            secondary_pressed: false,
+            scroll_delta: 0.0,
+            last_screen_uv: (0.5, 0.5),
+            keyboard_visible: false,
+            keyboard_shift: false,
+            pending_keys: Vec::new(),
             games,
             search: String::new(),
             config,
@@ -214,6 +236,13 @@ impl Dashboard {
 
         let click = self.click_pending;
         self.click_pending = false;
+        let button_pressed = self.trigger_pressed;
+        let secondary_pressed = self.secondary_pressed;
+        let scroll_delta = self.scroll_delta;
+        self.scroll_delta = 0.0; // consumed this frame
+
+        // Drain pending keyboard text for injection into egui
+        let pending_text: Vec<String> = self.pending_keys.drain(..).collect();
 
         let active_tab = self.active_tab;
         let games = &self.games;
@@ -227,9 +256,12 @@ impl Dashboard {
 
         let format = vk::Format::R8G8B8A8_SRGB;
         let is_desktop = active_tab == DashboardTab::Desktop;
+        let mut kb_visible = self.keyboard_visible;
+        let mut kb_shift = self.keyboard_shift;
+        let mut kb_keys: Vec<String> = Vec::new();
 
         self.egui
-            .run(vk, self.panel.texture, format, click, |ctx| {
+            .run(vk, self.panel.texture, format, click, button_pressed, secondary_pressed, scroll_delta, &pending_text, |ctx| {
                 // Set transparent background for desktop tab compositing,
                 // opaque dark for other tabs. This affects the render pass clear color.
                 let bg = if is_desktop {
@@ -312,6 +344,72 @@ impl Dashboard {
                         });
                     });
 
+                // ---- Virtual keyboard (above tab bar, below content) ----
+                // Save focused widget so keyboard clicks don't steal focus from TextEdit
+                let focused_before_keyboard = ctx.memory(|m| m.focused());
+                if kb_visible {
+                    egui::TopBottomPanel::bottom("keyboard")
+                        .exact_height(200.0)
+                        .frame(egui::Frame::new()
+                            .fill(egui::Color32::from_rgba_premultiplied(24, 24, 48, 240))
+                            .inner_margin(egui::Margin::symmetric(8, 4)))
+                        .show(ctx, |ui| {
+                            let rows: &[&str] = &["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
+                            for row in rows {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    for ch in row.chars() {
+                                        let label = if kb_shift {
+                                            ch.to_uppercase().to_string()
+                                        } else {
+                                            ch.to_string()
+                                        };
+                                        let btn = ui.add_sized(
+                                            egui::vec2(36.0, 36.0),
+                                            egui::Button::new(
+                                                egui::RichText::new(&label).size(16.0).monospace(),
+                                            ),
+                                        );
+                                        if btn.clicked() {
+                                            kb_keys.push(label);
+                                            kb_shift = false;
+                                        }
+                                    }
+                                });
+                            }
+                            // Bottom row: shift, space, backspace, hide
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                if ui.add_sized(egui::vec2(60.0, 36.0), egui::Button::new(
+                                    egui::RichText::new("Shift").size(14.0),
+                                )).clicked() {
+                                    kb_shift = !kb_shift;
+                                }
+                                if ui.add_sized(egui::vec2(200.0, 36.0), egui::Button::new(
+                                    egui::RichText::new("SPACE").size(14.0),
+                                )).clicked() {
+                                    kb_keys.push(" ".into());
+                                }
+                                if ui.add_sized(egui::vec2(60.0, 36.0), egui::Button::new(
+                                    egui::RichText::new("Bksp").size(14.0),
+                                )).clicked() {
+                                    kb_keys.push("\x08".into()); // sentinel for backspace
+                                }
+                                if ui.add_sized(egui::vec2(60.0, 36.0), egui::Button::new(
+                                    egui::RichText::new("Hide").size(14.0),
+                                )).clicked() {
+                                    kb_visible = false;
+                                }
+                            });
+                        });
+                }
+                // Restore focus to the text field if a keyboard key was clicked
+                if !kb_keys.is_empty() {
+                    if let Some(id) = focused_before_keyboard {
+                        ctx.memory_mut(|m| m.request_focus(id));
+                    }
+                }
+
                 // ---- Notification overlay (if any) ----
                 if let Some(notif) = notifications.visible().first() {
                     egui::Area::new(egui::Id::new("notification"))
@@ -361,6 +459,25 @@ impl Dashboard {
             });
 
         self.search = search;
+        self.keyboard_visible = kb_visible;
+        self.keyboard_shift = kb_shift;
+
+        // Queue keyboard keys for injection on the NEXT frame (egui needs them in RawInput)
+        for key in kb_keys {
+            if key == "\x08" {
+                // Backspace: inject as key event next frame (not text)
+                // Use pending_keys with a sentinel the renderer will translate
+                self.pending_keys.push(key);
+            } else {
+                self.pending_keys.push(key);
+            }
+        }
+
+        // Show keyboard when egui wants keyboard input (a TextEdit has focus)
+        if self.egui.wants_keyboard_input() {
+            self.keyboard_visible = true;
+        }
+
         // Mark texture as initialized so record_draw() renders the panel
         self.panel.texture_initialized = true;
 
@@ -395,9 +512,29 @@ impl Dashboard {
         self.egui.pointer_leave();
     }
 
-    /// Signal a click on the dashboard.
+    /// Signal an instant click on the dashboard (press+release for egui buttons).
     pub fn click(&mut self) {
         self.click_pending = true;
+    }
+
+    /// Signal primary trigger press on the dashboard (held for drag/select).
+    pub fn trigger_down(&mut self) {
+        self.trigger_pressed = true;
+    }
+
+    /// Signal primary trigger release on the dashboard.
+    pub fn trigger_up(&mut self) {
+        self.trigger_pressed = false;
+    }
+
+    /// Signal grip/squeeze press on the dashboard (right-click).
+    pub fn secondary_down(&mut self) {
+        self.secondary_pressed = true;
+    }
+
+    /// Signal grip/squeeze release on the dashboard (right-click).
+    pub fn secondary_up(&mut self) {
+        self.secondary_pressed = false;
     }
 
     // ---- Panel access ----

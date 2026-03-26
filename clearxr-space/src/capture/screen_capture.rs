@@ -82,7 +82,8 @@ impl ScreenCapture {
         }
     }
 
-    /// Click at the position corresponding to (u,v) on the panel.
+    /// Click at the position corresponding to (u,v) on the panel (instant down+up).
+    #[allow(dead_code)]
     pub fn inject_mouse_click(&self, u: f32, v: f32) {
         use enigo::{Enigo, Mouse, Settings, Coordinate, Button, Direction};
         let x = (u * self.screen_width as f32) as i32;
@@ -90,6 +91,59 @@ impl ScreenCapture {
         if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
             let _ = enigo.move_mouse(x, y, Coordinate::Abs);
             let _ = enigo.button(Button::Left, Direction::Click);
+        }
+    }
+
+    /// Press the left mouse button at (u,v) — hold until inject_mouse_up().
+    pub fn inject_mouse_down(&self, u: f32, v: f32) {
+        use enigo::{Enigo, Mouse, Settings, Coordinate, Button, Direction};
+        let x = (u * self.screen_width as f32) as i32;
+        let y = (v * self.screen_height as f32) as i32;
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+            let _ = enigo.button(Button::Left, Direction::Press);
+        }
+    }
+
+    /// Release the left mouse button.
+    pub fn inject_mouse_up(&self) {
+        use enigo::{Enigo, Mouse, Settings, Button, Direction};
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.button(Button::Left, Direction::Release);
+        }
+    }
+
+    /// Press the right mouse button at (u,v).
+    pub fn inject_right_mouse_down(&self, u: f32, v: f32) {
+        use enigo::{Enigo, Mouse, Settings, Coordinate, Button, Direction};
+        let x = (u * self.screen_width as f32) as i32;
+        let y = (v * self.screen_height as f32) as i32;
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+            let _ = enigo.button(Button::Right, Direction::Press);
+        }
+    }
+
+    /// Release the right mouse button.
+    pub fn inject_right_mouse_up(&self) {
+        use enigo::{Enigo, Mouse, Settings, Button, Direction};
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.button(Button::Right, Direction::Release);
+        }
+    }
+
+    /// Scroll the mouse wheel. dx = horizontal, dy = vertical (positive = up/right).
+    pub fn inject_scroll(&self, dx: i32, dy: i32) {
+        use enigo::{Enigo, Mouse, Settings, Axis, Direction};
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            if dy != 0 {
+                let dir = if dy > 0 { Direction::Press } else { Direction::Release };
+                // enigo scroll: positive = up
+                let _ = enigo.scroll(dy, Axis::Vertical);
+            }
+            if dx != 0 {
+                let _ = enigo.scroll(dx, Axis::Horizontal);
+            }
         }
     }
 }
