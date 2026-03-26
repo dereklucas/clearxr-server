@@ -284,6 +284,11 @@ struct LayerState {
     aim_spaces: HashMap<u64, Hand>,
     /// Per-hand controller state captured from xrLocateSpace / xrGetActionStateFloat
     controller_state: [ControllerHandState; 2], // 0=left, 1=right
+    /// Subaction paths for left/right hands
+    left_hand_path: xr::Path,
+    right_hand_path: xr::Path,
+    /// Session handle (needed for active float queries)
+    session: xr::Session,
 }
 
 /// Captured controller state for one hand.
@@ -308,6 +313,17 @@ static NEXT_CREATE: Mutex<Option<CreateApiLayerInstanceFn>> = Mutex::new(None);
 // without locking LAYER. This is the key to avoiding mutex contention.
 static NEXT: OnceLock<NextDispatch> = OnceLock::new();
 
+/// Determine hand from a subaction path using the stored path values (no mutex needed).
+fn hand_from_subaction_path(subaction: xr::Path) -> Option<Hand> {
+    if subaction == xr::Path::NULL { return None; }
+    let raw = subaction.into_raw();
+    let left = LEFT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
+    let right = RIGHT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
+    if raw == left { Some(Hand::Left) }
+    else if raw == right { Some(Hand::Right) }
+    else { None }
+}
+
 // Hot-path state for xrLocateSpace / xrGetActionStateFloat hooks.
 // These are called dozens of times per frame — must be lock-free or near-lock-free.
 // Function pointers are write-once — use OnceLock (already imported above).
@@ -326,6 +342,9 @@ static THUMBSTICK_ACTIONS: OnceLock<RwLock<HashMap<u64, ()>>> = OnceLock::new();
 static NEXT_LOCATE_SPACE: OnceLock<xr::pfn::LocateSpace> = OnceLock::new();
 static NEXT_GET_FLOAT: OnceLock<xr::pfn::GetActionStateFloat> = OnceLock::new();
 static NEXT_GET_VEC2: OnceLock<xr::pfn::GetActionStateVector2f> = OnceLock::new();
+// Hand subaction paths — set during suggest_bindings, used by float hooks to determine hand
+static LEFT_HAND_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RIGHT_HAND_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ============================================================
 // DLL export: xrNegotiateLoaderApiLayerInterface
@@ -558,6 +577,14 @@ unsafe extern "system" fn layer_create_api_layer_instance(
             )
             .unwrap_or(xr::Path::NULL);
 
+            // Resolve hand subaction paths for the float/vec2 hooks
+            if let Some(left_path) = string_to_path(&dispatch, instance, b"/user/hand/left\0") {
+                LEFT_HAND_PATH.store(left_path.into_raw(), std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(right_path) = string_to_path(&dispatch, instance, b"/user/hand/right\0") {
+                RIGHT_HAND_PATH.store(right_path.into_raw(), std::sync::atomic::Ordering::Relaxed);
+            }
+
             // Store the dispatch table in a lock-free static for all hooks.
             // This MUST be done before dispatch is moved into LayerState.
             let _ = NEXT.set(dispatch);
@@ -585,6 +612,9 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                 squeeze_actions: HashMap::new(),
                 aim_spaces: HashMap::new(),
                 controller_state: Default::default(),
+                left_hand_path: string_to_path(&dispatch, instance, b"/user/hand/left\0").unwrap_or(xr::Path::NULL),
+                right_hand_path: string_to_path(&dispatch, instance, b"/user/hand/right\0").unwrap_or(xr::Path::NULL),
+                session: xr::Session::NULL,
             });
 
             layer_log!(
@@ -820,8 +850,8 @@ unsafe extern "system" fn layer_get_instance_proc_addr(
     intercept!(b"xrStopHapticFeedback", hook_stop_haptic_feedback as xr::pfn::StopHapticFeedback);
     intercept!(b"xrCreateActionSpace", hook_create_action_space as xr::pfn::CreateActionSpace);
     intercept!(b"xrLocateSpace", hook_locate_space as xr::pfn::LocateSpace);
-    intercept!(b"xrGetActionStateFloat", hook_get_action_state_float as xr::pfn::GetActionStateFloat);
-    intercept!(b"xrGetActionStateVector2f", hook_get_action_state_vector2f as xr::pfn::GetActionStateVector2f);
+    // xrGetActionStateFloat and xrGetActionStateVector2f are NOT intercepted.
+    // We actively query these values in poll_opaque_and_update_overlay instead.
 
     // Pass through to next layer
     let guard = LAYER.lock().unwrap();
@@ -879,6 +909,30 @@ unsafe fn find_vulkan_binding<'a>(
     None
 }
 
+/// Actively query a float action value for a specific hand.
+unsafe fn query_float(next: &NextDispatch, session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<f32> {
+    let get_info = xr::ActionStateGetInfo {
+        ty: xr::ActionStateGetInfo::TYPE,
+        next: std::ptr::null(),
+        action: xr::Action::from_raw(action_raw),
+        subaction_path: subaction,
+    };
+    let mut state_out = xr::ActionStateFloat {
+        ty: xr::ActionStateFloat::TYPE,
+        next: std::ptr::null_mut(),
+        current_state: 0.0,
+        changed_since_last_sync: xr::FALSE,
+        last_change_time: xr::Time::from_nanos(0),
+        is_active: xr::FALSE,
+    };
+    let r = (next.get_action_state_float)(session, &get_info, &mut state_out);
+    if r == xr::Result::SUCCESS && state_out.is_active.into() {
+        Some(state_out.current_state)
+    } else {
+        None
+    }
+}
+
 unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     static DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let diag = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -894,10 +948,44 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         }
     }
 
-    // Build a controller packet from intercepted xrLocateSpace / xrGetActionStateFloat data
+    // Read aim poses captured by hook_locate_space
     let cs = CONTROLLER_STATE.read().unwrap().clone();
-    let left = &cs[0];
-    let right = &cs[1];
+
+    // Actively query trigger/squeeze/thumbstick values (not intercepted — we call directly)
+    let next = match NEXT.get() {
+        Some(n) => *n,
+        None => return,
+    };
+    let session = state.session;
+    if session == xr::Session::NULL { return; }
+
+    let mut left = cs[0];
+    let mut right = cs[1];
+
+    // Query trigger + squeeze for each hand
+    for (hand_path, hand_state) in [
+        (state.left_hand_path, &mut left),
+        (state.right_hand_path, &mut right),
+    ] {
+        if hand_path == xr::Path::NULL { continue; }
+
+        // Find trigger action for this hand
+        for &(action_raw, _hand) in state.trigger_actions.keys() {
+            let val = query_float(&next, session, action_raw, hand_path);
+            if val.is_some() {
+                hand_state.trigger = val.unwrap_or(0.0);
+                break;
+            }
+        }
+        // Find squeeze action for this hand
+        for &(action_raw, _hand) in state.squeeze_actions.keys() {
+            let val = query_float(&next, session, action_raw, hand_path);
+            if val.is_some() {
+                hand_state.squeeze = val.unwrap_or(0.0);
+                break;
+            }
+        }
+    }
 
     let mut active_hands = 0u8;
     if left.active { active_hands |= 0x01; }
@@ -1053,6 +1141,8 @@ unsafe extern "system" fn hook_create_session(
     if ci.is_null() || session.is_null() {
         return result;
     }
+
+    state.session = *session;
 
     if let Some(binding) = find_vulkan_binding((*ci).next as *const xr::BaseInStructure) {
         layer_log!(
@@ -1459,7 +1549,22 @@ unsafe extern "system" fn hook_get_action_state_float(
     let trigger_guard = TRIGGER_ACTIONS.get().and_then(|l| l.read().ok());
     let squeeze_guard = SQUEEZE_ACTIONS.get().and_then(|l| l.read().ok());
 
-    for &hand in &[Hand::Left, Hand::Right] {
+    // Determine hand from subaction path (lock-free)
+    let hand = hand_from_subaction_path(info.subaction_path);
+
+    static FDIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let fd = FDIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if fd < 8 {
+        let sub_raw = info.subaction_path.into_raw();
+        let left_raw = LEFT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
+        let right_raw = RIGHT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
+        log::info!(
+            "[ClearXR Layer] Float: action=0x{:x} subaction=0x{:x} hand={:?} left_path=0x{:x} right_path=0x{:x} val={:.2}",
+            action_raw, sub_raw, hand, left_raw, right_raw, out.current_state
+        );
+    }
+
+    if let Some(hand) = hand {
         let idx = match hand { Hand::Left => 0, Hand::Right => 1 };
         let is_trigger = trigger_guard.as_ref().map_or(false, |m| m.contains_key(&(action_raw, hand)));
         let is_squeeze = squeeze_guard.as_ref().map_or(false, |m| m.contains_key(&(action_raw, hand)));
@@ -1498,29 +1603,11 @@ unsafe extern "system" fn hook_get_action_state_vector2f(
         .map_or(false, |m| m.contains_key(&action_raw));
 
     if is_thumbstick && out.is_active.into() {
-        // Thumbstick actions have both hands — determine which from subaction path.
-        // Since we can't call path_to_string without LAYER, check both and let the
-        // values overwrite (the app calls once per hand with a subaction path).
-        if let Ok(mut cs) = CONTROLLER_STATE.write() {
-            // The app typically calls this per-hand with a subaction path.
-            // Without path resolution, we use a heuristic: if left hand is active
-            // and we've seen left aim data, assign to left; otherwise right.
-            // For correctness, we'd need to resolve the subaction path.
-            // Simpler: just update both — the last call per frame wins for each hand.
-            // Most apps call left then right in sequence.
-            if cs[0].active && !cs[1].active {
-                cs[0].thumbstick_x = out.current_state.x;
-                cs[0].thumbstick_y = out.current_state.y;
-            } else if cs[1].active && !cs[0].active {
-                cs[1].thumbstick_x = out.current_state.x;
-                cs[1].thumbstick_y = out.current_state.y;
-            } else {
-                // Both active — can't determine hand without path resolution.
-                // Store in both; the per-hand calls will overwrite correctly.
-                cs[0].thumbstick_x = out.current_state.x;
-                cs[0].thumbstick_y = out.current_state.y;
-                cs[1].thumbstick_x = out.current_state.x;
-                cs[1].thumbstick_y = out.current_state.y;
+        if let Some(hand) = hand_from_subaction_path(info.subaction_path) {
+            let idx = match hand { Hand::Left => 0, Hand::Right => 1 };
+            if let Ok(mut cs) = CONTROLLER_STATE.write() {
+                cs[idx].thumbstick_x = out.current_state.x;
+                cs[idx].thumbstick_y = out.current_state.y;
             }
         }
     }
