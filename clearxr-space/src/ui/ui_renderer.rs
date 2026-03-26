@@ -21,7 +21,7 @@ use ul_next::{
     Library,
 };
 
-use crate::game_scanner::Game;
+use crate::app::game_scanner::Game;
 
 pub struct UiRenderer {
     lib: Arc<Library>,
@@ -166,6 +166,30 @@ impl UiRenderer {
         ) {
             self.view.fire_mouse_event(evt);
             self.dirty = true;
+        }
+    }
+
+    /// Evaluate a JavaScript expression and return the string result.
+    ///
+    /// Returns `None` if the script fails or returns an empty/undefined value.
+    pub fn evaluate_js(&self, js: &str) -> Option<String> {
+        match self.view.evaluate_script(js) {
+            Ok(Ok(result)) => {
+                let s = result.trim().to_string();
+                if s.is_empty() || s == "undefined" || s == "null" {
+                    None
+                } else {
+                    Some(s)
+                }
+            }
+            Ok(Err(ex)) => {
+                log::warn!("JS exception in evaluate_js: {}", ex);
+                None
+            }
+            Err(e) => {
+                log::warn!("JS eval error in evaluate_js: {:?}", e);
+                None
+            }
         }
     }
 

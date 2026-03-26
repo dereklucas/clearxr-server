@@ -1,13 +1,13 @@
 #version 450
 
 // ------------------------------------------------------------
-//  Clear XR – Procedural Space Scene + Cyberpunk Logo
+//  Clear XR – Ambient VR Home Environment
 //
-//  Designed to showcase foveated rendering quality:
-//   • High-frequency star fields and fine detail at gaze center
-//   • SDF-raymarched crystalline geometry with crisp specular highlights
-//   • Animated nebula haze and floating octahedra
-//   • Floating holographic ClearXR logo panel
+//  Calm, dark ambient space for a SteamVR-style home:
+//   • Soft star field with gentle twinkle
+//   • Subtle floating crystalline accents
+//   • Minimal floor grid for spatial grounding
+//   • Non-distracting backdrop for floating panels
 // ------------------------------------------------------------
 
 layout(location = 0) in vec2 frag_uv;
@@ -226,10 +226,10 @@ float charSDF(vec2 p, int ch) {
 
 // Render the full ClearXR logo at a panel UV in [-1, 1].
 vec3 renderLogo(vec2 puv, float time) {
-    // ---- Colour palette ----
-    vec3 cyan    = vec3(0.7, 0.92, 1.0);   // cool white-blue for CLEAR
-    vec3 magenta = vec3(1.0, 0.0, 0.45);   // hot pink for XR
-    vec3 white   = vec3(1.0);
+    // ---- Colour palette (muted, ambient) ----
+    vec3 cyan    = vec3(0.45, 0.55, 0.65);  // soft grey-blue for CLEAR
+    vec3 magenta = vec3(0.5, 0.3, 0.55);    // muted purple for XR
+    vec3 white   = vec3(0.7);
 
     // ---- Map panel UV → text coordinate space ----
     // "CLEAR XR" = 8 chars.  Each cell is ~1.1 units wide, total ≈ 8.8.
@@ -299,25 +299,25 @@ Hit sceneMap(vec3 p) {
 
     Hit best = Hit(1e9, 0);
 
-    // Crystal A – slow orbit, warm colour
-    vec3 pa = p - vec3(3.0 * cos(t * 0.23), 1.2 + 0.4 * sin(t * 0.51), -5.0 + sin(t * 0.17));
-    float ca = t * 0.4, sa = sin(ca); ca = cos(ca);
+    // Crystal A – small, slow drift, subtle accent
+    vec3 pa = p - vec3(4.0 * cos(t * 0.08), 1.8 + 0.2 * sin(t * 0.15), -8.0 + sin(t * 0.06));
+    float ca = t * 0.12, sa = sin(ca); ca = cos(ca);
     pa.xz = mat2(ca, sa, -sa, ca) * pa.xz;
-    float da = sdOctahedron(pa, 0.55);
+    float da = sdOctahedron(pa, 0.2);
     if (da < best.dist) { best.dist = da; best.mat = 1; }
 
-    // Crystal B – faster, cool colour
-    vec3 pb = p - vec3(-2.8 + 0.6 * sin(t * 0.38), 0.7 + 0.3 * cos(t * 0.72), -4.0);
-    float cb = t * -0.6, sb = sin(cb); cb = cos(cb);
+    // Crystal B – tiny, gentle drift
+    vec3 pb = p - vec3(-3.5 + 0.3 * sin(t * 0.12), 1.0 + 0.15 * cos(t * 0.2), -6.5);
+    float cb = t * -0.15, sb = sin(cb); cb = cos(cb);
     pb.xz = mat2(cb, sb, -sb, cb) * pb.xz;
-    float db = sdOctahedron(pb, 0.35);
+    float db = sdOctahedron(pb, 0.12);
     if (db < best.dist) { best.dist = db; best.mat = 2; }
 
-    // Crystal C – large, slow, violet
-    vec3 pc3 = p - vec3(0.3, 2.5 + 0.6 * sin(t * 0.31), -7.0);
-    float cc = t * 0.25, sc = sin(cc); cc = cos(cc);
+    // Crystal C – medium, far away, very slow
+    vec3 pc3 = p - vec3(0.5, 2.8 + 0.25 * sin(t * 0.1), -12.0);
+    float cc = t * 0.08, sc = sin(cc); cc = cos(cc);
     pc3.xz = mat2(cc, sc, -sc, cc) * pc3.xz;
-    float dc = sdOctahedron(pc3, 0.9);
+    float dc = sdOctahedron(pc3, 0.3);
     if (dc < best.dist) { best.dist = dc; best.mat = 3; }
 
     // (Logo panel is rendered as a transparent overlay, not part of the SDF scene.)
@@ -343,17 +343,22 @@ vec3 calcNormal(vec3 p) {
 
 float starField(vec3 dir) {
     float stars = 0.0;
-    // Dense star/particle layers — Beat Saber floaty particle vibe
-    for (int layer = 0; layer < 12; layer++) {
-        float scale = 3.0 + float(layer) * 2.5;
+    float time = pc.cam_pos.w;
+    // Sparse, gentle star layers
+    for (int layer = 0; layer < 5; layer++) {
+        float scale = 5.0 + float(layer) * 4.0;
         vec3 d = normalize(dir) * scale;
         vec3 cell = floor(d);
         vec3 f    = fract(d);
         vec3 sp   = hash33(cell + float(layer) * 17.3) * 0.6 + 0.2;
         float bri = hash12(cell.xy + float(layer) * 5.1);
-        // Vary size: some large soft particles, many tiny sharp ones
-        float sz  = mix(0.025, 0.008, float(layer) / 11.0);
-        stars += bri * smoothstep(sz, sz * 0.1, length(f - sp));
+        // Gentle twinkle: slow, subtle brightness variation
+        float twinkle = 0.7 + 0.3 * sin(time * 0.4 + bri * 40.0);
+        bri *= twinkle;
+        // Only show brighter stars, small and sharp
+        bri *= smoothstep(0.45, 0.75, bri);
+        float sz  = mix(0.012, 0.005, float(layer) / 4.0);
+        stars += bri * smoothstep(sz, sz * 0.15, length(f - sp)) * 0.35;
     }
     return stars;
 }
@@ -403,9 +408,9 @@ void main() {
         if (t_ray > MAX_DIST) break;
     }
 
-    // ---- Background: near-black with subtle blue hint ----
-    float nebula = fbm(rd * 1.8 + vec3(time * 0.01));
-    vec3 nebulaCol = mix(vec3(0.002, 0.003, 0.01), vec3(0.008, 0.01, 0.03), nebula);
+    // ---- Background: deep dark with very faint blue-purple tint ----
+    float nebula = fbm(rd * 1.2 + vec3(time * 0.005));
+    vec3 nebulaCol = mix(vec3(0.001, 0.002, 0.006), vec3(0.005, 0.004, 0.012), nebula);
     float starsVal = starField(rd);
     vec3 bg = nebulaCol + vec3(starsVal);
 
@@ -429,33 +434,39 @@ void main() {
             float rim  = pow(1.0 - max(dot(norm, -rd), 0.0), 3.0);
 
             vec3 matCol;
-            if (hit.mat == 1)      matCol = vec3(1.0, 0.55, 0.15);  // amber
-            else if (hit.mat == 2) matCol = vec3(0.2, 0.8, 1.0);    // cyan
-            else if (hit.mat == 3) matCol = vec3(0.75, 0.3, 1.0);   // violet
+            float crystalAlpha = 1.0; // blend factor for translucent crystals
+            if (hit.mat == 1)      { matCol = vec3(0.25, 0.35, 0.55); crystalAlpha = 0.35; }  // muted steel blue
+            else if (hit.mat == 2) { matCol = vec3(0.3, 0.35, 0.55);  crystalAlpha = 0.3;  }  // muted slate
+            else if (hit.mat == 3) { matCol = vec3(0.35, 0.25, 0.5);  crystalAlpha = 0.3;  }  // muted purple
             else {
-                // Ground grid – fade out with distance to avoid shimmer/aliasing
-                float distFade = 1.0 - smoothstep(3.0, 12.0, t_ray);
+                // Ground grid – subtle, thin lines, low contrast
+                float distFade = 1.0 - smoothstep(4.0, 15.0, t_ray);
                 vec2 gridAbs = abs(fract(pos.xz) - 0.5);
                 // Widen the smoothstep with distance for anti-aliasing
                 float fw = max(0.02, t_ray * 0.008);
                 float line = min(gridAbs.x, gridAbs.y);
-                float gridVal = (1.0 - smoothstep(0.02, 0.02 + fw, line)) * distFade;
-                matCol = mix(vec3(0.05, 0.07, 0.12), vec3(0.2, 0.4, 0.7), gridVal * 0.5);
+                float gridVal = (1.0 - smoothstep(0.01, 0.01 + fw, line)) * distFade;
+                matCol = mix(vec3(0.03, 0.035, 0.06), vec3(0.08, 0.1, 0.18), gridVal * 0.35);
             }
 
             col = matCol * (diff1 + diff2 + 0.05)
-                + vec3(1.0) * spec * 0.9
-                + matCol * rim * 0.4;
+                + vec3(1.0) * spec * 0.3
+                + matCol * rim * 0.2;
 
             vec3 refl = reflect(rd, norm);
-            col += matCol * (starField(refl) + fbm(refl * 2.0) * 0.1) * 0.35;
+            col += matCol * (starField(refl) + fbm(refl * 2.0) * 0.05) * 0.15;
 
-            float fog = 1.0 - exp(-t_ray * 0.04);
+            // Blend translucent crystals with background
+            if (hit.mat >= 1 && hit.mat <= 3) {
+                col = mix(bg, col, crystalAlpha);
+            }
+
+            float fog = 1.0 - exp(-t_ray * 0.06);
             col = mix(col, bg, fog);
         }
     }
 
-    // ---- Logo panel: transparent holographic overlay ----
+    // ---- Logo panel: very subtle, nearly invisible watermark ----
     // Analytic ray-plane intersection at z = PANEL_POS.z, then additive blend.
     if (abs(rd.z) > 0.0001) {
         float tPanel = (PANEL_POS.z - ro.z) / rd.z;
@@ -469,7 +480,8 @@ void main() {
             if (abs(panelUV.x) < 1.0 && abs(panelUV.y) < 1.0) {
                 vec3 logoCol = renderLogo(panelUV, time);
                 logoCol *= step(0.03, dot(logoCol, vec3(0.333)));
-                col += logoCol;
+                // Greatly reduce logo visibility — subtle watermark only
+                col += logoCol * 0.08;
                 // Logo panel is closer than scene behind it
                 if (tPanel < final_depth) final_depth = tPanel;
             }

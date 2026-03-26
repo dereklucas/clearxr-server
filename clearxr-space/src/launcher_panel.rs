@@ -639,7 +639,7 @@ impl LauncherPanel {
 
 /// Generate a placeholder launcher UI as RGBA pixels.
 /// Dark background with colored game card rectangles and text placeholders.
-pub fn generate_placeholder_ui(width: u32, height: u32, games: &[crate::game_scanner::Game]) -> Vec<u8> {
+pub fn generate_placeholder_ui(width: u32, height: u32, games: &[crate::app::game_scanner::Game]) -> Vec<u8> {
     let mut pixels = vec![0u8; (width * height * 4) as usize];
 
     // Dark background: #1a1a2e
@@ -739,7 +739,7 @@ pub fn generate_placeholder_ui(width: u32, height: u32, games: &[crate::game_sca
 // ============================================================
 
 /// 5x7 bitmap font. Each row is a u8 with the top 5 bits used (bit 4 = leftmost pixel).
-fn glyph_for(ch: char) -> Option<&'static [u8; 7]> {
+pub(crate) fn glyph_for(ch: char) -> Option<&'static [u8; 7]> {
     #[rustfmt::skip]
     static DIGITS: [[u8; 7]; 11] = [
         [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110], // 0
@@ -793,7 +793,7 @@ fn glyph_for(ch: char) -> Option<&'static [u8; 7]> {
 }
 
 /// Draw a string into an RGBA pixel buffer at the given position and scale.
-fn draw_text(pixels: &mut [u8], width: u32, _height: u32, text: &str, x: u32, y: u32, scale: u32, r: u8, g: u8, b: u8) {
+pub(crate) fn draw_text(pixels: &mut [u8], width: u32, _height: u32, text: &str, x: u32, y: u32, scale: u32, r: u8, g: u8, b: u8) {
     let glyph_w = 5 * scale;
     let spacing = 1 * scale;
     for (ci, ch) in text.chars().enumerate() {
@@ -855,41 +855,160 @@ pub enum ToolbarTab {
     Screen,
 }
 
-/// Generate RGBA pixels for a SteamVR-style toolbar with two tabs.
-/// Returns the pixel buffer. `active` controls which tab is highlighted.
-pub fn generate_toolbar_pixels(width: u32, height: u32, active: ToolbarTab) -> Vec<u8> {
+/// Generate RGBA pixels for a SteamVR-style toolbar with tabs and action buttons.
+///
+/// Layout: [LAUNCHER 40%] [DESKTOP 40%] | [SET 6.7%] [anchor 6.7%] [CAM 6.7%]
+///
+/// `anchor` is the current anchor mode label shown on the pin button (e.g. "WORLD").
+/// Generate a visionOS-style grab bar: a rounded pill shape.
+pub fn generate_grab_bar_pixels(width: u32, height: u32) -> Vec<u8> {
     let mut pixels = vec![0u8; (width * height * 4) as usize];
-    let half = width / 2;
+    let cx = width as f32 / 2.0;
+    let cy = height as f32 / 2.0;
+    let rx = width as f32 / 2.0 - 1.0; // horizontal radius
+    let ry = height as f32 / 2.0 - 1.0; // vertical radius
 
-    // Draw each half as a tab
     for y in 0..height {
         for x in 0..width {
             let idx = ((y * width + x) * 4) as usize;
-            let is_left = x < half;
-            let is_active = (is_left && active == ToolbarTab::Launcher)
-                || (!is_left && active == ToolbarTab::Screen);
+            let dx = (x as f32 - cx) / rx;
+            let dy = (y as f32 - cy) / ry;
 
-            if is_active {
-                // Active tab: bright accent
-                pixels[idx] = 0x00;
-                pixels[idx + 1] = 0x90;
-                pixels[idx + 2] = 0xD0;
+            // Pill shape: use a rounded rect (superellipse)
+            let dist = dx.abs().max(dy.abs() * 3.0); // wider than tall
+            if dist <= 1.0 {
+                // Inside the pill
+                let fade = 1.0 - (dist * 0.3); // subtle gradient
+                let bright = (fade * 0.45) as f32;
+                pixels[idx] = (bright * 255.0) as u8;
+                pixels[idx + 1] = (bright * 255.0) as u8;
+                pixels[idx + 2] = (bright * 280.0).min(255.0) as u8;
+                pixels[idx + 3] = 0xCC;
+            }
+            // else: transparent (0,0,0,0)
+        }
+    }
+
+    pixels
+}
+
+/// Generate a highlighted grab bar: bright cyan pill with subtle glow.
+pub fn generate_grab_bar_pixels_highlighted(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let cx = width as f32 / 2.0;
+    let cy = height as f32 / 2.0;
+    let rx = width as f32 / 2.0 - 1.0;
+    let ry = height as f32 / 2.0 - 1.0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * 4) as usize;
+            let dx = (x as f32 - cx) / rx;
+            let dy = (y as f32 - cy) / ry;
+
+            let dist = dx.abs().max(dy.abs() * 3.0);
+            if dist <= 1.0 {
+                // Bright cyan (#4a9eff) pill with gradient
+                let fade = 1.0 - (dist * 0.2);
+                pixels[idx] = (fade * 0x4a as f32).min(255.0) as u8;
+                pixels[idx + 1] = (fade * 0x9e as f32).min(255.0) as u8;
+                pixels[idx + 2] = (fade * 0xff as f32).min(255.0) as u8;
                 pixels[idx + 3] = 0xE0;
+            } else if dist <= 1.15 {
+                // Subtle glow fringe
+                let glow = 1.0 - ((dist - 1.0) / 0.15);
+                let g = glow * 0.4;
+                pixels[idx] = (g * 0x4a as f32) as u8;
+                pixels[idx + 1] = (g * 0x9e as f32) as u8;
+                pixels[idx + 2] = (g * 0xff as f32) as u8;
+                pixels[idx + 3] = (g * 160.0) as u8;
+            }
+        }
+    }
+
+    pixels
+}
+
+pub fn generate_toolbar_pixels(
+    width: u32, height: u32,
+    active: ToolbarTab,
+    anchor: &str,
+    hover_zone: Option<u8>,  // which zone is hovered (0=launcher, 1=desktop, 2=settings, 3=anchor, 4=photo)
+) -> Vec<u8> {
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+
+    // Zone boundaries (in pixels) — Layout: [LAUNCHER 35%] [DESKTOP 35%] | [SETTINGS 10%] [ANCHOR 10%] [PHOTO 10%]
+    let tab1_end = (width as f32 * 0.35) as u32;        // LAUNCHER tab
+    let tab2_end = (width as f32 * 0.70) as u32;        // DESKTOP tab
+    let btn1_end = (width as f32 * 0.80) as u32;        // Settings button
+    let btn2_end = (width as f32 * 0.90) as u32;        // Anchor button
+    // Remaining 10% is PHOTO button
+
+    // Visual separator position between tab section and button section
+    let separator_x = tab2_end;
+
+    // Draw background regions
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * 4) as usize;
+
+            // Determine which zone this pixel is in
+            let zone: u8 = if x < tab1_end { 0 }
+                else if x < tab2_end { 1 }
+                else if x < btn1_end { 2 }
+                else if x < btn2_end { 3 }
+                else { 4 };
+
+            let is_hovered = hover_zone == Some(zone);
+
+            // Base colors per zone
+            let (mut r, mut g, mut b, a) = if x < tab1_end {
+                // LAUNCHER tab
+                if active == ToolbarTab::Launcher {
+                    (0x00u8, 0x90u8, 0xD0u8, 0xE0u8)
+                } else {
+                    (0x1Au8, 0x1Au8, 0x2Eu8, 0xD0u8)
+                }
+            } else if x < tab2_end {
+                // DESKTOP tab
+                if active == ToolbarTab::Screen {
+                    (0x00u8, 0x90u8, 0xD0u8, 0xE0u8)
+                } else {
+                    (0x1Au8, 0x1Au8, 0x2Eu8, 0xD0u8)
+                }
+            } else if x < btn1_end {
+                // Settings button — dark teal
+                (0x18u8, 0x28u8, 0x38u8, 0xD0u8)
+            } else if x < btn2_end {
+                // Anchor button — slightly different dark
+                (0x20u8, 0x2Au8, 0x3Au8, 0xD0u8)
             } else {
-                // Inactive tab: dark
-                pixels[idx] = 0x1A;
-                pixels[idx + 1] = 0x1A;
-                pixels[idx + 2] = 0x2E;
-                pixels[idx + 3] = 0xD0;
+                // Photo/Screenshot button — dark
+                (0x18u8, 0x28u8, 0x38u8, 0xD0u8)
+            };
+
+            // Hover highlight: brighten the hovered zone
+            if is_hovered {
+                r = r.saturating_add(0x20);
+                g = g.saturating_add(0x20);
+                b = b.saturating_add(0x20);
             }
 
-            // Thin divider line between tabs
-            if x == half || x == half + 1 {
-                pixels[idx] = 0x40;
-                pixels[idx + 1] = 0x40;
-                pixels[idx + 2] = 0x50;
-                pixels[idx + 3] = 0xE0;
+            pixels[idx] = r; pixels[idx + 1] = g; pixels[idx + 2] = b; pixels[idx + 3] = a;
+
+            // Thin divider lines between zones
+            let dividers = [tab1_end, btn1_end, btn2_end];
+            for &d in &dividers {
+                if x == d || x == d.wrapping_sub(1) {
+                    pixels[idx] = 0x40; pixels[idx + 1] = 0x40; pixels[idx + 2] = 0x50; pixels[idx + 3] = 0xE0;
+                }
             }
+
+            // Thicker visual separator between tab section and button section (3px wide)
+            if x >= separator_x.saturating_sub(1) && x <= separator_x + 1 {
+                pixels[idx] = 0x60; pixels[idx + 1] = 0x60; pixels[idx + 2] = 0x70; pixels[idx + 3] = 0xF0;
+            }
+
             // Rounded corners (darken outer 2px)
             let corner_radius = 3u32;
             let in_tl = x < corner_radius && y < corner_radius;
@@ -902,24 +1021,66 @@ pub fn generate_toolbar_pixels(width: u32, height: u32, active: ToolbarTab) -> V
         }
     }
 
-    // Draw tab labels
-    let scale = 2u32;
+    // Draw grip handle indicator (three horizontal lines on the left edge)
+    // This shows the user they can grab the toolbar to move the panel
+    let grip_w = 12u32; // width of grip area
+    let line_spacing = height / 5;
+    for line in 1..=3 {
+        let ly = line * line_spacing;
+        for x in 3..grip_w {
+            if ly < height {
+                let idx = ((ly * width + x) * 4) as usize;
+                pixels[idx] = 0x60; pixels[idx + 1] = 0x60; pixels[idx + 2] = 0x70; pixels[idx + 3] = 0xFF;
+            }
+        }
+    }
+
+    // Draw tab labels at scale 1 (fits the wider 512px texture well)
+    let scale = 1u32;
     let glyph_h = 7 * scale;
     let label_y = height.saturating_sub(glyph_h) / 2;
 
-    // "LAUNCHER" label
+    // "LAUNCHER" label (centered in 0..tab1_end)
     let launcher_label = "LAUNCHER";
     let launcher_w = launcher_label.len() as u32 * (5 * scale + scale);
-    let launcher_x = half.saturating_sub(launcher_w) / 2;
-    let launcher_color = if active == ToolbarTab::Launcher { (0xFF, 0xFF, 0xFF) } else { (0x80, 0x80, 0x90) };
+    let launcher_x = tab1_end.saturating_sub(launcher_w) / 2;
+    let launcher_color = if active == ToolbarTab::Launcher { (0xFFu8, 0xFFu8, 0xFFu8) } else { (0x80u8, 0x80u8, 0x90u8) };
     draw_text(&mut pixels, width, height, launcher_label, launcher_x, label_y, scale, launcher_color.0, launcher_color.1, launcher_color.2);
 
-    // "SCREEN" label
-    let screen_label = "SCREEN";
-    let screen_w = screen_label.len() as u32 * (5 * scale + scale);
-    let screen_x = half + (half.saturating_sub(screen_w)) / 2;
-    let screen_color = if active == ToolbarTab::Screen { (0xFF, 0xFF, 0xFF) } else { (0x80, 0x80, 0x90) };
-    draw_text(&mut pixels, width, height, screen_label, screen_x, label_y, scale, screen_color.0, screen_color.1, screen_color.2);
+    // "DESKTOP" label (centered in tab1_end..tab2_end)
+    let desktop_label = "DESKTOP";
+    let desktop_w = desktop_label.len() as u32 * (5 * scale + scale);
+    let desktop_x = tab1_end + (tab2_end - tab1_end).saturating_sub(desktop_w) / 2;
+    let desktop_color = if active == ToolbarTab::Screen { (0xFFu8, 0xFFu8, 0xFFu8) } else { (0x80u8, 0x80u8, 0x90u8) };
+    draw_text(&mut pixels, width, height, desktop_label, desktop_x, label_y, scale, desktop_color.0, desktop_color.1, desktop_color.2);
+
+    // Button labels use scale 1 with full words
+    let btn_scale = 1u32;
+    let btn_glyph_h = 7 * btn_scale;
+    let btn_label_y = height.saturating_sub(btn_glyph_h) / 2;
+
+    // "SETTINGS" label
+    let set_label = "SETTINGS";
+    let set_w = set_label.len() as u32 * (5 * btn_scale + btn_scale);
+    let set_x = tab2_end + (btn1_end - tab2_end).saturating_sub(set_w) / 2;
+    draw_text(&mut pixels, width, height, set_label, set_x, btn_label_y, btn_scale, 0xA0, 0xA0, 0xB0);
+
+    // Anchor mode label — full words (WORLD, CTRL, THEATER)
+    let anchor_label = match anchor {
+        "world" => "WORLD",
+        "ctrl" => "CTRL",
+        "theater" => "THEATER",
+        _ => "WORLD",
+    };
+    let anc_w = anchor_label.len() as u32 * (5 * btn_scale + btn_scale);
+    let anc_x = btn1_end + (btn2_end - btn1_end).saturating_sub(anc_w) / 2;
+    draw_text(&mut pixels, width, height, anchor_label, anc_x, btn_label_y, btn_scale, 0xC0, 0xD0, 0xFF);
+
+    // "PHOTO" label (screenshot)
+    let cam_label = "PHOTO";
+    let cam_w = cam_label.len() as u32 * (5 * btn_scale + btn_scale);
+    let cam_x = btn2_end + (width - btn2_end).saturating_sub(cam_w) / 2;
+    draw_text(&mut pixels, width, height, cam_label, cam_x, btn_label_y, btn_scale, 0xA0, 0xA0, 0xB0);
 
     pixels
 }

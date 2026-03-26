@@ -1,8 +1,12 @@
+mod app;
 mod audio;
-mod game_scanner;
+mod capture;
+mod config;
+mod input;
 mod launcher_panel;
-mod screen_capture;
-mod ui_renderer;
+mod panel;
+mod shell;
+mod ui;
 #[cfg(all(feature = "xr", target_os = "windows"))]
 mod mirror_window;
 mod vk_backend;

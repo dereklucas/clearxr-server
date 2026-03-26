@@ -117,12 +117,15 @@ fn capture_thread(
     };
 
     let frame_interval = std::time::Duration::from_millis(33); // ~30fps
+    let mut buffer = Vec::new(); // reusable buffer — stays allocated across frames
 
     while keep_running.load(Ordering::Relaxed) {
         let frame_start = std::time::Instant::now();
 
-        match dxgi.capture_bgra_frame() {
-            Ok(Some(frame)) => {
+        match dxgi.capture_bgra_frame_into(&mut buffer) {
+            Ok(Some((w, h))) => {
+                // Clone the buffer for the channel (buffer stays allocated for next frame)
+                let frame = CaptureFrame { data: buffer.clone(), width: w, height: h };
                 // try_send: drop the frame if the channel is full (main thread hasn't consumed yet)
                 let _ = sender.try_send(frame);
             }
@@ -375,6 +378,7 @@ struct DxgiCapture {
     desc_width: u32,
     desc_height: u32,
     frame_acquired: bool,
+    frame_buffer: Vec<u8>,
 }
 
 #[cfg(target_os = "windows")]
@@ -428,12 +432,16 @@ impl DxgiCapture {
             desc_width,
             desc_height,
             frame_acquired: false,
+            frame_buffer: Vec::new(),
         })
     }
 
-    /// Acquire a DXGI frame, copy to staging, map, and return tightly-packed BGRA pixels.
-    /// Returns Ok(None) if no new frame is available.
-    fn capture_bgra_frame(&mut self) -> Result<Option<CaptureFrame>> {
+    /// Acquire a DXGI frame, copy to staging, map, and write tightly-packed BGRA pixels
+    /// into the caller-provided buffer. Returns Ok(Some((width, height))) on success,
+    /// Ok(None) if no new frame is available.
+    ///
+    /// The buffer is resized as needed and reused across calls to avoid per-frame allocation.
+    fn capture_bgra_frame_into(&mut self, buffer: &mut Vec<u8>) -> Result<Option<(u32, u32)>> {
         use windows::core::Interface;
         use windows::Win32::Graphics::Direct3D11::*;
         use windows::Win32::Graphics::Dxgi::Common::*;
@@ -515,14 +523,16 @@ impl DxgiCapture {
         let pitch = mapped.RowPitch as usize;
         let row_bytes = (width * 4) as usize;
 
+        // Resize buffer once (stays allocated across frames)
+        buffer.resize((width * height * 4) as usize, 0);
+
         // Copy rows: handle pitch (mapped data may have padding per row)
-        let mut data = vec![0u8; (width * height * 4) as usize];
         unsafe {
             let src = mapped.pData as *const u8;
             for y in 0..height as usize {
                 let src_row = src.add(y * pitch);
                 let dst_off = y * row_bytes;
-                std::ptr::copy_nonoverlapping(src_row, data.as_mut_ptr().add(dst_off), row_bytes);
+                std::ptr::copy_nonoverlapping(src_row, buffer.as_mut_ptr().add(dst_off), row_bytes);
             }
         }
 
@@ -532,7 +542,10 @@ impl DxgiCapture {
         }
         self.release_frame()?;
 
-        Ok(Some(CaptureFrame { data, width, height }))
+        // Draw mouse cursor into the buffer
+        draw_cursor_into_buffer(buffer, width, height);
+
+        Ok(Some((width, height)))
     }
 
     fn release_frame(&mut self) -> Result<()> {
@@ -541,5 +554,63 @@ impl DxgiCapture {
             self.frame_acquired = false;
         }
         Ok(())
+    }
+}
+
+/// Draw the system mouse cursor into a BGRA pixel buffer.
+#[cfg(target_os = "windows")]
+fn draw_cursor_into_buffer(buffer: &mut [u8], width: u32, height: u32) {
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    use windows::Win32::Foundation::POINT;
+
+    let mut pt = POINT::default();
+    let ok = unsafe { GetCursorPos(&mut pt) };
+    if !ok.is_ok() {
+        return;
+    }
+
+    let cx = pt.x;
+    let cy = pt.y;
+
+    // Draw a small white crosshair (5px radius) at cursor position
+    let radius = 5i32;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            // Crosshair shape: horizontal or vertical line
+            if dx.abs() > 1 && dy.abs() > 1 {
+                continue;
+            }
+            let px = cx + dx;
+            let py = cy + dy;
+            if px >= 0 && py >= 0 && (px as u32) < width && (py as u32) < height {
+                let idx = ((py as u32 * width + px as u32) * 4) as usize;
+                if idx + 3 < buffer.len() {
+                    // BGRA format: white with full alpha
+                    buffer[idx] = 0xFF;     // B
+                    buffer[idx + 1] = 0xFF; // G
+                    buffer[idx + 2] = 0xFF; // R
+                    buffer[idx + 3] = 0xFF; // A
+                }
+            }
+        }
+    }
+    // Dark outline
+    for dy in -(radius + 1)..=(radius + 1) {
+        for dx in -(radius + 1)..=(radius + 1) {
+            if dx.abs() > 2 && dy.abs() > 2 { continue; }
+            if dx.abs() <= 1 && dy.abs() <= radius { continue; } // skip inner crosshair
+            if dy.abs() <= 1 && dx.abs() <= radius { continue; }
+            let px = cx + dx;
+            let py = cy + dy;
+            if px >= 0 && py >= 0 && (px as u32) < width && (py as u32) < height {
+                let idx = ((py as u32 * width + px as u32) * 4) as usize;
+                if idx + 3 < buffer.len() {
+                    buffer[idx] = 0x00;
+                    buffer[idx + 1] = 0x00;
+                    buffer[idx + 2] = 0x00;
+                    buffer[idx + 3] = 0xFF;
+                }
+            }
+        }
     }
 }

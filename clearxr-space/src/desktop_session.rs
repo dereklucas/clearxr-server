@@ -16,26 +16,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::game_scanner;
-use crate::launcher_panel::LauncherPanel;
 use crate::renderer::{
     create_pipeline, create_render_pass_with_layout, record_render_pass_open, HandData, HandUbo, PushConstants,
 };
-use crate::screen_capture::ScreenCapture;
-use crate::ui_renderer::UiRenderer;
 use crate::vk_backend::VkBackend;
-
-/// What drives the panel texture.
-enum PanelSource {
-    /// HTML launcher UI via Ultralight
-    Launcher {
-        ui: UiRenderer,
-    },
-    /// Live desktop/window capture
-    Screen {
-        capture: ScreenCapture,
-    },
-}
 
 pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()> {
     let event_loop = EventLoop::new()?;
@@ -70,8 +54,7 @@ struct DesktopState {
     image_available: vk::Semaphore,
     render_finished: vk::Semaphore,
     hand_ubo: HandUbo,
-    launcher: LauncherPanel,
-    panel_source: PanelSource,
+    shell: crate::shell::Shell,
     // Camera state
     cam_pos: Vec3,
     cam_yaw: f32,   // radians
@@ -81,11 +64,6 @@ struct DesktopState {
     mouse_clicking: bool,
     start_time: std::time::Instant,
     needs_swapchain_recreate: bool,
-    // FPS counter
-    fps_panel: LauncherPanel,
-    fps_update_timer: std::time::Instant,
-    fps_frame_count: u32,
-    fps_current: f32,
 }
 
 #[derive(Default)]
@@ -257,58 +235,9 @@ impl DesktopState {
         let (pipeline_layout, pipeline) =
             create_pipeline(vk.device(), render_pass, hand_ubo.descriptor_set_layout, false)?;
 
-        // Panel texture source
-        let (tex_w, tex_h, mut panel_source) = if use_screen_capture {
-            let capture = ScreenCapture::new()?;
-            let tex_w = capture.screen_width();
-            let tex_h = capture.screen_height();
-            info!("Screen capture mode: {}x{}", tex_w, tex_h);
-            (tex_w, tex_h, PanelSource::Screen { capture })
-        } else {
-            let tex_w = 1024;
-            let tex_h = 640;
-            let games = game_scanner::scan_all();
-            info!("Initializing launcher UI...");
-            let html_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/launcher.html");
-            let mut ui = UiRenderer::new(tex_w, tex_h, &html_path)?;
-            if let Err(e) = ui.set_games(&games) {
-                log::warn!("Failed to inject games into UI: {}", e);
-            }
-            info!("Launcher UI initialized ({}x{}, {} games)", tex_w, tex_h, games.len());
-            (tex_w, tex_h, PanelSource::Launcher { ui })
-        };
-
-        let tex_format = if use_screen_capture {
-            vk::Format::B8G8R8A8_SRGB
-        } else {
-            vk::Format::R8G8B8A8_SRGB
-        };
-        let mut launcher = LauncherPanel::new(&vk, render_pass, tex_w, tex_h, tex_format)?;
-
-        // Initial texture upload
-        match &mut panel_source {
-            PanelSource::Launcher { ui } => {
-                if let Some(pixels) = ui.update() {
-                    launcher.upload_pixels(&vk, pixels)?;
-                }
-            }
-            PanelSource::Screen { capture } => {
-                if let Some(frame) = capture.try_get_frame() {
-                    launcher.upload_pixels(&vk, &frame.data)?;
-                }
-            }
-        };
-
-        // FPS counter panel (on the floor)
-        let fps_w = 128u32;
-        let fps_h = 48u32;
-        let mut fps_panel = LauncherPanel::new(&vk, render_pass, fps_w, fps_h, vk::Format::R8G8B8A8_SRGB)?;
-        fps_panel.center = Vec3::new(0.0, 0.01, -0.5);
-        fps_panel.width = 0.3;
-        fps_panel.height = 0.12;
-        fps_panel.opacity = 0.9;
-        fps_panel.right_dir = Vec3::X;
-        fps_panel.up_dir = -Vec3::Z;
+        // Shell: owns all panels, content sources, input dispatcher
+        let config = crate::config::Config::load();
+        let shell = crate::shell::Shell::new(config, use_screen_capture, &vk, render_pass)?;
 
         // Command buffer
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -347,8 +276,7 @@ impl DesktopState {
             image_available,
             render_finished,
             hand_ubo,
-            launcher,
-            panel_source,
+            shell,
             cam_pos: Vec3::new(0.0, 1.6, 0.0), // eye height
             cam_yaw: 0.0,
             cam_pitch: 0.0,
@@ -357,10 +285,6 @@ impl DesktopState {
             mouse_clicking: false,
             start_time: std::time::Instant::now(),
             needs_swapchain_recreate: false,
-            fps_panel,
-            fps_update_timer: std::time::Instant::now(),
-            fps_frame_count: 0,
-            fps_current: 0.0,
         })
     }
 
@@ -438,43 +362,18 @@ impl DesktopState {
             ],
         };
 
-        // ---- Panel source update ----
-        match &mut self.panel_source {
-            PanelSource::Launcher { ui } => {
-                // UI interaction: aim ray → panel hit test
-                if let Some((u, v, _)) =
-                    self.launcher.hit_test(self.cam_pos, forward, self.cam_pos)
-                {
-                    ui.mouse_move(u, v);
-                    if self.mouse_clicking {
-                        ui.mouse_click(u, v);
-                    }
-                }
-                // Update UI (hot-reload check + re-render if dirty)
-                if let Some(pixels) = ui.update() {
-                    if let Err(e) = self.launcher.upload_pixels(&self.vk, pixels) {
-                        log::error!("Panel texture upload failed: {}", e);
-                    }
-                }
-            }
-            PanelSource::Screen { capture } => {
-                // Input injection: aim ray → panel hit → move/click real mouse
-                if let Some((u, v, _)) =
-                    self.launcher.hit_test(self.cam_pos, forward, self.cam_pos)
-                {
-                    capture.inject_mouse_move(u, v);
-                    if self.mouse_clicking {
-                        capture.inject_mouse_click(u, v);
-                    }
-                }
-                // Stage new frame (CPU memcpy only, GPU upload in render cmd)
-                if let Some(frame) = capture.try_get_frame() {
-                    if let Err(e) = self.launcher.stage_pixels(&frame.data) {
-                        log::error!("Screen capture stage failed: {}", e);
-                    }
-                }
-            }
-        }
+        // ---- Shell tick: input, content updates, FPS ----
+        let controller = crate::input::ControllerState {
+            right: crate::input::HandState {
+                active: true,
+                aim_pos: self.cam_pos,
+                aim_dir: forward,
+                trigger: if self.mouse_clicking { 1.0 } else { 0.0 },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let shell_frame = self.shell.tick(&self.vk, &controller);
 
         // Simulate a right controller held in front of camera, pointing forward
         let mut hand_data = HandData::default();
@@ -484,6 +383,12 @@ impl DesktopState {
         hand_data.ctrl_grip[1] = [ctrl_pos.x, ctrl_pos.y, ctrl_pos.z, 0.02];
         hand_data.ctrl_aim_pos[1] = [ctrl_pos.x, ctrl_pos.y, ctrl_pos.z, 0.0];
         hand_data.ctrl_aim_dir[1] = [forward.x, forward.y, forward.z, 0.0];
+        // Use shell ray hit distance for controller beam length
+        hand_data.ctrl_aim_dir[1][3] = if shell_frame.right_ray_hit_dist > 0.02 {
+            shell_frame.right_ray_hit_dist - 0.02
+        } else {
+            shell_frame.right_ray_hit_dist
+        };
         hand_data.ctrl_grip_right[1] = [right.x, right.y, right.z, 0.0];
         hand_data.ctrl_grip_up[1] = [up.x, up.y, up.z, 0.0];
         // Map mouse click to trigger
@@ -494,14 +399,15 @@ impl DesktopState {
 
         let fb = self.framebuffers[img_idx as usize];
 
-        // Begin command buffer + record any pending texture uploads
+        // Begin command buffer
         let begin_info = vk::CommandBufferBeginInfo {
             flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
             ..Default::default()
         };
         unsafe { device.begin_command_buffer(self.command_buffer, &begin_info)? };
-        self.launcher.record_upload(device, self.command_buffer);
-        self.fps_panel.record_upload(device, self.command_buffer);
+
+        // Record pending panel texture uploads (before render pass)
+        self.shell.record_uploads(device, self.command_buffer);
 
         // Draw scene background (leaves render pass open)
         record_render_pass_open(
@@ -517,22 +423,8 @@ impl DesktopState {
             false,
         );
 
-        // Draw launcher panel on top of scene
-        self.launcher.record_draw(device, self.command_buffer, &push);
-
-        // FPS counter update (every 0.5s)
-        self.fps_frame_count += 1;
-        let fps_elapsed = self.fps_update_timer.elapsed().as_secs_f32();
-        if fps_elapsed >= 0.5 {
-            self.fps_current = self.fps_frame_count as f32 / fps_elapsed;
-            self.fps_frame_count = 0;
-            self.fps_update_timer = std::time::Instant::now();
-            let fps_pixels = crate::launcher_panel::generate_fps_pixels(128, 48, self.fps_current);
-            if let Err(e) = self.fps_panel.upload_pixels(&self.vk, &fps_pixels) {
-                log::error!("FPS panel upload failed: {}", e);
-            }
-        }
-        self.fps_panel.record_draw(device, self.command_buffer, &push);
+        // Draw all shell panels
+        self.shell.record_draws(device, self.command_buffer, &push);
 
         // Close render pass + command buffer
         unsafe {
@@ -633,8 +525,7 @@ impl Drop for DesktopState {
             self.swapchain_fn.destroy_swapchain(self.swapchain, None);
             self.surface_fn.destroy_surface(self.surface, None);
         }
-        self.launcher.destroy(device);
-        self.fps_panel.destroy(device);
+        self.shell.destroy(device);
         self.hand_ubo.destroy(device);
     }
 }

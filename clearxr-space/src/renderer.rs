@@ -226,6 +226,7 @@ pub struct Renderer {
     pub swapchains: Vec<EyeSwapchain>, // 2 for stereo, 4 for quad (foveated)
     pub has_depth: bool,
     pub render_pass: vk::RenderPass,
+    pub color_format: vk::Format,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     command_buffer: vk::CommandBuffer,
@@ -237,6 +238,10 @@ pub struct Renderer {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
+    /// Set to true to capture a screenshot on the next frame (left eye).
+    pub screenshot_pending: bool,
+    /// Captured screenshot data: (pixels, width, height). Filled after render_frame if screenshot_pending was set.
+    pub screenshot_result: Option<(Vec<u8>, u32, u32)>,
 }
 
 // Safety: the mapped pointer is only used from the main thread that owns the Renderer.
@@ -412,6 +417,7 @@ impl Renderer {
             swapchains,
             has_depth,
             render_pass,
+            color_format: vk_format,
             pipeline_layout,
             pipeline,
             command_buffer,
@@ -422,6 +428,8 @@ impl Renderer {
             descriptor_set_layout,
             descriptor_pool,
             descriptor_set,
+            screenshot_pending: false,
+            screenshot_result: None,
         })
     }
 
@@ -513,6 +521,14 @@ impl Renderer {
                         log::debug!("Mirror blit skipped: {}", e);
                     }
                 }
+
+                // Capture screenshot (left eye) if requested — must happen before release_image
+                if self.screenshot_pending {
+                    self.screenshot_pending = false;
+                    self.screenshot_result = Self::gpu_readback(
+                        device, vk, sw.images[image_idx], res.width, res.height, self.color_format,
+                    );
+                }
             }
 
             sw.handle.release_image()?;
@@ -528,6 +544,161 @@ impl Renderer {
     pub fn update_hand_data(&mut self, data: &HandData) {
         unsafe {
             std::ptr::copy_nonoverlapping(data, self.hand_ubo_mapped, 1);
+        }
+    }
+
+    /// Read back pixels from a swapchain image using a staging buffer.
+    /// The image must still be acquired (not yet released to the runtime).
+    /// Returns (RGBA pixels, width, height) or None on failure.
+    fn gpu_readback(
+        device: &ash::Device,
+        vk: &VkBackend,
+        image: vk::Image,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let size = (width as usize) * (height as usize) * 4;
+
+        // Create staging buffer (host-visible, transfer-dst)
+        let buf_ci = vk::BufferCreateInfo {
+            size: size as u64,
+            usage: vk::BufferUsageFlags::TRANSFER_DST,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+        let buffer = unsafe { device.create_buffer(&buf_ci, None).ok()? };
+        let mem_reqs = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let mem_type = vk.find_memory_type(
+            mem_reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        let alloc = vk::MemoryAllocateInfo {
+            allocation_size: mem_reqs.size,
+            memory_type_index: mem_type,
+            ..Default::default()
+        };
+        let memory = unsafe { device.allocate_memory(&alloc, None).ok()? };
+        unsafe { device.bind_buffer_memory(buffer, memory, 0).ok()? };
+
+        // Allocate a one-shot command buffer
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(vk.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd = unsafe { device.allocate_command_buffers(&alloc_info).ok()?[0] };
+
+        let begin = vk::CommandBufferBeginInfo {
+            flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            ..Default::default()
+        };
+
+        unsafe {
+            device.begin_command_buffer(cmd, &begin).ok()?;
+
+            // Transition image: COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL
+            let barrier = vk::ImageMemoryBarrier {
+                old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                image,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    level_count: 1,
+                    layer_count: 1,
+                    ..Default::default()
+                },
+                src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                dst_access_mask: vk::AccessFlags::TRANSFER_READ,
+                ..Default::default()
+            };
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+
+            // Copy image to buffer
+            let region = vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D::default(),
+                image_extent: vk::Extent3D { width, height, depth: 1 },
+            };
+            device.cmd_copy_image_to_buffer(
+                cmd,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &[region],
+            );
+
+            // Transition back: TRANSFER_SRC -> COLOR_ATTACHMENT_OPTIMAL
+            let barrier2 = vk::ImageMemoryBarrier {
+                old_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                image,
+                subresource_range: barrier.subresource_range,
+                src_access_mask: vk::AccessFlags::TRANSFER_READ,
+                dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                ..Default::default()
+            };
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier2],
+            );
+
+            device.end_command_buffer(cmd).ok()?;
+
+            // Submit and wait
+            let submit = vk::SubmitInfo {
+                command_buffer_count: 1,
+                p_command_buffers: &cmd,
+                ..Default::default()
+            };
+            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None).ok()?;
+            device.queue_submit(vk.queue(), &[submit], fence).ok()?;
+            device.wait_for_fences(&[fence], true, u64::MAX).ok()?;
+
+            // Map and read
+            let ptr = device.map_memory(memory, 0, size as u64, vk::MemoryMapFlags::empty()).ok()?;
+            let mut pixels = vec![0u8; size];
+            std::ptr::copy_nonoverlapping(ptr as *const u8, pixels.as_mut_ptr(), size);
+            device.unmap_memory(memory);
+
+            // Swap B and R channels if the swapchain format is BGRA
+            if format == vk::Format::B8G8R8A8_SRGB || format == vk::Format::B8G8R8A8_UNORM {
+                for chunk in pixels.chunks_exact_mut(4) {
+                    chunk.swap(0, 2); // swap R <-> B
+                }
+            }
+
+            // Cleanup
+            device.destroy_fence(fence, None);
+            device.free_command_buffers(vk.command_pool, &[cmd]);
+            device.destroy_buffer(buffer, None);
+            device.free_memory(memory, None);
+
+            Some((pixels, width, height))
         }
     }
 

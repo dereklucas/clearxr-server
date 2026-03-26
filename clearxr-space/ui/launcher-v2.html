@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>ClearXR Launcher</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0a14;
+    --surface: #13132a;
+    --surface-hover: #1a1a3a;
+    --accent: #4a9eff;
+    --accent-dim: #3578cc;
+    --accent-glow: rgba(74, 158, 255, 0.25);
+    --text: #e4e4ee;
+    --text-muted: #6a7088;
+    --badge-vr: #4a9eff;
+    --badge-flat: #555568;
+    --card-radius: 10px;
+    --transition: 0.18s ease;
+  }
+
+  body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---- Header ---- */
+  .header {
+    flex-shrink: 0;
+    padding: 16px 28px 0 28px;
+  }
+
+  .header-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+
+  .logo {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+  }
+  .logo .clear { color: #e4e4ee; }
+  .logo .xr { color: var(--accent); }
+
+  .game-count {
+    color: var(--text-muted);
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  /* ---- Search bar ---- */
+  .search-wrap {
+    position: relative;
+    margin-bottom: 12px;
+  }
+
+  .search-icon {
+    position: absolute;
+    left: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    font-size: 16px;
+    pointer-events: none;
+  }
+
+  .search {
+    width: 100%;
+    height: 48px;
+    background: var(--surface);
+    border: 1px solid #252540;
+    border-radius: 10px;
+    color: var(--text);
+    padding: 0 18px 0 44px;
+    font-size: 16px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color var(--transition), box-shadow var(--transition);
+  }
+  .search:focus {
+    border-color: var(--accent-dim);
+    box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.1);
+  }
+  .search::placeholder {
+    color: var(--text-muted);
+  }
+
+  /* ---- Category tabs ---- */
+  .tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 2px;
+  }
+
+  .tab {
+    height: 40px;
+    padding: 0 20px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background var(--transition), color var(--transition), border-color var(--transition);
+    min-width: 48px;
+  }
+  .tab:hover {
+    background: var(--surface);
+    color: var(--text);
+  }
+  .tab.active {
+    background: var(--surface);
+    color: var(--accent);
+    border-color: #252540;
+  }
+
+  /* ---- Divider ---- */
+  .divider {
+    flex-shrink: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #252540 15%, #252540 85%, transparent);
+    margin: 0 28px;
+  }
+
+  /* ---- Game Grid ---- */
+  .grid-wrap {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 28px 20px 28px;
+    scrollbar-width: thin;
+    scrollbar-color: #252540 transparent;
+  }
+  .grid-wrap::-webkit-scrollbar {
+    width: 6px;
+  }
+  .grid-wrap::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .grid-wrap::-webkit-scrollbar-thumb {
+    background: #252540;
+    border-radius: 3px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+  }
+
+  /* ---- Game Card ---- */
+  .card {
+    background: var(--surface);
+    border-radius: var(--card-radius);
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+    border: 1px solid #1e1e38;
+    position: relative;
+  }
+  .card:hover {
+    transform: translateY(-3px) scale(1.015);
+    box-shadow: 0 8px 28px rgba(74, 158, 255, 0.12), 0 2px 8px rgba(0,0,0,0.4);
+    border-color: var(--accent-dim);
+  }
+  .card:active {
+    transform: translateY(0px) scale(0.99);
+    box-shadow: 0 2px 8px rgba(74, 158, 255, 0.08);
+    border-color: var(--accent);
+  }
+
+  .card-art {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card-art-initials {
+    font-size: 32px;
+    font-weight: 800;
+    color: rgba(255, 255, 255, 0.08);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    user-select: none;
+  }
+
+  /* Badge */
+  .card-badge {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .card-badge.vr {
+    background: rgba(74, 158, 255, 0.2);
+    color: var(--badge-vr);
+    border: 1px solid rgba(74, 158, 255, 0.3);
+  }
+  .card-badge.flat {
+    background: rgba(85, 85, 104, 0.25);
+    color: #888898;
+    border: 1px solid rgba(85, 85, 104, 0.3);
+  }
+
+  .card-info {
+    padding: 10px 12px;
+  }
+
+  .card-title {
+    font-size: 16px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.3;
+  }
+
+  /* ---- Launch overlay ---- */
+  .card .launch-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(74, 158, 255, 0.04) 0%, rgba(74, 158, 255, 0.1) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity var(--transition);
+  }
+  .card:hover .launch-overlay {
+    opacity: 1;
+  }
+  .launch-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 20px;
+    padding: 8px 28px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    cursor: pointer;
+    text-transform: uppercase;
+    font-family: inherit;
+    box-shadow: 0 4px 16px rgba(74, 158, 255, 0.3);
+    transition: transform var(--transition), box-shadow var(--transition);
+  }
+  .launch-btn:hover {
+    transform: scale(1.05);
+    box-shadow: 0 6px 20px rgba(74, 158, 255, 0.4);
+  }
+  .launch-btn:active {
+    transform: scale(0.97);
+  }
+
+  /* ---- Empty state ---- */
+  .empty-state {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 100px 40px;
+    color: var(--text-muted);
+  }
+  .empty-state-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    opacity: 0.3;
+  }
+  .empty-state h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text);
+  }
+  .empty-state p {
+    font-size: 15px;
+    line-height: 1.5;
+    max-width: 360px;
+    margin: 0 auto;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-top">
+    <div class="logo"><span class="clear">CLEAR</span><span class="xr">XR</span></div>
+    <span class="game-count" id="gameCount">0 games</span>
+  </div>
+  <div class="search-wrap">
+    <span class="search-icon">&#x1F50D;</span>
+    <input class="search" type="text" placeholder="Search games..." id="searchBox" autocomplete="off">
+  </div>
+  <div class="tabs" id="tabBar">
+    <button class="tab active" data-cat="all">All</button>
+    <button class="tab" data-cat="recent">Recent</button>
+    <button class="tab" data-cat="vr">VR</button>
+    <button class="tab" data-cat="flat">Flat</button>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<div class="grid-wrap" id="gridWrap">
+  <div class="grid" id="gameGrid">
+    <!-- Cards injected by JS -->
+  </div>
+</div>
+
+<script>
+  // Game data injected from Rust via: window.GAMES = [{ name, app_id, install_dir }]
+
+  var _activeCategory = 'all';
+
+  // Simple hash to pick gradient colors per game name
+  function nameHash(str) {
+    var h = 0;
+    for (var i = 0; i < str.length; i++) {
+      h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    }
+    return Math.abs(h);
+  }
+
+  // Generate a gradient pair from a game name
+  function artGradient(name) {
+    var h = nameHash(name);
+    var hue = h % 360;
+    var sat = 35 + (h % 25);
+    var c1 = 'hsl(' + hue + ',' + sat + '%,18%)';
+    var c2 = 'hsl(' + ((hue + 40) % 360) + ',' + (sat + 10) + '%,25%)';
+    return 'linear-gradient(135deg, ' + c1 + ', ' + c2 + ')';
+  }
+
+  // Extract initials from game name
+  function initials(name) {
+    var words = name.replace(/[^a-zA-Z0-9\s]/g, '').trim().split(/\s+/);
+    if (words.length === 1) return words[0].substring(0, 2).toUpperCase();
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+
+  // Determine if game is VR (stub: check name for VR keywords)
+  function isVR(game) {
+    var n = game.name.toLowerCase();
+    return n.indexOf(' vr') !== -1 || n.indexOf('vr ') !== -1 || n === 'vr';
+  }
+
+  function renderGames(filter) {
+    var grid = document.getElementById('gameGrid');
+    var countEl = document.getElementById('gameCount');
+    var games = window.GAMES || [];
+
+    // Apply category filter
+    var catFiltered = games;
+    if (_activeCategory === 'vr') {
+      catFiltered = games.filter(function(g) { return isVR(g); });
+    } else if (_activeCategory === 'flat') {
+      catFiltered = games.filter(function(g) { return !isVR(g); });
+    }
+    // 'recent' and 'all' show everything for now
+
+    // Apply search filter
+    var filtered = catFiltered;
+    if (filter) {
+      var q = filter.toLowerCase();
+      filtered = catFiltered.filter(function(g) {
+        return g.name.toLowerCase().indexOf(q) !== -1;
+      });
+    }
+
+    countEl.textContent = filtered.length + ' game' + (filtered.length !== 1 ? 's' : '');
+
+    if (filtered.length === 0 && games.length === 0) {
+      grid.innerHTML =
+        '<div class="empty-state">' +
+          '<div class="empty-state-icon">&#x1F3AE;</div>' +
+          '<h2>No games found</h2>' +
+          '<p>Install games via Steam to see them here.</p>' +
+        '</div>';
+      return;
+    }
+
+    if (filtered.length === 0) {
+      grid.innerHTML =
+        '<div class="empty-state">' +
+          '<div class="empty-state-icon">&#x1F50D;</div>' +
+          '<h2>No matches</h2>' +
+          '<p>Try a different search term or category.</p>' +
+        '</div>';
+      return;
+    }
+
+    var html = '';
+    for (var i = 0; i < filtered.length; i++) {
+      var g = filtered[i];
+      var vr = isVR(g);
+      var badgeClass = vr ? 'vr' : 'flat';
+      var badgeText = vr ? 'VR' : 'FLAT';
+      html +=
+        '<div class="card" data-appid="' + g.app_id + '" onclick="launchGame(' + g.app_id + ')">' +
+          '<div class="card-art" style="background:' + artGradient(g.name) + '">' +
+            '<span class="card-art-initials">' + initials(g.name) + '</span>' +
+            '<span class="card-badge ' + badgeClass + '">' + badgeText + '</span>' +
+          '</div>' +
+          '<div class="card-info">' +
+            '<div class="card-title">' + g.name + '</div>' +
+          '</div>' +
+          '<div class="launch-overlay">' +
+            '<button class="launch-btn">Play</button>' +
+          '</div>' +
+        '</div>';
+    }
+    grid.innerHTML = html;
+  }
+
+  function launchGame(appId) {
+    // Signal to the Rust shell via polling bridge
+    window.__clearxr_pending_launch = String(appId);
+    if (window.__clearxr_launch) {
+      window.__clearxr_launch(appId);
+    }
+  }
+
+  // Search filtering
+  document.getElementById('searchBox').addEventListener('input', function(e) {
+    renderGames(e.target.value);
+  });
+
+  // Category tabs
+  document.getElementById('tabBar').addEventListener('click', function(e) {
+    var btn = e.target;
+    if (!btn.classList.contains('tab')) return;
+    var tabs = document.querySelectorAll('.tab');
+    for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
+    btn.classList.add('active');
+    _activeCategory = btn.getAttribute('data-cat');
+    renderGames(document.getElementById('searchBox').value);
+  });
+
+  // Initial render with placeholder data if no games injected yet
+  if (!window.GAMES) {
+    window.GAMES = [
+      { app_id: 620,    name: "Portal 2",              install_dir: "" },
+      { app_id: 546560, name: "Half-Life: Alyx",        install_dir: "" },
+      { app_id: 620980, name: "Beat Saber",             install_dir: "" },
+      { app_id: 823500, name: "Boneworks",              install_dir: "" },
+      { app_id: 555160, name: "Pavlov VR",              install_dir: "" },
+      { app_id: 667970, name: "VTOL VR",                install_dir: "" },
+      { app_id: 629730, name: "Blade & Sorcery",        install_dir: "" },
+      { app_id: 1012790,name: "Into the Radius",        install_dir: "" },
+      { app_id: 1089980,name: "Pistol Whip",            install_dir: "" },
+      { app_id: 275850, name: "No Man's Sky",            install_dir: "" },
+      { app_id: 292030, name: "The Witcher 3",           install_dir: "" },
+      { app_id: 1174180,name: "Red Dead Redemption 2",   install_dir: "" },
+    ];
+  }
+  renderGames();
+</script>
+
+</body>
+</html>

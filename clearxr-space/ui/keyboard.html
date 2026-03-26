@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=512">
+<title>ClearXR Keyboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0a14;
+    --surface: #13132a;
+    --key-bg: #1e1e38;
+    --key-hover: #2a2a4e;
+    --key-active: #4a9eff;
+    --accent: #4a9eff;
+    --accent-glow: rgba(74, 158, 255, 0.25);
+    --text: #e4e4ee;
+    --text-muted: #6a7088;
+    --text-secondary: #8888aa;
+    --border: #252540;
+    --transition: 0.12s ease;
+    --danger: #ff4a5e;
+    --danger-surface: #2a1318;
+    --danger-border: #4a2030;
+  }
+
+  body {
+    width: 512px;
+    height: 260px;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    padding: 6px 8px;
+    gap: 4px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* ---- Input display ---- */
+  .input-display {
+    flex-shrink: 0;
+    height: 32px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    font-size: 15px;
+    color: var(--text);
+    overflow: hidden;
+    white-space: nowrap;
+    position: relative;
+  }
+
+  .input-display .cursor {
+    display: inline-block;
+    width: 1px;
+    height: 16px;
+    background: var(--accent);
+    margin-left: 1px;
+    animation: blink 1s step-end infinite;
+  }
+
+  .dismiss-btn {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    width: 24px;
+    height: 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition), color var(--transition), border-color var(--transition);
+    z-index: 10;
+  }
+
+  .dismiss-btn:hover {
+    background: var(--danger-surface);
+    color: var(--danger);
+    border-color: var(--danger-border);
+  }
+
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+
+  /* ---- Keyboard rows ---- */
+  .row {
+    display: flex;
+    gap: 3px;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  /* ---- Keys ---- */
+  .key {
+    height: 48px;
+    min-width: 40px;
+    padding: 0 10px;
+    background: var(--key-bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background var(--transition), transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+    flex-shrink: 0;
+  }
+
+  .key:hover {
+    background: var(--key-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    border-color: #3a3a5a;
+  }
+
+  .key:active, .key.pressed {
+    background: var(--key-active);
+    color: #fff;
+    transform: scale(0.95);
+    box-shadow: 0 0 12px var(--accent-glow);
+    border-color: var(--accent);
+  }
+
+  .key.special {
+    background: var(--surface);
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .key.special:hover {
+    background: var(--key-hover);
+    color: var(--text);
+  }
+
+  .key.special:active, .key.special.pressed {
+    background: var(--key-active);
+    color: #fff;
+    transform: scale(0.95);
+  }
+
+  .key.shift-active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    box-shadow: 0 0 8px var(--accent-glow);
+  }
+
+  .key.escape {
+    background: var(--danger-surface);
+    color: var(--danger);
+    border-color: var(--danger-border);
+    font-size: 12px;
+    font-weight: 700;
+    min-width: 44px;
+  }
+
+  .key.escape:hover {
+    background: #3a1520;
+    color: #ff6a7e;
+    border-color: #6a2840;
+  }
+
+  .key.escape:active, .key.escape.pressed {
+    background: var(--danger);
+    color: #fff;
+    transform: scale(0.95);
+  }
+
+  .key.space {
+    flex: 1;
+    max-width: 240px;
+  }
+
+  .key.arrow {
+    min-width: 32px;
+    padding: 0 6px;
+    font-size: 14px;
+  }
+
+  .key.tab {
+    min-width: 52px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .key.backspace { min-width: 64px; }
+  .key.enter { min-width: 64px; }
+  .key.shift { min-width: 58px; }
+
+  /* Dual-label keys (number + shift symbol) */
+  .key .dual-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    line-height: 1.1;
+  }
+
+  .key .dual-label .primary {
+    font-size: 16px;
+  }
+
+  .key .dual-label .secondary {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  .key.pressed .dual-label .secondary,
+  .key:active .dual-label .secondary {
+    color: #fff;
+  }
+</style>
+</head>
+<body>
+
+<div class="input-display" id="display">
+  <span id="displayText"></span><span class="cursor"></span>
+  <div class="dismiss-btn" id="dismissBtn" title="Close keyboard">&#x2715;</div>
+</div>
+
+<div class="row" id="row0"></div>
+<div class="row" id="row1"></div>
+<div class="row" id="row2"></div>
+<div class="row" id="row3"></div>
+
+<script>
+  var _shifted = false;
+  var _text = '';
+
+  var SHIFT_MAP = {
+    '1':'!', '2':'@', '3':'#', '4':'$', '5':'%',
+    '6':'^', '7':'&', '8':'*', '9':'(', '0':')',
+    '-':'_', '=':'+', ';':':', "'":'"',
+    ',':'<', '.':'>', '/':'?'
+  };
+
+  // Keys that show dual labels (primary + shifted symbol)
+  var DUAL_LABEL_KEYS = {
+    '1':'!', '2':'@', '3':'#', '4':'$', '5':'%',
+    '6':'^', '7':'&', '8':'*', '9':'(', '0':')',
+    '-':'_', '=':'+'
+  };
+
+  function createKey(key, parent) {
+    var el = document.createElement('div');
+    el.className = 'key';
+    el.setAttribute('data-key', key);
+
+    if (key === 'shift') {
+      el.classList.add('special', 'shift');
+      el.innerHTML = '&#x21E7;';
+    } else if (key === 'backspace') {
+      el.classList.add('special', 'backspace');
+      el.innerHTML = '&#x2190;';
+    } else if (key === 'enter') {
+      el.classList.add('special', 'enter');
+      el.innerHTML = '&#x21B5;';
+    } else if (key === 'escape') {
+      el.classList.add('escape');
+      el.textContent = 'Esc';
+    } else if (key === 'tab') {
+      el.classList.add('special', 'tab');
+      el.textContent = 'Tab';
+    } else if (key === 'ArrowLeft') {
+      el.classList.add('special', 'arrow');
+      el.innerHTML = '&#x2190;';
+    } else if (key === 'ArrowUp') {
+      el.classList.add('special', 'arrow');
+      el.innerHTML = '&#x2191;';
+    } else if (key === 'ArrowDown') {
+      el.classList.add('special', 'arrow');
+      el.innerHTML = '&#x2193;';
+    } else if (key === 'ArrowRight') {
+      el.classList.add('special', 'arrow');
+      el.innerHTML = '&#x2192;';
+    } else if (DUAL_LABEL_KEYS[key]) {
+      el.classList.add('letter');
+      el.innerHTML = '<span class="dual-label"><span class="secondary">' +
+        DUAL_LABEL_KEYS[key] + '</span><span class="primary">' + key + '</span></span>';
+    } else {
+      el.textContent = key;
+      el.classList.add('letter');
+    }
+
+    el.addEventListener('pointerdown', onKeyDown);
+    el.addEventListener('pointerup', onKeyUp);
+    el.addEventListener('pointerleave', onKeyUp);
+    parent.appendChild(el);
+    return el;
+  }
+
+  function buildKeyboard() {
+    // Row 0: Escape + number row
+    var row0 = document.getElementById('row0');
+    createKey('escape', row0);
+    var numKeys = ['1','2','3','4','5','6','7','8','9','0','-','='];
+    for (var i = 0; i < numKeys.length; i++) {
+      createKey(numKeys[i], row0);
+    }
+
+    // Row 1: Tab + QWERTY row
+    var row1 = document.getElementById('row1');
+    createKey('tab', row1);
+    var qRow = ['q','w','e','r','t','y','u','i','o','p'];
+    for (var i = 0; i < qRow.length; i++) {
+      createKey(qRow[i], row1);
+    }
+
+    // Row 2: home row
+    var row2 = document.getElementById('row2');
+    var homeRow = ['a','s','d','f','g','h','j','k','l',';',"'"];
+    for (var i = 0; i < homeRow.length; i++) {
+      createKey(homeRow[i], row2);
+    }
+
+    // Row 3: shift + bottom row + arrows + space + enter + backspace
+    var row3 = document.getElementById('row3');
+    createKey('shift', row3);
+    var btmKeys = ['z','x','c','v','b','n','m'];
+    for (var i = 0; i < btmKeys.length; i++) {
+      createKey(btmKeys[i], row3);
+    }
+
+    // Space
+    var spaceEl = createKey(' ', row3);
+    spaceEl.classList.add('space');
+    spaceEl.textContent = '';
+
+    // Arrow cluster
+    createKey('ArrowLeft', row3);
+    createKey('ArrowUp', row3);
+    createKey('ArrowDown', row3);
+    createKey('ArrowRight', row3);
+
+    // Enter
+    createKey('enter', row3);
+
+    // Backspace
+    createKey('backspace', row3);
+  }
+
+  function getDisplayChar(key) {
+    if (key.length !== 1) return key;
+    if (_shifted) {
+      if (SHIFT_MAP[key]) return SHIFT_MAP[key];
+      return key.toUpperCase();
+    }
+    return key;
+  }
+
+  function updateLabels() {
+    var letters = document.querySelectorAll('.key.letter');
+    for (var i = 0; i < letters.length; i++) {
+      var k = letters[i].getAttribute('data-key');
+      // Skip dual-label keys — they always show both
+      if (DUAL_LABEL_KEYS[k]) continue;
+      letters[i].textContent = getDisplayChar(k);
+    }
+    var shiftKey = document.querySelector('.key.shift');
+    if (shiftKey) {
+      if (_shifted) {
+        shiftKey.classList.add('shift-active');
+      } else {
+        shiftKey.classList.remove('shift-active');
+      }
+    }
+  }
+
+  function updateDisplay() {
+    document.getElementById('displayText').textContent = _text;
+  }
+
+  function onKeyDown(e) {
+    e.preventDefault();
+    var el = e.currentTarget;
+    el.classList.add('pressed');
+    var key = el.getAttribute('data-key');
+
+    if (key === 'shift') {
+      _shifted = !_shifted;
+      updateLabels();
+      if (window.__clearxr_key) window.__clearxr_key('shift');
+      return;
+    }
+
+    if (key === 'backspace') {
+      _text = _text.slice(0, -1);
+      updateDisplay();
+      if (window.__clearxr_key) window.__clearxr_key('backspace');
+      return;
+    }
+
+    if (key === 'enter') {
+      if (window.__clearxr_key) window.__clearxr_key('enter');
+      return;
+    }
+
+    if (key === 'escape') {
+      if (window.__clearxr_key) window.__clearxr_key('escape');
+      return;
+    }
+
+    if (key === 'tab') {
+      if (window.__clearxr_key) window.__clearxr_key('tab');
+      return;
+    }
+
+    if (key.indexOf('Arrow') === 0) {
+      if (window.__clearxr_key) window.__clearxr_key(key);
+      return;
+    }
+
+    // Regular character
+    var ch = getDisplayChar(key);
+    _text += ch;
+    updateDisplay();
+    if (window.__clearxr_key) window.__clearxr_key(ch);
+
+    // Auto-release shift after typing a character
+    if (_shifted) {
+      _shifted = false;
+      updateLabels();
+    }
+  }
+
+  function onKeyUp(e) {
+    e.currentTarget.classList.remove('pressed');
+  }
+
+  // Dismiss button
+  document.getElementById('dismissBtn').addEventListener('pointerdown', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (window.__clearxr_key) window.__clearxr_key('dismiss');
+  });
+
+  // Rust bridge: set display text externally
+  window.__clearxr_set_text = function(text) {
+    _text = text;
+    updateDisplay();
+  };
+
+  buildKeyboard();
+  updateDisplay();
+</script>
+
+</body>
+</html>
