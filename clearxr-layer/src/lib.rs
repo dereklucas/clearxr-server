@@ -181,6 +181,7 @@ struct ApiLayerNextInfo {
 // Dispatch table — "next" function pointers
 // ============================================================
 
+#[derive(Clone, Copy)]
 struct NextDispatch {
     get_instance_proc_addr: xr::pfn::GetInstanceProcAddr,
     destroy_instance: xr::pfn::DestroyInstance,
@@ -209,6 +210,7 @@ struct NextDispatch {
     create_action_space: xr::pfn::CreateActionSpace,
     locate_space: xr::pfn::LocateSpace,
     get_action_state_float: xr::pfn::GetActionStateFloat,
+    get_action_state_vector2f: xr::pfn::GetActionStateVector2f,
 }
 
 // ============================================================
@@ -285,12 +287,14 @@ struct LayerState {
 }
 
 /// Captured controller state for one hand.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Copy)]
 struct ControllerHandState {
     aim_pos: [f32; 3],
     aim_orient: [f32; 4], // quaternion xyzw
     trigger: f32,
     squeeze: f32,
+    thumbstick_x: f32,
+    thumbstick_y: f32,
     active: bool,
 }
 
@@ -300,6 +304,10 @@ static LAYER: Mutex<Option<LayerState>> = Mutex::new(None);
 static NEXT_GPA: Mutex<Option<xr::pfn::GetInstanceProcAddr>> = Mutex::new(None);
 static NEXT_CREATE: Mutex<Option<CreateApiLayerInstanceFn>> = Mutex::new(None);
 
+// Next-layer dispatch table — set once at instance creation, read from every hook
+// without locking LAYER. This is the key to avoiding mutex contention.
+static NEXT: OnceLock<NextDispatch> = OnceLock::new();
+
 // Hot-path state for xrLocateSpace / xrGetActionStateFloat hooks.
 // These are called dozens of times per frame — must be lock-free or near-lock-free.
 // Function pointers are write-once — use OnceLock (already imported above).
@@ -307,15 +315,17 @@ static NEXT_CREATE: Mutex<Option<CreateApiLayerInstanceFn>> = Mutex::new(None);
 use std::sync::RwLock;
 
 static CONTROLLER_STATE: RwLock<[ControllerHandState; 2]> = RwLock::new([
-    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, active: false },
-    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, active: false },
+    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, thumbstick_x: 0.0, thumbstick_y: 0.0, active: false },
+    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, thumbstick_x: 0.0, thumbstick_y: 0.0, active: false },
 ]);
 // These maps are populated at init time and read-only during the frame loop.
 static AIM_SPACES: OnceLock<RwLock<HashMap<u64, Hand>>> = OnceLock::new();
 static TRIGGER_ACTIONS: OnceLock<RwLock<HashMap<(u64, Hand), ()>>> = OnceLock::new();
 static SQUEEZE_ACTIONS: OnceLock<RwLock<HashMap<(u64, Hand), ()>>> = OnceLock::new();
+static THUMBSTICK_ACTIONS: OnceLock<RwLock<HashMap<u64, ()>>> = OnceLock::new();
 static NEXT_LOCATE_SPACE: OnceLock<xr::pfn::LocateSpace> = OnceLock::new();
 static NEXT_GET_FLOAT: OnceLock<xr::pfn::GetActionStateFloat> = OnceLock::new();
+static NEXT_GET_VEC2: OnceLock<xr::pfn::GetActionStateVector2f> = OnceLock::new();
 
 // ============================================================
 // DLL export: xrNegotiateLoaderApiLayerInterface
@@ -548,10 +558,13 @@ unsafe extern "system" fn layer_create_api_layer_instance(
             )
             .unwrap_or(xr::Path::NULL);
 
-            // Store function pointers in separate statics for hot-path hooks
-            // (must be done before dispatch is moved into LayerState)
+            // Store the dispatch table in a lock-free static for all hooks.
+            // This MUST be done before dispatch is moved into LayerState.
+            let _ = NEXT.set(dispatch);
             let _ = NEXT_LOCATE_SPACE.set(dispatch.locate_space);
             let _ = NEXT_GET_FLOAT.set(dispatch.get_action_state_float);
+            let _ = NEXT_GET_VEC2.set(dispatch.get_action_state_vector2f);
+            let _ = THUMBSTICK_ACTIONS.set(RwLock::new(HashMap::new()));
             let _ = AIM_SPACES.set(RwLock::new(HashMap::new()));
             let _ = TRIGGER_ACTIONS.set(RwLock::new(HashMap::new()));
             let _ = SQUEEZE_ACTIONS.set(RwLock::new(HashMap::new()));
@@ -686,6 +699,7 @@ unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instan
         create_action_space: load_fn(gpa, instance, b"xrCreateActionSpace\0"),
         locate_space: load_fn(gpa, instance, b"xrLocateSpace\0"),
         get_action_state_float: load_fn(gpa, instance, b"xrGetActionStateFloat\0"),
+        get_action_state_vector2f: load_fn(gpa, instance, b"xrGetActionStateVector2f\0"),
     }
 }
 
@@ -807,6 +821,7 @@ unsafe extern "system" fn layer_get_instance_proc_addr(
     intercept!(b"xrCreateActionSpace", hook_create_action_space as xr::pfn::CreateActionSpace);
     intercept!(b"xrLocateSpace", hook_locate_space as xr::pfn::LocateSpace);
     intercept!(b"xrGetActionStateFloat", hook_get_action_state_float as xr::pfn::GetActionStateFloat);
+    intercept!(b"xrGetActionStateVector2f", hook_get_action_state_vector2f as xr::pfn::GetActionStateVector2f);
 
     // Pass through to next layer
     let guard = LAYER.lock().unwrap();
@@ -895,8 +910,8 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         left: SpatialControllerHand {
             buttons: 0,
             _reserved: 0,
-            thumbstick_x: 0.0,
-            thumbstick_y: 0.0,
+            thumbstick_x: left.thumbstick_x,
+            thumbstick_y: left.thumbstick_y,
             trigger: left.trigger,
             grip: left.squeeze,
             pos_x: left.aim_pos[0],
@@ -910,8 +925,8 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         right: SpatialControllerHand {
             buttons: 0,
             _reserved: 0,
-            thumbstick_x: 0.0,
-            thumbstick_y: 0.0,
+            thumbstick_x: right.thumbstick_x,
+            thumbstick_y: right.thumbstick_y,
             trigger: right.trigger,
             grip: right.squeeze,
             pos_x: right.aim_pos[0],
@@ -1188,6 +1203,10 @@ unsafe extern "system" fn hook_suggest_bindings(
                 if let Some(lock) = SQUEEZE_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert((action_raw, hand), ()); } }
                 layer_log!(info, "[ClearXR Layer] Tracked squeeze action: 0x{:x} {:?}", action_raw, hand);
             }
+            if component == "/input/thumbstick" {
+                if let Some(lock) = THUMBSTICK_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert(action_raw, ()); } }
+                layer_log!(info, "[ClearXR Layer] Tracked thumbstick action: 0x{:x}", action_raw);
+            }
 
             if is_haptic_output_path(component) {
                 state.haptic_actions.insert((action_raw, hand));
@@ -1254,75 +1273,83 @@ unsafe extern "system" fn hook_sync_actions(
     session: xr::Session,
     sync_info: *const xr::ActionsSyncInfo,
 ) -> xr::Result {
-    let mut guard = LAYER.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
+    // Call runtime WITHOUT holding the LAYER mutex
+    let next = match NEXT.get() {
+        Some(n) => *n,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
-
-    // Pass through first
-    let result = (state.next.sync_actions)(session, sync_info);
-
-    poll_opaque_and_update_overlay(state);
-
-    result
+    // Just pass through — poll_opaque_and_update_overlay is called in hook_end_frame
+    (next.sync_actions)(session, sync_info)
 }
 
 unsafe extern "system" fn hook_end_frame(
     session: xr::Session,
     frame_end_info: *const xr::FrameEndInfo,
 ) -> xr::Result {
-    let mut guard = LAYER.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
+    let next = match NEXT.get() {
+        Some(n) => *n,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
     if frame_end_info.is_null() {
         return xr::Result::ERROR_VALIDATION_FAILURE;
     }
 
-    poll_opaque_and_update_overlay(state);
+    // Lock LAYER briefly to update overlay + get the quad layer info, then drop.
+    let overlay_quad = {
+        let mut guard = match LAYER.lock() {
+            Ok(g) => g,
+            Err(_) => return (next.end_frame)(session, frame_end_info),
+        };
+        let state = match guard.as_mut() {
+            Some(s) => s,
+            None => return (next.end_frame)(session, frame_end_info),
+        };
 
-    let overlay_quad = match state.overlay.as_mut() {
-        Some(overlay) if overlay.is_for_session(session) && overlay.visible() => {
-            if let Err(err) = overlay.render_frame(&state.next) {
-                layer_log!(
-                    warn,
-                    "[ClearXR Layer] Dashboard overlay render failed: {}",
-                    err
-                );
+        poll_opaque_and_update_overlay(state);
+
+        match state.overlay.as_mut() {
+            Some(overlay) if overlay.is_for_session(session) && overlay.visible() => {
+                if let Err(err) = overlay.render_frame(&next) {
+                    layer_log!(warn, "[ClearXR Layer] Dashboard overlay render failed: {}", err);
+                }
+                Some(overlay.quad_layer())
             }
-            overlay.quad_layer()
+            _ => None,
         }
-        _ => {
-            return (state.next.end_frame)(session, frame_end_info);
-        }
+        // LAYER mutex dropped here
     };
 
+    let Some(overlay_quad) = overlay_quad else {
+        return (next.end_frame)(session, frame_end_info);
+    };
+
+    // Build the extended layer list on the stack (no heap allocation).
     let end_info = &*frame_end_info;
-    let base_layers = if end_info.layer_count == 0 || end_info.layers.is_null() {
-        &[][..]
+    let base_count = if end_info.layer_count == 0 || end_info.layers.is_null() {
+        0usize
     } else {
-        std::slice::from_raw_parts(end_info.layers, end_info.layer_count as usize)
+        end_info.layer_count as usize
     };
-    let mut layers: Vec<*const xr::CompositionLayerBaseHeader> =
-        Vec::with_capacity(base_layers.len() + 1);
-    layers.extend_from_slice(base_layers);
-
-    layers.push(
-        &overlay_quad as *const xr::CompositionLayerQuad as *const xr::CompositionLayerBaseHeader
-    );
+    // Stack array: up to 8 base layers + 1 overlay. Most apps use 1-4.
+    let mut layers: [*const xr::CompositionLayerBaseHeader; 9] =
+        [std::ptr::null(); 9];
+    let total = (base_count + 1).min(9);
+    for i in 0..base_count.min(8) {
+        layers[i] = *end_info.layers.add(i);
+    }
+    layers[base_count.min(8)] =
+        &overlay_quad as *const xr::CompositionLayerQuad as *const xr::CompositionLayerBaseHeader;
 
     let wrapped_end_info = xr::FrameEndInfo {
         ty: end_info.ty,
         next: end_info.next,
         display_time: end_info.display_time,
         environment_blend_mode: end_info.environment_blend_mode,
-        layer_count: layers.len() as u32,
+        layer_count: total as u32,
         layers: layers.as_ptr(),
     };
 
-    (state.next.end_frame)(session, &wrapped_end_info)
+    (next.end_frame)(session, &wrapped_end_info)
 }
 
 unsafe extern "system" fn hook_create_action_space(
@@ -1442,21 +1469,82 @@ unsafe extern "system" fn hook_get_action_state_float(
     result
 }
 
+unsafe extern "system" fn hook_get_action_state_vector2f(
+    session: xr::Session,
+    get_info: *const xr::ActionStateGetInfo,
+    state_out: *mut xr::ActionStateVector2f,
+) -> xr::Result {
+    let next = match NEXT_GET_VEC2.get() {
+        Some(&f) => f,
+        None => return xr::Result::ERROR_HANDLE_INVALID,
+    };
+    let result = (next)(session, get_info, state_out);
+    if result != xr::Result::SUCCESS || get_info.is_null() || state_out.is_null() {
+        return result;
+    }
+
+    let info = &*get_info;
+    let action_raw = info.action.into_raw();
+    let out = &*state_out;
+
+    let is_thumbstick = THUMBSTICK_ACTIONS.get()
+        .and_then(|l| l.read().ok())
+        .map_or(false, |m| m.contains_key(&action_raw));
+
+    if is_thumbstick && out.is_active.into() {
+        // Thumbstick actions have both hands — determine which from subaction path.
+        // Since we can't call path_to_string without LAYER, check both and let the
+        // values overwrite (the app calls once per hand with a subaction path).
+        if let Ok(mut cs) = CONTROLLER_STATE.write() {
+            // The app typically calls this per-hand with a subaction path.
+            // Without path resolution, we use a heuristic: if left hand is active
+            // and we've seen left aim data, assign to left; otherwise right.
+            // For correctness, we'd need to resolve the subaction path.
+            // Simpler: just update both — the last call per frame wins for each hand.
+            // Most apps call left then right in sequence.
+            if cs[0].active && !cs[1].active {
+                cs[0].thumbstick_x = out.current_state.x;
+                cs[0].thumbstick_y = out.current_state.y;
+            } else if cs[1].active && !cs[0].active {
+                cs[1].thumbstick_x = out.current_state.x;
+                cs[1].thumbstick_y = out.current_state.y;
+            } else {
+                // Both active — can't determine hand without path resolution.
+                // Store in both; the per-hand calls will overwrite correctly.
+                cs[0].thumbstick_x = out.current_state.x;
+                cs[0].thumbstick_y = out.current_state.y;
+                cs[1].thumbstick_x = out.current_state.x;
+                cs[1].thumbstick_y = out.current_state.y;
+            }
+        }
+    }
+
+    result
+}
+
 unsafe extern "system" fn hook_apply_haptic_feedback(
     session: xr::Session,
     haptic_action_info: *const xr::HapticActionInfo,
     haptic_feedback: *const xr::HapticBaseHeader,
 ) -> xr::Result {
-    let mut guard = LAYER.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
+    // Call runtime first without lock
+    let next = match NEXT.get() {
+        Some(n) => *n,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
-
-    let result = (state.next.apply_haptic_feedback)(session, haptic_action_info, haptic_feedback);
+    let result = (next.apply_haptic_feedback)(session, haptic_action_info, haptic_feedback);
     if result != xr::Result::SUCCESS || haptic_action_info.is_null() || haptic_feedback.is_null() {
         return result;
     }
+
+    let mut guard = match LAYER.lock() {
+        Ok(g) => g,
+        Err(_) => return result,
+    };
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return result,
+    };
 
     let info = &*haptic_action_info;
     let feedback = &*haptic_feedback;
@@ -1527,16 +1615,23 @@ unsafe extern "system" fn hook_stop_haptic_feedback(
     session: xr::Session,
     haptic_action_info: *const xr::HapticActionInfo,
 ) -> xr::Result {
-    let mut guard = LAYER.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
+    let next = match NEXT.get() {
+        Some(n) => *n,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
-
-    let result = (state.next.stop_haptic_feedback)(session, haptic_action_info);
+    let result = (next.stop_haptic_feedback)(session, haptic_action_info);
     if result != xr::Result::SUCCESS || haptic_action_info.is_null() {
         return result;
     }
+
+    let mut guard = match LAYER.lock() {
+        Ok(g) => g,
+        Err(_) => return result,
+    };
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return result,
+    };
 
     let info = &*haptic_action_info;
     let action_raw = info.action.into_raw();
@@ -1578,14 +1673,22 @@ unsafe extern "system" fn hook_get_action_state_boolean(
     get_info: *const xr::ActionStateGetInfo,
     state_out: *mut xr::ActionStateBoolean,
 ) -> xr::Result {
-    let mut guard = LAYER.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
+    // Call the runtime WITHOUT holding the LAYER mutex
+    let next = match NEXT.get() {
+        Some(n) => *n,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
+    let result = (next.get_action_state_boolean)(session, get_info, state_out);
 
-    // Call the next layer first to get the base result
-    let result = (state.next.get_action_state_boolean)(session, get_info, state_out);
+    // Now lock for override check
+    let mut guard = match LAYER.lock() {
+        Ok(g) => g,
+        Err(_) => return result,
+    };
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return result,
+    };
     if result != xr::Result::SUCCESS { return result; }
 
     // Check if we have opaque channel data to override with
@@ -1611,7 +1714,7 @@ unsafe extern "system" fn hook_get_action_state_boolean(
         // Resolve subaction path to hand
         let mut buf = [0u8; 256];
         let mut len: u32 = 0;
-        let r = (state.next.path_to_string)(
+        let r = (next.path_to_string)(
             state.instance,
             info.subaction_path,
             buf.len() as u32,

@@ -95,7 +95,7 @@ impl DashboardOverlay {
             .into_iter()
             .map(|img| vk::Image::from_raw(img.image as usize as u64))
             .collect::<Vec<_>>();
-        let space = create_local_space(next, session)?;
+        let space = create_stage_space(next, session)?;
 
         // Create staging buffer for pixel upload
         let pixel_size = (width * height * 4) as usize;
@@ -160,6 +160,13 @@ impl DashboardOverlay {
         if menu_down && !self.menu_was_down {
             self.menu_was_down = menu_down;
             self.visible = !self.visible;
+            // Write visibility to SHM so dashboard can also read it
+            if let Some(ref shmem) = self.shmem {
+                unsafe {
+                    let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
+                    if self.visible { header.flags |= 1; } else { header.flags &= !1; }
+                }
+            }
             return true;
         }
         self.menu_was_down = menu_down;
@@ -486,10 +493,12 @@ unsafe fn enumerate_swapchain_images(
     Ok(images.into_iter().map(|i| i.assume_init()).collect())
 }
 
-unsafe fn create_local_space(next: &NextDispatch, session: xr::Session) -> Result<xr::Space, String> {
+unsafe fn create_stage_space(next: &NextDispatch, session: xr::Session) -> Result<xr::Space, String> {
+    // Use STAGE space so the overlay quad is in the same coordinate system
+    // as controller aim poses from xrLocateSpace (which apps locate relative to STAGE).
     let ci = xr::ReferenceSpaceCreateInfo {
         ty: xr::ReferenceSpaceCreateInfo::TYPE, next: ptr::null(),
-        reference_space_type: xr::ReferenceSpaceType::LOCAL,
+        reference_space_type: xr::ReferenceSpaceType::STAGE,
         pose_in_reference_space: xr::Posef {
             orientation: xr::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
             position: xr::Vector3f { x: 0.0, y: 0.0, z: 0.0 },
@@ -498,7 +507,24 @@ unsafe fn create_local_space(next: &NextDispatch, session: xr::Session) -> Resul
     let mut space = xr::Space::NULL;
     let r = (next.create_reference_space)(session, &ci, &mut space);
     if r != xr::Result::SUCCESS {
-        return Err(format!("CreateReferenceSpace: {:?}", r));
+        // Fall back to LOCAL if STAGE isn't supported
+        if r == xr::Result::ERROR_REFERENCE_SPACE_UNSUPPORTED {
+            log::warn!("[ClearXR Layer] STAGE space not supported, falling back to LOCAL.");
+            let ci_local = xr::ReferenceSpaceCreateInfo {
+                ty: xr::ReferenceSpaceCreateInfo::TYPE, next: ptr::null(),
+                reference_space_type: xr::ReferenceSpaceType::LOCAL,
+                pose_in_reference_space: xr::Posef {
+                    orientation: xr::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
+                    position: xr::Vector3f { x: 0.0, y: 0.0, z: 0.0 },
+                },
+            };
+            let r2 = (next.create_reference_space)(session, &ci_local, &mut space);
+            if r2 != xr::Result::SUCCESS {
+                return Err(format!("CreateReferenceSpace(LOCAL fallback): {:?}", r2));
+            }
+            return Ok(space);
+        }
+        return Err(format!("CreateReferenceSpace(STAGE): {:?}", r));
     }
     Ok(space)
 }

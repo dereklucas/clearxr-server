@@ -149,15 +149,8 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
                     active, lx, ly, lz, rx, ry, rz,
                 );
             }
-            // Extract menu button for visibility toggle
-            let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
-            let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
-            let menu_down = left_menu || right_menu;
-            if menu_down && !menu_was_down {
-                let visible = shm.header_ref().flags & 1 != 0;
-                shm.set_visible(!visible);
-            }
-            menu_was_down = menu_down;
+            // Visibility is controlled by the layer (opaque channel menu button → SHM flags).
+            // Dashboard just reads it — no toggle here.
 
             // Ray-quad intersection for pointer input
             let result = ray_quad_from_packet(&pkt, &shm);

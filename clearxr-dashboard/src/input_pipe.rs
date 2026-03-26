@@ -63,10 +63,10 @@ impl InputPipeServer {
                 CreateNamedPipeA(
                     PCSTR(name.as_ptr()),
                     PIPE_ACCESS_INBOUND,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_NOWAIT,
                     1, // max instances
                     0, // out buffer
-                    PACKET_SIZE as u32 * 4, // in buffer
+                    PACKET_SIZE as u32 * 8, // in buffer (several frames of packets)
                     0, // default timeout
                     None, // default security
                 )
@@ -95,36 +95,41 @@ impl InputPipeServer {
 
     /// Try to read the latest controller packet. Non-blocking.
     /// Returns None if no data available or client not connected.
+    /// Drain all pending packets from the pipe and return the latest one.
+    /// With PIPE_TYPE_MESSAGE, each ReadFile returns exactly one complete packet.
     pub fn try_read(&mut self) -> Option<SpatialControllerPacket> {
         #[cfg(target_os = "windows")]
         {
             use windows::Win32::System::Pipes::ConnectNamedPipe;
-            use windows::Win32::System::IO::*;
 
             let handle = self.pipe?;
 
             // Try to accept a client connection (non-blocking due to PIPE_NOWAIT).
             unsafe { ConnectNamedPipe(handle, None).ok() };
 
-            // Non-blocking read
-            let mut bytes_read = 0u32;
-            let ok = unsafe {
-                windows::Win32::Storage::FileSystem::ReadFile(
-                    handle,
-                    Some(&mut self.buffer),
-                    Some(&mut bytes_read),
-                    None,
-                )
-            };
-
-            if ok.is_ok() && bytes_read as usize == PACKET_SIZE {
-                let pkt: SpatialControllerPacket =
-                    unsafe { std::ptr::read(self.buffer.as_ptr() as *const SpatialControllerPacket) };
-                if pkt.magic == 0x5343 {
-                    return Some(pkt);
+            // Drain all pending messages, keep only the latest
+            let mut latest: Option<SpatialControllerPacket> = None;
+            loop {
+                let mut bytes_read = 0u32;
+                let ok = unsafe {
+                    windows::Win32::Storage::FileSystem::ReadFile(
+                        handle,
+                        Some(&mut self.buffer),
+                        Some(&mut bytes_read),
+                        None,
+                    )
+                };
+                if ok.is_ok() && bytes_read as usize == PACKET_SIZE {
+                    let pkt: SpatialControllerPacket =
+                        unsafe { std::ptr::read(self.buffer.as_ptr() as *const SpatialControllerPacket) };
+                    if pkt.magic == 0x5343 {
+                        latest = Some(pkt);
+                    }
+                } else {
+                    break; // No more data
                 }
             }
-            None
+            latest
         }
 
         #[cfg(not(target_os = "windows"))]

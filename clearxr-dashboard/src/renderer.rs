@@ -285,6 +285,9 @@ impl HeadlessRenderer {
                 });
             }
         } else {
+            if self.pointer_pos.is_some() {
+                raw_input.events.push(Event::PointerGone);
+            }
             self.pointer_pos = None;
         }
         self.prev_button = trigger;
@@ -299,7 +302,21 @@ impl HeadlessRenderer {
         }
 
         // Run egui
-        let full_output = self.ctx.run(raw_input, build_ui);
+        let pointer_for_dot = self.pointer_pos;
+        let mut build_ui = build_ui;
+        let full_output = self.ctx.run(raw_input, |ctx| {
+            build_ui(ctx);
+
+            // Draw pointer dot overlay
+            if let Some(pos) = pointer_for_dot {
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Tooltip,
+                    egui::Id::new("pointer_dot"),
+                ));
+                painter.circle_filled(pos, 6.0, egui::Color32::from_rgba_premultiplied(74, 158, 255, 200));
+                painter.circle_stroke(pos, 7.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+            }
+        });
 
         let needs_repaint = full_output
             .viewport_output
