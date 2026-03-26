@@ -389,7 +389,7 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
     match session.reference_space_bounds_rect(xr::ReferenceSpaceType::STAGE) {
         Ok(Some(bounds)) => {
             info!("Stage bounds: {}m x {}m", bounds.width, bounds.height);
-            shell.boundary.set_bounds(bounds.width, bounds.height);
+            shell.dashboard.boundary.set_bounds(bounds.width, bounds.height);
         }
         Ok(None) => {
             info!("Stage bounds not available (using defaults).");
@@ -809,8 +809,8 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
         }
 
         // ---- Screenshot: set flag before render so capture happens during this frame ----
-        if shell.screenshot_requested {
-            shell.screenshot_requested = false;
+        if shell.dashboard.screenshot_requested {
+            shell.dashboard.screenshot_requested = false;
             renderer.screenshot_pending = true;
         }
 
@@ -823,7 +823,7 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
             match crate::capture::screenshot::save_screenshot(&pixels, w, h) {
                 Ok(info) => {
                     use crate::shell::notifications::Notification;
-                    shell.notifications.push(
+                    shell.dashboard.notifications.push(
                         Notification::success("Screenshot", &format!("Saved to {}", info.path.display()))
                     );
                 }

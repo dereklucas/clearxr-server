@@ -63,7 +63,7 @@ pub struct LauncherPanel {
     pub up_dir: Vec3,
 
     // Has the texture been uploaded at least once?
-    texture_initialized: bool,
+    pub texture_initialized: bool,
 
     // Has new pixel data been staged but not yet uploaded to the GPU?
     upload_pending: bool,
@@ -101,7 +101,7 @@ impl LauncherPanel {
             array_layers: 1,
             samples: vk::SampleCountFlags::TYPE_1,
             tiling: vk::ImageTiling::OPTIMAL,
-            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
             initial_layout: vk::ImageLayout::UNDEFINED,
             ..Default::default()

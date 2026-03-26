@@ -31,7 +31,7 @@ void main() {
         float aspect = pc.cam_right.w / max(pc.cam_up.w, 0.001); // width / height
         vec2 delta = vec2((frag_uv.x - dot_u) * aspect, frag_uv.y - dot_v);
         float dist = length(delta);
-        float radius = 0.012 * aspect; // dot size in UV
+        float radius = 0.006 * aspect; // dot size in UV
         float ring = 0.003 * aspect;
 
         // Bright center dot
