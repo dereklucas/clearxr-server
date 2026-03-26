@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// A captured frame: raw BGRA pixels, tightly packed (4 bytes per pixel).
+#[allow(dead_code)] // width/height are part of the public API for consumers
 pub struct CaptureFrame {
     pub data: Vec<u8>,
     pub width: u32,
@@ -378,7 +379,7 @@ struct DxgiCapture {
     desc_width: u32,
     desc_height: u32,
     frame_acquired: bool,
-    frame_buffer: Vec<u8>,
+    _frame_buffer: Vec<u8>,
 }
 
 #[cfg(target_os = "windows")]
@@ -432,7 +433,7 @@ impl DxgiCapture {
             desc_width,
             desc_height,
             frame_acquired: false,
-            frame_buffer: Vec::new(),
+            _frame_buffer: Vec::new(),
         })
     }
 

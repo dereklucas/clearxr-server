@@ -4,6 +4,7 @@ use std::process::{Child, Command};
 use log::info;
 
 /// Information about a launched application.
+#[allow(dead_code)] // Fields are part of the public API for future use
 pub struct LaunchedApp {
     pub child: Child,
     pub name: String,
@@ -36,12 +37,14 @@ impl LaunchedApp {
     }
 
     /// Kill the app.
+    #[allow(dead_code)] // Used in tests and available as public API
     pub fn kill(&mut self) {
         let _ = self.child.kill();
     }
 }
 
 /// Launch a flat (non-VR) game. Returns the child process handle.
+#[allow(dead_code)] // Used in tests; will be called when flat-game launch is wired up
 pub fn launch_flat_game(name: &str, exe_path: &str, app_id: Option<u32>) -> Result<LaunchedApp, String> {
     info!("Launching flat game: {} ({})", name, exe_path);
 

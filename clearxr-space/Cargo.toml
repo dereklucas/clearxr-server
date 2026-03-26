@@ -48,14 +48,12 @@ toml = "0.8"
 # Config file directory resolution
 directories = "5"
 
-# HTML UI rendering (Ultralight — lightweight headless browser)
-ul-next = "0.5"  # default features include appcore_linked (needed for fontloader/filesystem)
-
-# File watching for hot-reload
-notify = "7"
-
 # Image encoding (PNG screenshots)
 image = "0.25"
+
+# egui immediate-mode UI (software-rasterized to RGBA, then uploaded to Vulkan texture)
+egui = "0.31"
+epaint = "0.31"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [

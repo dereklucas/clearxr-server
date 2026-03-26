@@ -4,6 +4,7 @@ use glam::{Vec3, Quat};
 pub use crate::panel::Hand;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)] // All variants are part of the input API; not all wired up yet
 pub enum Button {
     Trigger,
     Grip,
@@ -16,6 +17,7 @@ pub enum Button {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // All variants/fields are part of the input API; not all consumed yet
 pub enum InputEvent {
     /// Pointer ray is hovering over a panel at (u, v)
     PointerMove { hand: Hand, u: f32, v: f32, distance: f32 },
@@ -41,6 +43,7 @@ pub enum InputEvent {
 
 /// Per-hand controller state, extracted from OpenXR each frame.
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)] // All fields are part of the input API; not all consumed yet
 pub struct HandState {
     pub active: bool,
     pub grip_pos: Vec3,
@@ -131,24 +134,34 @@ impl InputDispatcher {
             let trigger_now = hand_state.trigger >= TRIGGER_THRESHOLD;
             let trigger_prev = self.prev_trigger[hand_index];
 
-            // Find the first panel hit (front-to-back priority)
-            let mut hit: Option<(PanelId, f32, f32, f32)> = None;
+            // Find ALL panels hit by this hand's ray
+            let mut hits: Vec<(PanelId, f32, f32, f32)> = Vec::new();
             for &(panel_id, panel_transform) in panels {
                 if let Some((u, v, t)) = panel_transform.hit_test(hand_state.aim_pos, hand_state.aim_dir) {
-                    hit = Some((panel_id, u, v, t));
-                    break; // first hit wins (front-to-back order)
+                    hits.push((panel_id, u, v, t));
                 }
             }
 
-            if let Some((panel_id, u, v, distance)) = hit {
-                // Always emit PointerMove when aiming at a panel
+            // Sort by distance (closest first)
+            hits.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Debug: log hits when trigger pulled
+            if trigger_now && !trigger_prev && !hits.is_empty() {
+                log::debug!("Hand {} trigger: {} hits: {:?}", hand_index, hits.len(),
+                    hits.iter().map(|(id, u, v, t)| format!("({:?} u={:.2} v={:.2} t={:.2})", id, u, v, t)).collect::<Vec<_>>());
+            }
+
+            // Emit PointerMove for ALL hit panels (so background panels can show hover highlights)
+            for &(panel_id, u, v, distance) in &hits {
                 events.push((panel_id, InputEvent::PointerMove {
                     hand: hand_enum,
-                    u,
-                    v,
+                    u, v,
                     distance,
                 }));
+            }
 
+            // Emit PointerDown/PointerUp only for the CLOSEST hit panel (don't click through)
+            if let Some(&(panel_id, u, v, _)) = hits.first() {
                 // Trigger rising edge -> PointerDown
                 if trigger_now && !trigger_prev {
                     events.push((panel_id, InputEvent::PointerDown {
@@ -168,6 +181,9 @@ impl InputDispatcher {
                 }
             }
 
+            // Use the closest hit for grab logic below
+            let hit = hits.first().copied();
+
             self.prev_trigger[hand_index] = trigger_now;
 
             // --- Grab logic (grip/squeeze) ---
@@ -175,9 +191,14 @@ impl InputDispatcher {
             let grip_prev = self.prev_grip[hand_index];
 
             if grip_now && !grip_prev {
-                // Grip rising edge: start grab if ray hits panel margin zone
+                // Grip rising edge: start grab if ray hits panel margin zone (or if panel is always grabbable)
                 if let Some((panel_id, u, v, _)) = hit {
-                    if in_grab_margin(u, v) {
+                    // Check if the panel is marked as always-grabbable
+                    let panel_grabbable = panels.iter()
+                        .find(|&&(id, _)| id == panel_id)
+                        .map(|&(_, pt)| pt.grabbable)
+                        .unwrap_or(false);
+                    if panel_grabbable || in_grab_margin(u, v) {
                         self.grab_active[hand_index] = Some(panel_id);
                         events.push((panel_id, InputEvent::GrabStart {
                             hand: hand_enum,
@@ -292,7 +313,7 @@ mod tests {
             width,
             height,
             opacity: 1.0,
-            anchor: PanelAnchor::World,
+            anchor: PanelAnchor::World, grabbable: false,
         }
     }
 
@@ -401,8 +422,11 @@ mod tests {
         let state = right_hand_state(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 0.0);
         let events = dispatcher.process(&state, &panels);
 
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, PanelId::new(10), "Closer panel should receive the event");
+        // Both panels get PointerMove (hover passes through)
+        let moves: Vec<_> = events.iter().filter(|(_, e)| matches!(e, InputEvent::PointerMove { .. })).collect();
+        assert_eq!(moves.len(), 2, "Both hit panels should receive PointerMove");
+        assert_eq!(moves[0].0, PanelId::new(10), "Closer panel should be first");
+        assert_eq!(moves[1].0, PanelId::new(20), "Far panel should be second");
     }
 
     #[test]
@@ -740,7 +764,7 @@ mod tests {
             width: 1.6,
             height: 1.0,
             opacity: 0.95,
-            anchor: PanelAnchor::World,
+            anchor: PanelAnchor::World, grabbable: false,
         };
         // Aim at u~0.15 (edge of margin)
         let x = (0.15 - 0.5) * 1.6; // u=0.15 -> x offset
@@ -757,6 +781,108 @@ mod tests {
     }
 
     #[test]
+    fn grab_requires_margin_or_bar() {
+        // Verify that grabbing only works on panel edges, not center
+        let mut d = InputDispatcher::new();
+        let panel = PanelTransform {
+            center: Vec3::new(0.0, 0.0, -2.0),
+            right_dir: Vec3::X,
+            up_dir: Vec3::Y,
+            width: 2.0,
+            height: 2.0,
+            opacity: 0.95,
+            anchor: PanelAnchor::World, grabbable: false,
+        };
+        // Aim at center with high grip
+        let mut state = ControllerState::default();
+        state.right.active = true;
+        state.right.aim_pos = Vec3::ZERO;
+        state.right.aim_dir = Vec3::new(0.0, 0.0, -1.0);
+        state.right.squeeze = 0.9;
+        state.right.grip_pos = Vec3::ZERO;
+        state.right.grip_rot = Quat::IDENTITY;
+
+        let events = d.process(&state, &[(PanelId::new(1), &panel)]);
+        // Center of panel (u~0.5, v~0.5) should NOT trigger grab
+        let has_grab = events.iter().any(|(_, e)| matches!(e, InputEvent::GrabStart { .. }));
+        assert!(!has_grab, "Center of panel should not trigger grab");
+    }
+
+    #[test]
+    fn both_hands_can_click_different_panels() {
+        let mut d = InputDispatcher::new();
+        let panel_a = PanelTransform {
+            center: Vec3::new(-2.0, 0.0, -2.0),
+            right_dir: Vec3::X, up_dir: Vec3::Y, width: 2.0, height: 2.0,
+            opacity: 0.95, anchor: PanelAnchor::World, grabbable: false,
+        };
+        let panel_b = PanelTransform {
+            center: Vec3::new(2.0, 0.0, -2.0),
+            right_dir: Vec3::X, up_dir: Vec3::Y, width: 2.0, height: 2.0,
+            opacity: 0.95, anchor: PanelAnchor::World, grabbable: false,
+        };
+
+        // Frame 1: no trigger (establish baseline)
+        let mut state0 = ControllerState::default();
+        state0.left.active = true;
+        state0.left.aim_pos = Vec3::new(-2.0, 0.0, 0.0);
+        state0.left.aim_dir = Vec3::new(0.0, 0.0, -1.0);
+        state0.left.trigger = 0.0;
+        state0.right.active = true;
+        state0.right.aim_pos = Vec3::new(2.0, 0.0, 0.0);
+        state0.right.aim_dir = Vec3::new(0.0, 0.0, -1.0);
+        state0.right.trigger = 0.0;
+        d.process(&state0, &[(PanelId::new(1), &panel_a), (PanelId::new(2), &panel_b)]);
+
+        // Frame 2: both triggers pulled
+        let mut state = ControllerState::default();
+        state.left.active = true;
+        state.left.aim_pos = Vec3::new(-2.0, 0.0, 0.0);
+        state.left.aim_dir = Vec3::new(0.0, 0.0, -1.0);
+        state.left.trigger = 1.0;
+        state.right.active = true;
+        state.right.aim_pos = Vec3::new(2.0, 0.0, 0.0);
+        state.right.aim_dir = Vec3::new(0.0, 0.0, -1.0);
+        state.right.trigger = 1.0;
+
+        let events = d.process(&state, &[(PanelId::new(1), &panel_a), (PanelId::new(2), &panel_b)]);
+
+        let left_clicks: Vec<_> = events.iter()
+            .filter(|(_, e)| matches!(e, InputEvent::PointerDown { hand: Hand::Left, .. }))
+            .collect();
+        let right_clicks: Vec<_> = events.iter()
+            .filter(|(_, e)| matches!(e, InputEvent::PointerDown { hand: Hand::Right, .. }))
+            .collect();
+        assert!(!left_clicks.is_empty(), "Left hand should click panel A");
+        assert!(!right_clicks.is_empty(), "Right hand should click panel B");
+        assert_eq!(left_clicks[0].0, PanelId::new(1));
+        assert_eq!(right_clicks[0].0, PanelId::new(2));
+    }
+
+    #[test]
+    fn anchor_cycle_preserves_world_position() {
+        // When cycling through anchors and back to World, verify behavior
+        let mut t = PanelTransform::default();
+        let original = t.center;
+
+        t.cycle_anchor(); // World -> Controller
+        t.cycle_anchor(); // Controller -> Wrist
+        t.cycle_anchor(); // Wrist -> Theater
+
+        // Theater changes position via update_anchor
+        t.update_anchor(
+            Vec3::new(0.0, 1.6, 0.0), Vec3::NEG_Z, Vec3::X, Vec3::Y,
+            Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO,
+        );
+        assert_ne!(t.center, original, "Theater should move panel");
+
+        t.cycle_anchor(); // Theater -> Head
+        t.cycle_anchor(); // Head -> World
+        // Returning to World keeps the last position (World anchor doesn't auto-reposition)
+        assert_eq!(t.anchor, PanelAnchor::World);
+    }
+
+    #[test]
     fn dispatcher_both_hands_grab_same_panel() {
         let mut d = InputDispatcher::new();
         let panel = PanelTransform {
@@ -766,7 +892,7 @@ mod tests {
             width: 1.6,
             height: 1.0,
             opacity: 0.95,
-            anchor: PanelAnchor::World,
+            anchor: PanelAnchor::World, grabbable: false,
         };
         // Both hands aim at edges of the same panel
         let mut state = ControllerState::default();

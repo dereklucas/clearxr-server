@@ -59,6 +59,7 @@ impl Default for HandData {
 // ----------------------------------------------------------------
 // Shared UBO + descriptor set setup for HandData
 // ----------------------------------------------------------------
+#[allow(dead_code)] // Will be used when hand rendering is enabled
 pub struct HandUbo {
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
@@ -72,6 +73,7 @@ pub struct HandUbo {
 unsafe impl Send for HandUbo {}
 unsafe impl Sync for HandUbo {}
 
+#[allow(dead_code)]
 impl HandUbo {
     pub fn new(vk: &VkBackend) -> Result<Self> {
         let device = vk.device();
@@ -205,6 +207,7 @@ pub struct PushConstants {
 // Per-eye swapchain + its Vulkan resources (XR mode only)
 // ----------------------------------------------------------------
 #[cfg(all(feature = "xr", target_os = "windows"))]
+#[allow(dead_code)] // depth_images is part of the XR swapchain API
 pub struct EyeSwapchain {
     pub handle: xr::Swapchain<xr::Vulkan>,
     pub resolution: vk::Extent2D,
@@ -763,6 +766,7 @@ fn build_push_constants(view: &xr::View, eye_idx: u32, time: f32) -> PushConstan
 // ============================================================
 // Record one fullscreen draw into the framebuffer
 // ============================================================
+#[allow(dead_code)] // Superseded by record_render_pass_open; kept for standalone use
 pub fn record_commands(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -850,6 +854,7 @@ pub fn record_render_pass_open(
 /// Begin command buffer, start render pass, draw the scene — but leave the
 /// render pass open so additional draws (e.g. launcher panel) can be appended.
 /// Caller must call cmd_end_render_pass + end_command_buffer when done.
+#[allow(dead_code)] // Superseded by record_render_pass_open; kept for standalone use
 pub fn record_commands_open(
     device: &ash::Device,
     cmd: vk::CommandBuffer,

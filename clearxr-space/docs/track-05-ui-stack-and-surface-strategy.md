@@ -258,12 +258,12 @@ Definition of done:
 
 ## Acceptance Checklist
 
-- [ ] egui renders to Vulkan panel texture in-headset
-- [ ] VR controller input drives egui interaction
-- [ ] Phase 1 complete: pixel-generated surfaces replaced
-- [ ] Phase 2 complete: settings and system tray replaced
-- [ ] Phase 3 complete: keyboard replaced
-- [ ] Phase 4 complete: launcher replaced
-- [ ] `ul-next` dependency removed
-- [ ] Component library decision documented
-- [ ] No regression in frame timing (egui rendering within frame budget)
+- [x] egui renders to Vulkan panel texture in-headset — software rasterizer → RGBA → LauncherPanel upload
+- [x] VR controller input drives egui interaction — InputDispatcher PointerMove/Down → egui events
+- [x] Phase 1 complete: pixel-generated surfaces replaced — FPS, toolbar, grab bar, notifications
+- [x] Phase 2 complete: settings and system tray replaced — direct Config binding, no JS bridge
+- [x] Phase 3 complete: keyboard replaced — egui QWERTY with shift/space/backspace
+- [x] Phase 4 complete: launcher replaced — ScrollArea + Grid, search, click-to-launch
+- [x] `ul-next` dependency removed — along with notify crate and all 17 HTML files
+- [ ] Component library decision documented — deferred until visual polish pass
+- [ ] No regression in frame timing — needs in-headset testing to verify

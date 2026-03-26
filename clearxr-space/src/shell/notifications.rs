@@ -54,6 +54,7 @@ impl Notification {
     }
 
     /// Returns 0.0..1.0 progress through the notification's lifetime.
+    #[allow(dead_code)] // Used in tests; will be used for fade-out animation
     pub fn progress(&self) -> f32 {
         let elapsed = self.created.elapsed().as_secs_f32();
         let total = self.duration.as_secs_f32();
@@ -105,6 +106,7 @@ impl NotificationQueue {
     }
 
     /// Clear all notifications.
+    #[allow(dead_code)] // Used in tests; public API
     pub fn clear(&mut self) {
         self.active.clear();
     }
@@ -183,6 +185,20 @@ mod tests {
         q.push(Notification::warning("B", ""));
         q.clear();
         assert_eq!(q.count(), 0);
+    }
+
+    #[test]
+    fn notification_warning_longer_than_info() {
+        let info = Notification::info("A", "");
+        let warn = Notification::warning("B", "");
+        assert!(warn.duration > info.duration);
+    }
+
+    #[test]
+    fn notification_success_shortest() {
+        let success = Notification::success("A", "");
+        let info = Notification::info("B", "");
+        assert!(success.duration < info.duration);
     }
 
     #[test]

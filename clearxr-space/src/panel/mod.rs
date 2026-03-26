@@ -11,6 +11,7 @@ impl PanelId {
 pub enum Hand { Left, Right }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)] // All anchor modes are part of the API; not all active yet
 pub enum PanelAnchor {
     World,
     Controller { hand: Hand },
@@ -20,6 +21,7 @@ pub enum PanelAnchor {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // opacity/anchor are part of the public API
 pub struct PanelTransform {
     pub center: Vec3,
     pub right_dir: Vec3,
@@ -28,6 +30,8 @@ pub struct PanelTransform {
     pub height: f32,
     pub opacity: f32,
     pub anchor: PanelAnchor,
+    /// If true, the entire surface is grabbable (skip margin zone check).
+    pub grabbable: bool,
 }
 
 impl Default for PanelTransform {
@@ -40,6 +44,7 @@ impl Default for PanelTransform {
             height: 1.0,
             opacity: 0.95,
             anchor: PanelAnchor::World,
+            grabbable: false,
         }
     }
 }
@@ -53,6 +58,7 @@ impl PanelTransform {
     /// - Wrist: small panel on the inner wrist
     /// - Head: panel locked relative to head position/orientation
     /// - Theater: large panel centered in front of head at configured distance
+    #[allow(dead_code)] // Will be called when anchor modes are wired into the shell
     pub fn update_anchor(
         &mut self,
         head_pos: Vec3,
@@ -112,6 +118,7 @@ impl PanelTransform {
     }
 
     /// Cycle to the next anchor mode.
+    #[allow(dead_code)] // Will be called when anchor cycling is wired into input
     pub fn cycle_anchor(&mut self) {
         self.anchor = match self.anchor {
             PanelAnchor::World => PanelAnchor::Controller { hand: Hand::Right },
@@ -214,6 +221,7 @@ mod tests {
             height: 0.12,
             opacity: 0.9,
             anchor: PanelAnchor::World,
+            grabbable: false,
         };
         // Ray looking down at the floor
         let origin = Vec3::new(0.0, 1.6, 0.0);
@@ -339,6 +347,27 @@ mod tests {
         assert!(!t.center.x.is_nan());
         assert!(!t.center.y.is_nan());
         assert!(!t.center.z.is_nan());
+    }
+
+    #[test]
+    fn hit_test_returns_correct_distance() {
+        let panel = PanelTransform::default(); // at z=-2.5
+        let origin = Vec3::new(0.0, 1.6, 0.0);
+        let dir = Vec3::new(0.0, 0.0, -1.0);
+        let (_, _, t) = panel.hit_test(origin, dir).unwrap();
+        assert!((t - 2.5).abs() < 0.01, "Distance should be ~2.5, got {}", t);
+    }
+
+    #[test]
+    fn hit_test_angled_ray() {
+        let panel = PanelTransform::default();
+        let origin = Vec3::new(0.0, 1.6, 0.0);
+        // Aim slightly to the right
+        let dir = Vec3::new(0.1, 0.0, -1.0).normalize();
+        let result = panel.hit_test(origin, dir);
+        assert!(result.is_some(), "Angled ray should still hit");
+        let (u, _, _) = result.unwrap();
+        assert!(u > 0.5, "u should be right of center for rightward ray");
     }
 
     #[test]

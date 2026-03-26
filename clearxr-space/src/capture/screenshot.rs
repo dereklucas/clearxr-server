@@ -9,6 +9,7 @@ use log::info;
 
 /// Result of a screenshot capture.
 #[derive(Debug)]
+#[allow(dead_code)] // Fields are part of the public API
 pub struct ScreenshotResult {
     pub path: PathBuf,
     pub width: u32,

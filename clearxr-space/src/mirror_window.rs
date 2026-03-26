@@ -311,6 +311,7 @@ impl MirrorWindow {
         !self.should_close
     }
 
+    #[allow(dead_code)] // Public API accessor
     pub fn is_closed(&self) -> bool {
         self.should_close
     }
