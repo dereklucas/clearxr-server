@@ -1129,20 +1129,26 @@ unsafe extern "system" fn hook_get_system_properties(
 }
 
 unsafe extern "system" fn hook_destroy_session(session: xr::Session) -> xr::Result {
-    let mut guard = LAYER.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
+    let next = match NEXT.get() {
+        Some(n) => *n,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
-    if let Some(mut overlay) = state.overlay.take() {
-        if overlay.is_for_session(session) {
-            overlay.destroy(&state.next);
-            layer_log!(info, "[ClearXR Layer] Dashboard overlay detached from session {:?}.", session);
-        } else {
-            state.overlay = Some(overlay);
+
+    // Drop the overlay if it belongs to this session. Drop impl handles all cleanup.
+    if let Ok(mut guard) = LAYER.lock() {
+        if let Some(state) = guard.as_mut() {
+            if let Some(overlay) = state.overlay.take() {
+                if overlay.is_for_session(session) {
+                    drop(overlay); // Drop impl cleans up Vulkan + OpenXR resources
+                    layer_log!(info, "[ClearXR Layer] Dashboard overlay detached from session {:?}.", session);
+                } else {
+                    state.overlay = Some(overlay);
+                }
+            }
         }
     }
-    (state.next.destroy_session)(session)
+
+    (next.destroy_session)(session)
 }
 
 unsafe extern "system" fn hook_suggest_bindings(

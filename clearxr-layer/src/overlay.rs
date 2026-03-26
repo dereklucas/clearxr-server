@@ -255,14 +255,7 @@ impl DashboardOverlay {
         let shmem = self.shmem.as_ref().unwrap();
         let header = &*(shmem.as_ptr() as *const ShmHeader);
 
-        // Check for new frame
-        let counter = header.frame_counter.load(Ordering::Acquire);
-        if counter == self.last_frame_counter {
-            return Ok(()); // No new frame
-        }
-        self.last_frame_counter = counter;
-
-        // Update pose from SHM header
+        // Always read header (pose, visibility can change without a new frame)
         self.visible = header.flags & 1 != 0;
         self.pose.position.x = header.panel_pos[0];
         self.pose.position.y = header.panel_pos[1];
@@ -277,6 +270,13 @@ impl DashboardOverlay {
         if !self.visible {
             return Ok(());
         }
+
+        // Check for new frame — only skip the pixel copy, not the header read
+        let counter = header.frame_counter.load(Ordering::Acquire);
+        if counter == self.last_frame_counter {
+            return Ok(()); // No new pixels
+        }
+        self.last_frame_counter = counter;
 
         // Copy pixels from SHM → staging buffer
         let src = shmem.as_ptr().add(HEADER_SIZE);
@@ -376,36 +376,38 @@ impl DashboardOverlay {
         Ok(())
     }
 
-    pub unsafe fn destroy(&mut self, next: &NextDispatch) {
-        let device = self.vk.device();
-        device.device_wait_idle().ok();
-        device.unmap_memory(self.staging_memory);
-        device.destroy_buffer(self.staging_buffer, None);
-        device.free_memory(self.staging_memory, None);
-        device.destroy_fence(self.fence, None);
-        if self.space != xr::Space::NULL {
-            (next.destroy_space)(self.space);
-        }
-        if self.swapchain != xr::Swapchain::NULL {
-            (next.destroy_swapchain)(self.swapchain);
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(h) = self.pipe {
-            windows_sys::Win32::Foundation::CloseHandle(h);
-        }
-    }
 }
 
 impl Drop for DashboardOverlay {
     fn drop(&mut self) {
         unsafe {
-            self.vk.device().device_wait_idle().ok();
-            self.vk.device().unmap_memory(self.staging_memory);
-            self.vk.device().destroy_buffer(self.staging_buffer, None);
-            self.vk.device().free_memory(self.staging_memory, None);
-            self.vk.device().destroy_fence(self.fence, None);
+            let device = self.vk.device();
+            device.device_wait_idle().ok();
+
+            // Vulkan resources
+            device.unmap_memory(self.staging_memory);
+            device.destroy_buffer(self.staging_buffer, None);
+            device.free_memory(self.staging_memory, None);
+            device.destroy_fence(self.fence, None);
             self.vk.destroy_command_pool();
+
+            // OpenXR resources (use NEXT static — no need for &NextDispatch param)
+            if let Some(next) = crate::NEXT.get() {
+                if self.space != xr::Space::NULL {
+                    (next.destroy_space)(self.space);
+                }
+                if self.swapchain != xr::Swapchain::NULL {
+                    (next.destroy_swapchain)(self.swapchain);
+                }
+            }
+
+            // Pipe handle
+            #[cfg(target_os = "windows")]
+            if let Some(h) = self.pipe {
+                windows_sys::Win32::Foundation::CloseHandle(h);
+            }
         }
+        log::info!("[ClearXR Layer] DashboardOverlay destroyed.");
     }
 }
 
