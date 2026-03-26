@@ -1,15 +1,20 @@
 /// Per-frame rendering: swapchains, render pass, pipeline.
 ///
-/// One EyeSwapchain per eye.  Each frame:
-///   acquire → wait → record + submit → GPU fence → release → xrEndFrame
+/// Shared rendering infrastructure (pipeline, shaders, push constants, UBO)
+/// is used by both the OpenXR path and the desktop window path.
 
 use anyhow::Result;
 use ash::vk;
+#[cfg(all(feature = "xr", target_os = "windows"))]
 use ash::vk::Handle; // for from_raw on non-dispatchable handles
+#[cfg(all(feature = "xr", target_os = "windows"))]
 use glam::Mat4;
+#[cfg(all(feature = "xr", target_os = "windows"))]
 use log::info;
+#[cfg(all(feature = "xr", target_os = "windows"))]
 use openxr as xr;
 
+#[cfg(all(feature = "xr", target_os = "windows"))]
 use crate::mirror_window::MirrorWindow;
 use crate::vk_backend::VkBackend;
 
@@ -52,22 +57,154 @@ impl Default for HandData {
 }
 
 // ----------------------------------------------------------------
+// Shared UBO + descriptor set setup for HandData
+// ----------------------------------------------------------------
+pub struct HandUbo {
+    pub buffer: vk::Buffer,
+    pub memory: vk::DeviceMemory,
+    pub mapped: *mut HandData,
+    pub descriptor_set_layout: vk::DescriptorSetLayout,
+    pub descriptor_pool: vk::DescriptorPool,
+    pub descriptor_set: vk::DescriptorSet,
+}
+
+// Safety: mapped pointer is only used from the thread that owns HandUbo.
+unsafe impl Send for HandUbo {}
+unsafe impl Sync for HandUbo {}
+
+impl HandUbo {
+    pub fn new(vk: &VkBackend) -> Result<Self> {
+        let device = vk.device();
+        let ubo_size = std::mem::size_of::<HandData>() as vk::DeviceSize;
+
+        let buf_ci = vk::BufferCreateInfo {
+            size: ubo_size,
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+        let buffer = unsafe { device.create_buffer(&buf_ci, None)? };
+        let mem_reqs = unsafe { device.get_buffer_memory_requirements(buffer) };
+
+        let mem_type_idx = vk
+            .find_memory_type(
+                mem_reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .ok_or_else(|| anyhow::anyhow!("No suitable memory type for hand UBO"))?;
+
+        let alloc_ci = vk::MemoryAllocateInfo {
+            allocation_size: mem_reqs.size,
+            memory_type_index: mem_type_idx,
+            ..Default::default()
+        };
+        let memory = unsafe { device.allocate_memory(&alloc_ci, None)? };
+        unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
+
+        let mapped = unsafe {
+            device.map_memory(memory, 0, ubo_size, vk::MemoryMapFlags::empty())?
+        } as *mut HandData;
+
+        unsafe { std::ptr::write(mapped, HandData::default()) };
+
+        // Descriptor set layout
+        let binding = vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            ..Default::default()
+        };
+        let dsl_ci = vk::DescriptorSetLayoutCreateInfo {
+            binding_count: 1,
+            p_bindings: &binding,
+            ..Default::default()
+        };
+        let descriptor_set_layout =
+            unsafe { device.create_descriptor_set_layout(&dsl_ci, None)? };
+
+        // Descriptor pool
+        let pool_size = vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 1,
+        };
+        let dp_ci = vk::DescriptorPoolCreateInfo {
+            max_sets: 1,
+            pool_size_count: 1,
+            p_pool_sizes: &pool_size,
+            ..Default::default()
+        };
+        let descriptor_pool = unsafe { device.create_descriptor_pool(&dp_ci, None)? };
+
+        // Allocate descriptor set
+        let ds_alloc = vk::DescriptorSetAllocateInfo {
+            descriptor_pool,
+            descriptor_set_count: 1,
+            p_set_layouts: &descriptor_set_layout,
+            ..Default::default()
+        };
+        let descriptor_set = unsafe { device.allocate_descriptor_sets(&ds_alloc) }?[0];
+
+        // Write descriptor
+        let buf_info = vk::DescriptorBufferInfo {
+            buffer,
+            offset: 0,
+            range: ubo_size,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: descriptor_set,
+            dst_binding: 0,
+            dst_array_element: 0,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+            p_buffer_info: &buf_info,
+            ..Default::default()
+        };
+        unsafe { device.update_descriptor_sets(&[write], &[]) };
+
+        Ok(Self {
+            buffer,
+            memory,
+            mapped,
+            descriptor_set_layout,
+            descriptor_pool,
+            descriptor_set,
+        })
+    }
+
+    pub fn update(&mut self, data: &HandData) {
+        unsafe { std::ptr::copy_nonoverlapping(data, self.mapped, 1) };
+    }
+
+    pub fn destroy(&mut self, device: &ash::Device) {
+        unsafe {
+            device.destroy_descriptor_pool(self.descriptor_pool, None);
+            device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            device.unmap_memory(self.memory);
+            device.destroy_buffer(self.buffer, None);
+            device.free_memory(self.memory, None);
+        }
+    }
+}
+
+// ----------------------------------------------------------------
 // Push constants layout – must match scene.frag exactly.
 // 80 bytes total; within the 128-byte Vulkan minimum guarantee.
 // ----------------------------------------------------------------
 #[repr(C)]
 #[derive(Copy, Clone)]
-struct PushConstants {
-    cam_pos:   [f32; 4], // xyz = world position,   w = time (seconds)
-    cam_right: [f32; 4], // xyz = right vector,      w = eye index
-    cam_up:    [f32; 4], // xyz = up vector,         w = unused
-    cam_fwd:   [f32; 4], // xyz = forward vector,    w = unused
-    fov:       [f32; 4], // x = tan(left), y = tan(right), z = tan(down), w = tan(up)
+pub struct PushConstants {
+    pub cam_pos:   [f32; 4], // xyz = world position,   w = time (seconds)
+    pub cam_right: [f32; 4], // xyz = right vector,      w = eye index
+    pub cam_up:    [f32; 4], // xyz = up vector,         w = unused
+    pub cam_fwd:   [f32; 4], // xyz = forward vector,    w = unused
+    pub fov:       [f32; 4], // x = tan(left), y = tan(right), z = tan(down), w = tan(up)
 }
 
 // ----------------------------------------------------------------
-// Per-eye swapchain + its Vulkan resources
+// Per-eye swapchain + its Vulkan resources (XR mode only)
 // ----------------------------------------------------------------
+#[cfg(all(feature = "xr", target_os = "windows"))]
 pub struct EyeSwapchain {
     pub handle: xr::Swapchain<xr::Vulkan>,
     pub resolution: vk::Extent2D,
@@ -82,12 +219,13 @@ pub struct EyeSwapchain {
 }
 
 // ----------------------------------------------------------------
-// Top-level renderer
+// Top-level XR renderer
 // ----------------------------------------------------------------
+#[cfg(all(feature = "xr", target_os = "windows"))]
 pub struct Renderer {
     pub swapchains: Vec<EyeSwapchain>, // 2 for stereo, 4 for quad (foveated)
     pub has_depth: bool,
-    render_pass: vk::RenderPass,
+    pub render_pass: vk::RenderPass,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     command_buffer: vk::CommandBuffer,
@@ -102,9 +240,12 @@ pub struct Renderer {
 }
 
 // Safety: the mapped pointer is only used from the main thread that owns the Renderer.
+#[cfg(all(feature = "xr", target_os = "windows"))]
 unsafe impl Send for Renderer {}
+#[cfg(all(feature = "xr", target_os = "windows"))]
 unsafe impl Sync for Renderer {}
 
+#[cfg(all(feature = "xr", target_os = "windows"))]
 impl Renderer {
     pub fn new(
         vk: &VkBackend,
@@ -286,12 +427,15 @@ impl Renderer {
 
     /// Render all views (2 for stereo, 4 for quad/foveated).
     /// If `mirror` is provided, the first view is blitted to the desktop window.
+    /// If `panels` are provided, they are drawn as overlays on top of the scene.
+    /// Panels with pending uploads will have their GPU transfers recorded before the render pass.
     pub fn render_frame(
         &mut self,
         vk: &VkBackend,
         views: &[xr::View],
         time: f32,
         mut mirror: Option<&mut MirrorWindow>,
+        panels: &mut [&mut crate::launcher_panel::LauncherPanel],
     ) -> Result<()> {
         let device = vk.device();
 
@@ -306,13 +450,27 @@ impl Renderer {
                 Some(di)
             } else { None };
 
-            // Use the framebuffer that matches the color index
-            // (depth index should match due to equal swapchain lengths)
             let push = build_push_constants(&views[view_idx], view_idx as u32, time);
             let res = sw.resolution;
             let fb = sw.framebuffers[image_idx];
 
-            record_commands(
+            // Begin command buffer
+            let begin_info = vk::CommandBufferBeginInfo {
+                flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                ..Default::default()
+            };
+            unsafe { device.begin_command_buffer(self.command_buffer, &begin_info)? };
+
+            // Record pending panel texture uploads BEFORE the render pass
+            // (only on view 0 — the transfers only need to happen once per frame)
+            if view_idx == 0 {
+                for p in panels.iter_mut() {
+                    p.record_upload(device, self.command_buffer);
+                }
+            }
+
+            // Begin render pass + draw scene
+            record_render_pass_open(
                 device,
                 self.command_buffer,
                 self.render_pass,
@@ -323,7 +481,18 @@ impl Renderer {
                 &push,
                 self.descriptor_set,
                 self.has_depth,
-            )?;
+            );
+
+            // Draw panel overlays
+            for p in panels.iter() {
+                p.record_draw(device, self.command_buffer, &push);
+            }
+
+            // Close render pass + command buffer
+            unsafe {
+                device.cmd_end_render_pass(self.command_buffer);
+                device.end_command_buffer(self.command_buffer)?;
+            }
 
             let submit_info = vk::SubmitInfo {
                 command_buffer_count: 1,
@@ -392,6 +561,7 @@ impl Renderer {
 // ============================================================
 // Build push constants from an XR view pose + fov
 // ============================================================
+#[cfg(all(feature = "xr", target_os = "windows"))]
 fn build_push_constants(view: &xr::View, eye_idx: u32, time: f32) -> PushConstants {
     let q = view.pose.orientation;
     let rot = Mat4::from_quat(glam::Quat::from_xyzw(q.x, q.y, q.z, q.w));
@@ -422,7 +592,94 @@ fn build_push_constants(view: &xr::View, eye_idx: u32, time: f32) -> PushConstan
 // ============================================================
 // Record one fullscreen draw into the framebuffer
 // ============================================================
-fn record_commands(
+pub fn record_commands(
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    render_pass: vk::RenderPass,
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    framebuffer: vk::Framebuffer,
+    resolution: vk::Extent2D,
+    push: &PushConstants,
+    descriptor_set: vk::DescriptorSet,
+    has_depth: bool,
+) -> Result<()> {
+    record_commands_open(device, cmd, render_pass, pipeline, layout, framebuffer, resolution, push, descriptor_set, has_depth)?;
+    unsafe {
+        device.cmd_end_render_pass(cmd);
+        device.end_command_buffer(cmd)?;
+    }
+    Ok(())
+}
+
+/// Start render pass, draw the scene — but leave the render pass open.
+/// The command buffer must already be in recording state.
+/// Caller must call cmd_end_render_pass + end_command_buffer when done.
+pub fn record_render_pass_open(
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    render_pass: vk::RenderPass,
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    framebuffer: vk::Framebuffer,
+    resolution: vk::Extent2D,
+    push: &PushConstants,
+    descriptor_set: vk::DescriptorSet,
+    has_depth: bool,
+) {
+    let mut clears = vec![
+        vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } },
+    ];
+    if has_depth {
+        clears.push(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } });
+    }
+
+    let rp_begin = vk::RenderPassBeginInfo {
+        render_pass,
+        framebuffer,
+        render_area: vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent: resolution,
+        },
+        clear_value_count: clears.len() as u32,
+        p_clear_values: clears.as_ptr(),
+        ..Default::default()
+    };
+
+    let viewport = vk::Viewport {
+        x: 0.0, y: 0.0,
+        width: resolution.width as f32,
+        height: resolution.height as f32,
+        min_depth: 0.0, max_depth: 1.0,
+    };
+
+    let scissor = vk::Rect2D {
+        offset: vk::Offset2D::default(),
+        extent: resolution,
+    };
+
+    let push_bytes = unsafe {
+        std::slice::from_raw_parts(
+            push as *const PushConstants as *const u8,
+            std::mem::size_of::<PushConstants>(),
+        )
+    };
+
+    unsafe {
+        device.cmd_begin_render_pass(cmd, &rp_begin, vk::SubpassContents::INLINE);
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::GRAPHICS, layout, 0, &[descriptor_set], &[]);
+        device.cmd_set_viewport(cmd, 0, &[viewport]);
+        device.cmd_set_scissor(cmd, 0, &[scissor]);
+        device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::FRAGMENT, 0, push_bytes);
+        device.cmd_draw(cmd, 3, 1, 0, 0);
+    }
+}
+
+/// Begin command buffer, start render pass, draw the scene — but leave the
+/// render pass open so additional draws (e.g. launcher panel) can be appended.
+/// Caller must call cmd_end_render_pass + end_command_buffer when done.
+pub fn record_commands_open(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     render_pass: vk::RenderPass,
@@ -495,8 +752,6 @@ fn record_commands(
         device.cmd_set_scissor(cmd, 0, &[scissor]);
         device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::FRAGMENT, 0, push_bytes);
         device.cmd_draw(cmd, 3, 1, 0, 0); // fullscreen triangle, no vertex buffer
-        device.cmd_end_render_pass(cmd);
-        device.end_command_buffer(cmd)?;
     }
     Ok(())
 }
@@ -504,10 +759,19 @@ fn record_commands(
 // ============================================================
 // Render pass
 // ============================================================
-fn create_render_pass(
+pub fn create_render_pass(
     device: &ash::Device,
     color_format: vk::Format,
     depth_format: Option<vk::Format>,
+) -> Result<vk::RenderPass> {
+    create_render_pass_with_layout(device, color_format, depth_format, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+}
+
+pub fn create_render_pass_with_layout(
+    device: &ash::Device,
+    color_format: vk::Format,
+    depth_format: Option<vk::Format>,
+    color_final_layout: vk::ImageLayout,
 ) -> Result<vk::RenderPass> {
     let color_attachment = vk::AttachmentDescription {
         format: color_format,
@@ -517,7 +781,7 @@ fn create_render_pass(
         stencil_load_op:  vk::AttachmentLoadOp::DONT_CARE,
         stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
         initial_layout: vk::ImageLayout::UNDEFINED,
-        final_layout:   vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        final_layout:   color_final_layout,
         ..Default::default()
     };
 
@@ -585,7 +849,7 @@ fn create_render_pass(
 // ============================================================
 // SPIR-V shader module loader
 // ============================================================
-fn load_spv(device: &ash::Device, bytes: &[u8]) -> Result<vk::ShaderModule> {
+pub fn load_spv(device: &ash::Device, bytes: &[u8]) -> Result<vk::ShaderModule> {
     let words: Vec<u32> = bytes
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -601,7 +865,7 @@ fn load_spv(device: &ash::Device, bytes: &[u8]) -> Result<vk::ShaderModule> {
 // ============================================================
 // Graphics pipeline
 // ============================================================
-fn create_pipeline(
+pub fn create_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
     descriptor_set_layout: vk::DescriptorSetLayout,
@@ -731,6 +995,7 @@ fn create_pipeline(
 // ============================================================
 // Per-eye swapchain + image views + framebuffers
 // ============================================================
+#[cfg(all(feature = "xr", target_os = "windows"))]
 fn create_eye_swapchain(
     vk: &VkBackend,
     session: &xr::Session<xr::Vulkan>,

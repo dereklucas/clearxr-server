@@ -655,8 +655,9 @@ void main() {
                 handColor = menuBtn > 0.5 ? stPressed : stIdle;
             }
 
-            // Pointer ray: thin beam from aim pose
-            vec3 rayEnd = aimPos + aimDir * 3.0;
+            // Pointer ray: thin beam from aim pose (w = max length, 0 = default 3m)
+            float rayLen = hands.ctrl_aim_dir[c].w > 0.0 ? hands.ctrl_aim_dir[c].w : 3.0;
+            vec3 rayEnd = aimPos + aimDir * rayLen;
             float tBeam = rayCapsule(ro, rd, aimPos, rayEnd, 0.0015);
             if (tBeam > 0.0 && tBeam < handT) {
                 handT = tBeam;
@@ -667,6 +668,8 @@ void main() {
                 // Fade the ray color along its length
                 handColor = ctrlColor * (1.0 - proj * 0.7);
             }
+
+            // Dot indicator is drawn in the panel fragment shader (on top of the panel surface).
         }
 
         // Composite hand/controller on top of scene if it's closer

@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>CLEARXR — Art Grid Launcher</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    background: #000;
+    font-family: -apple-system, system-ui, sans-serif;
+    color: #fff;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── GRID VIEW ── */
+
+  .grid-view {
+    width: 1024px;
+    height: 640px;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 3px;
+    position: absolute;
+    inset: 0;
+    transition: opacity 0.35s ease, transform 0.35s ease;
+  }
+
+  .grid-view.hidden {
+    opacity: 0;
+    transform: scale(1.03);
+    pointer-events: none;
+  }
+
+  .cell {
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+
+  .cell::after {
+    content: attr(data-title);
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 28px 10px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: #fff;
+    background: linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 100%);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  .cell:hover::after {
+    opacity: 1;
+  }
+
+  .cell:hover {
+    transform: scale(1.02);
+    transition: transform 0.25s ease;
+    z-index: 1;
+  }
+
+  .watermark {
+    position: absolute;
+    bottom: 6px;
+    right: 8px;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    color: #fff;
+    opacity: 0.3;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  .grid-view.hidden ~ .watermark {
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+
+  /* ── DETAIL VIEW ── */
+
+  .detail-view {
+    width: 1024px;
+    height: 640px;
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    opacity: 0;
+    transform: scale(0.97);
+    pointer-events: none;
+    transition: opacity 0.35s ease, transform 0.35s ease;
+  }
+
+  .detail-view.active {
+    opacity: 1;
+    transform: scale(1);
+    pointer-events: auto;
+  }
+
+  .detail-hero {
+    width: 100%;
+    height: 352px; /* ~55% of 640 */
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    flex-shrink: 0;
+  }
+
+  .detail-body {
+    flex: 1;
+    background: #0a0a0a;
+    padding: 28px 36px 24px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .detail-info {}
+
+  .detail-title {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin-bottom: 6px;
+  }
+
+  .detail-meta {
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(255,255,255,0.45);
+    letter-spacing: 0.04em;
+    margin-bottom: 14px;
+  }
+
+  .detail-desc {
+    font-size: 14px;
+    font-weight: 400;
+    color: rgba(255,255,255,0.7);
+    line-height: 1.5;
+  }
+
+  .detail-actions {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+
+  .btn-launch {
+    display: inline-block;
+    padding: 12px 40px;
+    background: #00e5ff;
+    color: #000;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border: none;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+
+  .btn-launch:hover {
+    background: #5ef5ff;
+  }
+
+  .btn-back {
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.5);
+    background: none;
+    border: none;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: color 0.15s ease;
+  }
+
+  .btn-back:hover {
+    color: #fff;
+  }
+</style>
+</head>
+<body>
+
+<!-- GRID VIEW -->
+<div class="grid-view" id="gridView">
+  <div class="cell" data-title="Half-Life: Alyx" data-appid="546560"
+       data-desc="Lean, peek, and blast your way through a breathtaking VR return to the Half-Life universe."
+       style="background-image:url('https://cdn.akamai.steamstatic.com/steam/apps/546560/header.jpg')"></div>
+  <div class="cell" data-title="Beat Saber" data-appid="620980"
+       data-desc="Slash the beats of adrenaline-pumping music as they fly towards you in a neon-lit world."
+       style="background-image:url('https://cdn.akamai.steamstatic.com/steam/apps/620980/header.jpg')"></div>
+  <div class="cell" data-title="BONEWORKS" data-appid="823500"
+       data-desc="An advanced experimental physics VR action adventure with full physics interaction."
+       style="background-image:url('https://cdn.akamai.steamstatic.com/steam/apps/823500/header.jpg')"></div>
+  <div class="cell" data-title="Blade &amp; Sorcery" data-appid="555160"
+       data-desc="A built-for-VR medieval fantasy sandbox with full physics-driven melee combat."
+       style="background-image:url('https://cdn.akamai.steamstatic.com/steam/apps/555160/header.jpg')"></div>
+  <div class="cell" data-title="SUPERHOT VR" data-appid="617830"
+       data-desc="Time moves only when you move. The iconic FPS reimagined for virtual reality."
+       style="background-image:url('https://cdn.akamai.steamstatic.com/steam/apps/617830/header.jpg')"></div>
+  <div class="cell" data-title="Space Pirate Trainer" data-appid="418650"
+       data-desc="The original VR arcade shooter. Dodge, duck, and blast droids in deep space."
+       style="background-image:url('https://cdn.akamai.steamstatic.com/steam/apps/418650/header.jpg')"></div>
+  <div class="cell" data-title="Pavlov VR" data-appid="611670"
+       data-desc="Competitive multiplayer VR shooter with community maps and realistic gunplay."
+       style="background-image:url('https://cdn.akamai.steamstatic.com/steam/apps/611670/header.jpg')"></div>
+  <div class="cell" data-title="Pistol Whip" data-appid="916840"
+       data-desc="An unstoppable action-rhythm FPS where you shoot to the beat in cinematic scenes."
+       style="background-image:url('https://cdn.akamai.steamstatic.com/steam/apps/916840/header.jpg')"></div>
+</div>
+<div class="watermark" id="watermark">CLEARXR</div>
+
+<!-- DETAIL VIEW -->
+<div class="detail-view" id="detailView">
+  <div class="detail-hero" id="detailHero"></div>
+  <div class="detail-body">
+    <div class="detail-info">
+      <div class="detail-title" id="detailTitle"></div>
+      <div class="detail-meta">VR &middot; Steam</div>
+      <div class="detail-desc" id="detailDesc"></div>
+    </div>
+    <div class="detail-actions">
+      <button class="btn-launch">LAUNCH</button>
+      <button class="btn-back" id="btnBack">BACK</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const gridView = document.getElementById('gridView');
+  const detailView = document.getElementById('detailView');
+  const detailHero = document.getElementById('detailHero');
+  const detailTitle = document.getElementById('detailTitle');
+  const detailDesc = document.getElementById('detailDesc');
+  const btnBack = document.getElementById('btnBack');
+
+  document.querySelectorAll('.cell').forEach(cell => {
+    cell.addEventListener('click', () => {
+      const appid = cell.dataset.appid;
+      const title = cell.dataset.title;
+      const desc = cell.dataset.desc;
+
+      detailHero.style.backgroundImage =
+        `url('https://cdn.akamai.steamstatic.com/steam/apps/${appid}/capsule_616x353.jpg')`;
+      detailTitle.textContent = title;
+      detailDesc.textContent = desc;
+
+      gridView.classList.add('hidden');
+      detailView.classList.add('active');
+    });
+  });
+
+  btnBack.addEventListener('click', () => {
+    detailView.classList.remove('active');
+    gridView.classList.remove('hidden');
+  });
+</script>
+</body>
+</html>

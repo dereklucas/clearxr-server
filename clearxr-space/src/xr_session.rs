@@ -5,18 +5,30 @@
 ///   PRIMARY_STEREO      – 2 views (standard left/right) as fallback
 
 use anyhow::Result;
-use glam;
+use ash::vk;
+use glam::{self, Vec3};
 use log::{debug, info, warn};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc};
 
 use openxr as xr;
 
+use crate::game_scanner;
+use crate::launcher_panel::{LauncherPanel, ToolbarTab};
 use crate::mirror_window::MirrorWindow;
 use crate::renderer::{HandData, Renderer};
+use crate::screen_capture::ScreenCapture;
+use crate::ui_renderer::UiRenderer;
 use crate::vk_backend::VkBackend;
 
-pub fn run(keep_running: Arc<AtomicBool>) -> Result<()> {
+/// Which panel source is currently active.
+#[derive(Clone, Copy, PartialEq)]
+enum PanelMode {
+    Launcher,
+    Screen,
+}
+
+pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()> {
     // --------------------------------------------------------
     // 1. OpenXR instance
     // --------------------------------------------------------
@@ -351,6 +363,73 @@ pub fn run(keep_running: Arc<AtomicBool>) -> Result<()> {
             None
         }
     };
+
+    // --------------------------------------------------------
+    // 7c. Panel overlay (launcher UI + screen capture, switchable)
+    // --------------------------------------------------------
+    // Launcher panel (always created)
+    let launcher_tex_w = 1024u32;
+    let launcher_tex_h = 640u32;
+    let games = game_scanner::scan_all();
+    info!("Initializing XR launcher UI...");
+    let html_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/launcher.html");
+    let mut launcher_ui = UiRenderer::new(launcher_tex_w, launcher_tex_h, &html_path)?;
+    if let Err(e) = launcher_ui.set_games(&games) {
+        log::warn!("Failed to inject games into UI: {}", e);
+    }
+    info!("Launcher UI initialized ({}x{}, {} games)", launcher_tex_w, launcher_tex_h, games.len());
+
+    let mut launcher_panel = LauncherPanel::new(&vk, renderer.render_pass, launcher_tex_w, launcher_tex_h, vk::Format::R8G8B8A8_SRGB)?;
+    if let Some(pixels) = launcher_ui.update() {
+        launcher_panel.upload_pixels(&vk, pixels)?;
+    }
+
+    // Screen capture panel (always created)
+    let mut screen_capture = ScreenCapture::new()?;
+    let screen_tex_w = screen_capture.screen_width();
+    let screen_tex_h = screen_capture.screen_height();
+    let mut screen_panel = LauncherPanel::new(&vk, renderer.render_pass, screen_tex_w, screen_tex_h, vk::Format::B8G8R8A8_SRGB)?;
+    // Wider panel for 16:9 screen
+    screen_panel.width = 2.4;
+    screen_panel.height = 1.35;
+    if let Some(frame) = screen_capture.try_get_frame() {
+        screen_panel.upload_pixels(&vk, &frame.data)?;
+    }
+    info!("Screen capture initialized: {}x{}", screen_tex_w, screen_tex_h);
+
+    // Start in the mode requested by --screen flag
+    let mut panel_mode = if use_screen_capture { PanelMode::Screen } else { PanelMode::Launcher };
+
+    // --------------------------------------------------------
+    // 7d. Toolbar panel (below main panel, for switching modes)
+    // --------------------------------------------------------
+    let toolbar_w = 256u32;
+    let toolbar_h = 40u32;
+    let mut toolbar_panel = LauncherPanel::new(&vk, renderer.render_pass, toolbar_w, toolbar_h, vk::Format::R8G8B8A8_SRGB)?;
+    toolbar_panel.width = 0.8;
+    toolbar_panel.height = 0.1;
+    toolbar_panel.opacity = 0.95;
+    // Position will be updated each frame relative to the active panel
+    toolbar_panel.center = Vec3::new(0.0, 1.6 - 0.5 - 0.08, -2.5);
+    let toolbar_tab = if use_screen_capture { ToolbarTab::Screen } else { ToolbarTab::Launcher };
+    let toolbar_pixels = crate::launcher_panel::generate_toolbar_pixels(toolbar_w, toolbar_h, toolbar_tab);
+    toolbar_panel.upload_pixels(&vk, &toolbar_pixels)?;
+
+    // --------------------------------------------------------
+    // 7e. FPS counter panel (on the floor at feet)
+    // --------------------------------------------------------
+    let fps_w = 128u32;
+    let fps_h = 48u32;
+    let mut fps_panel = LauncherPanel::new(&vk, renderer.render_pass, fps_w, fps_h, vk::Format::R8G8B8A8_SRGB)?;
+    fps_panel.center = Vec3::new(0.0, 0.01, -0.5); // floor level, slightly in front
+    fps_panel.width = 0.3;
+    fps_panel.height = 0.12;
+    fps_panel.opacity = 0.9;
+    fps_panel.right_dir = Vec3::X;     // right on floor = world +X
+    fps_panel.up_dir = -Vec3::Z;       // "up" on floor panel = toward user (-Z)
+    let mut fps_update_timer = std::time::Instant::now();
+    let mut frame_count = 0u32;
+    let mut current_fps = 0.0f32;
 
     // --------------------------------------------------------
     // 8. Main loop
@@ -688,10 +767,130 @@ pub fn run(keep_running: Arc<AtomicBool>) -> Result<()> {
                 }
             }
         }
+        // ---- Controller aim data (used by toolbar + panel hit testing) ----
+        let right_aim_pos = Vec3::new(
+            hand_data.ctrl_aim_pos[1][0],
+            hand_data.ctrl_aim_pos[1][1],
+            hand_data.ctrl_aim_pos[1][2],
+        );
+        let right_aim_dir = Vec3::new(
+            hand_data.ctrl_aim_dir[1][0],
+            hand_data.ctrl_aim_dir[1][1],
+            hand_data.ctrl_aim_dir[1][2],
+        );
+        let right_active = hand_data.active[3] > 0.5;
+        let trigger_pulled = hand_data.ctrl_inputs[1][0] > 0.5;
+
+        // ---- Toolbar: position below active panel, handle clicks to switch ----
+        {
+            let active_p = match panel_mode {
+                PanelMode::Launcher => &launcher_panel,
+                PanelMode::Screen => &screen_panel,
+            };
+            // Place toolbar just below the active panel
+            toolbar_panel.center = active_p.center
+                - active_p.up_dir * (active_p.height * 0.5 + toolbar_panel.height * 0.5 + 0.02);
+            toolbar_panel.right_dir = active_p.right_dir;
+            toolbar_panel.up_dir = active_p.up_dir;
+        }
+        if right_active {
+            if let Some((u, _v, _t)) = toolbar_panel.hit_test(right_aim_pos, right_aim_dir, right_aim_pos) {
+                if trigger_pulled {
+                    let new_mode = if u < 0.5 { PanelMode::Launcher } else { PanelMode::Screen };
+                    if new_mode != panel_mode {
+                        panel_mode = new_mode;
+                        let tab = match panel_mode {
+                            PanelMode::Launcher => ToolbarTab::Launcher,
+                            PanelMode::Screen => ToolbarTab::Screen,
+                        };
+                        info!("Switched to {:?} panel.", tab);
+                        let tb_pixels = crate::launcher_panel::generate_toolbar_pixels(
+                            toolbar_w, toolbar_h, tab,
+                        );
+                        if let Err(e) = toolbar_panel.upload_pixels(&vk, &tb_pixels) {
+                            log::error!("Toolbar upload failed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Panel overlay update ----
+        let mut ray_hit_dist: f32 = 0.0; // 0 = no hit, shader defaults to 3m
+        // Clear dot on both panels each frame
+        launcher_panel.dot_uv = None;
+        screen_panel.dot_uv = None;
+
+        match panel_mode {
+            PanelMode::Launcher => {
+                if right_active {
+                    if let Some((u, v, t)) = launcher_panel.hit_test(right_aim_pos, right_aim_dir, right_aim_pos) {
+                        ray_hit_dist = t;
+                        launcher_panel.dot_uv = Some((u, v));
+                        launcher_ui.mouse_move(u, v);
+                        if trigger_pulled {
+                            launcher_ui.mouse_click(u, v);
+                        }
+                    }
+                }
+                if let Some(pixels) = launcher_ui.update() {
+                    if let Err(e) = launcher_panel.upload_pixels(&vk, pixels) {
+                        log::error!("Launcher texture upload failed: {}", e);
+                    }
+                }
+            }
+            PanelMode::Screen => {
+                if right_active {
+                    if let Some((u, v, t)) = screen_panel.hit_test(right_aim_pos, right_aim_dir, right_aim_pos) {
+                        ray_hit_dist = t;
+                        screen_panel.dot_uv = Some((u, v));
+                        screen_capture.inject_mouse_move(u, v);
+                        if trigger_pulled {
+                            screen_capture.inject_mouse_click(u, v);
+                        }
+                    }
+                }
+                // Stage new frame if available (CPU memcpy only, GPU upload deferred to render cmd)
+                if let Some(frame) = screen_capture.try_get_frame() {
+                    if let Err(e) = screen_panel.stage_pixels(&frame.data) {
+                        log::error!("Screen capture stage failed: {}", e);
+                    }
+                }
+            }
+        };
+        // Also check toolbar hit (use shorter distance if closer)
+        if right_active {
+            if let Some((_u, _v, t)) = toolbar_panel.hit_test(right_aim_pos, right_aim_dir, right_aim_pos) {
+                if ray_hit_dist == 0.0 || t < ray_hit_dist {
+                    ray_hit_dist = t;
+                }
+            }
+        }
+        // Write ray length into hand data so the shader clips the beam.
+        // Pull back slightly so the ray doesn't bleed through the semi-transparent panel.
+        hand_data.ctrl_aim_dir[1][3] = if ray_hit_dist > 0.02 { ray_hit_dist - 0.02 } else { ray_hit_dist };
         renderer.update_hand_data(&hand_data);
 
+        // ---- FPS counter update (every 0.5s) ----
+        frame_count += 1;
+        let fps_elapsed = fps_update_timer.elapsed().as_secs_f32();
+        if fps_elapsed >= 0.5 {
+            current_fps = frame_count as f32 / fps_elapsed;
+            frame_count = 0;
+            fps_update_timer = std::time::Instant::now();
+            let fps_pixels = crate::launcher_panel::generate_fps_pixels(fps_w, fps_h, current_fps);
+            if let Err(e) = fps_panel.upload_pixels(&vk, &fps_pixels) {
+                log::error!("FPS panel upload failed: {}", e);
+            }
+        }
+
         // ---- Render all views (2 for stereo, 4 for quad) ----
-        renderer.render_frame(&vk, &views, elapsed, mirror.as_mut())?;
+        let active_panel_mut: &mut LauncherPanel = match panel_mode {
+            PanelMode::Launcher => &mut launcher_panel,
+            PanelMode::Screen => &mut screen_panel,
+        };
+        renderer.render_frame(&vk, &views, elapsed, mirror.as_mut(),
+            &mut [active_panel_mut, &mut toolbar_panel, &mut fps_panel])?;
 
         // ---- Build composition layer dynamically for N views ----
         // Build depth info structs (must live until xrEndFrame)
@@ -772,6 +971,10 @@ pub fn run(keep_running: Arc<AtomicBool>) -> Result<()> {
     if let Some(ref mut m) = mirror {
         m.destroy(vk.device());
     }
+    launcher_panel.destroy(vk.device());
+    screen_panel.destroy(vk.device());
+    toolbar_panel.destroy(vk.device());
+    fps_panel.destroy(vk.device());
     renderer.destroy(&vk);
 
     Ok(())

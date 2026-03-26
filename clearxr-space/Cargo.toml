@@ -8,12 +8,22 @@ description = "Clear XR – OpenXR visual showcase placeholder for CloudXR/Apple
 name = "clear-xr"
 path = "src/main.rs"
 
+[features]
+default = ["xr"]
+xr = ["openxr"]
+desktop = ["winit", "raw-window-handle"]
+
 [dependencies]
 # OpenXR bindings – "loaded" dynamically finds the runtime (CloudXR, SteamVR, etc.)
-openxr = { version = "0.17", features = ["loaded"] }
+openxr = { version = "0.17", features = ["loaded"], optional = true }
 
 # Low-level Vulkan – we drive the GPU directly so the runtime picks the right adapter
 ash = "0.38"
+ash-window = "0.13"
+
+# Cross-platform windowing (desktop mode)
+winit = { version = "0.30", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 
 # Math (matrices, vectors, quaternions for view transforms)
 glam = "0.27"
@@ -31,6 +41,30 @@ hound = "3"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+
+# Game library detection
+steamlocate = "2"
+
+# Serialization (for game manifests, config)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTML UI rendering (Ultralight — lightweight headless browser)
+ul-next = "0.5"  # default features include appcore_linked (needed for fontloader/filesystem)
+
+# File watching for hot-reload
+notify = "7"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 # No Rust deps needed for shader compilation – we shell out to glslc (Vulkan SDK)
