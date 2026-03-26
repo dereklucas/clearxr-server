@@ -119,105 +119,6 @@
     pointer-events: none;
   }
 
-  /* Volume slider overlay */
-  .volume-panel {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%) scale(0.85);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.25s ease, transform 0.25s ease;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    z-index: 10;
-  }
-
-  .volume-panel.visible {
-    opacity: 1;
-    transform: translate(-50%, -50%) scale(1);
-    pointer-events: auto;
-  }
-
-  .volume-label {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-muted);
-    letter-spacing: 1px;
-    text-transform: uppercase;
-  }
-
-  .volume-slider-track {
-    width: 120px;
-    height: 6px;
-    background: #1e1e38;
-    border-radius: 3px;
-    position: relative;
-    cursor: pointer;
-  }
-
-  .volume-slider-fill {
-    height: 100%;
-    background: var(--accent);
-    border-radius: 3px;
-    width: 70%;
-    transition: width 0.1s ease;
-    pointer-events: none;
-  }
-
-  .volume-slider-thumb {
-    position: absolute;
-    top: 50%;
-    left: 70%;
-    width: 14px;
-    height: 14px;
-    background: var(--accent);
-    border: 2px solid #e4e4ee;
-    border-radius: 50%;
-    transform: translate(-50%, -50%);
-    pointer-events: none;
-    box-shadow: 0 0 8px rgba(74, 158, 255, 0.4);
-  }
-
-  .volume-value {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text);
-  }
-
-  .volume-btns {
-    display: flex;
-    gap: 16px;
-  }
-
-  .vol-btn {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    border: 1px solid #252540;
-    background: var(--surface);
-    color: var(--text);
-    font-size: 16px;
-    font-weight: 700;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background var(--transition), border-color var(--transition), color var(--transition);
-    font-family: inherit;
-  }
-
-  .vol-btn:hover {
-    background: var(--surface-hover);
-    border-color: var(--accent-dim);
-    color: var(--accent);
-  }
-
-  .vol-btn:active {
-    transform: scale(0.92);
-  }
 </style>
 </head>
 <body>
@@ -258,8 +159,8 @@
           <path class="wedge-hit" d="M140,140 L140,280 A140,140 0 0,0 280,140 Z"/>
         </g>
 
-        <!-- Volume (left wedge) -->
-        <g class="wedge-group" data-action="volume" data-label="Volume">
+        <!-- Screenshot (left wedge) -->
+        <g class="wedge-group" data-action="screenshot" data-label="Screenshot">
           <path class="wedge-bg" d="M140,140 L0,140 A140,140 0 0,0 140,280 Z"/>
           <path class="wedge-hit" d="M140,140 L0,140 A140,140 0 0,0 140,280 Z"/>
         </g>
@@ -283,38 +184,18 @@
     <!-- Settings icon (bottom-right center: ~210, 210) -->
     <text class="wedge-icon" x="202" y="202" data-for="settings">&#x2699;</text>
 
-    <!-- Volume icon (bottom-left center: ~70, 210) -->
-    <text class="wedge-icon" x="78" y="202" data-for="volume">&#x1F50A;</text>
+    <!-- Screenshot icon (bottom-left center: ~70, 210) -->
+    <text class="wedge-icon" x="78" y="202" data-for="screenshot">&#x1F4F7;</text>
 
     <!-- Center circle -->
     <circle class="center-bg" cx="140" cy="140" r="44"/>
     <text class="center-label" id="centerLabel" x="140" y="140"></text>
   </svg>
 
-  <!-- Volume controls overlay (shown in center when Volume is selected) -->
-  <div class="volume-panel" id="volumePanel">
-    <span class="volume-label">Volume</span>
-    <span class="volume-value" id="volumeValue">70%</span>
-    <div class="volume-slider-track" id="volumeTrack">
-      <div class="volume-slider-fill" id="volumeFill"></div>
-      <div class="volume-slider-thumb" id="volumeThumb"></div>
-    </div>
-    <div class="volume-btns">
-      <button class="vol-btn" id="volDown" title="Volume Down">&minus;</button>
-      <button class="vol-btn" id="volUp" title="Volume Up">+</button>
-    </div>
-  </div>
 </div>
 
 <script>
   var centerLabel = document.getElementById('centerLabel');
-  var volumePanel = document.getElementById('volumePanel');
-  var volumeValue = document.getElementById('volumeValue');
-  var volumeFill = document.getElementById('volumeFill');
-  var volumeThumb = document.getElementById('volumeThumb');
-  var volumeTrack = document.getElementById('volumeTrack');
-  var currentVolume = 70;
-  var volumeActive = false;
 
   function trayAction(name) {
     window.__clearxr_tray_pending = name;
@@ -323,104 +204,27 @@
     }
   }
 
-  function updateVolumeUI() {
-    var pct = Math.max(0, Math.min(100, currentVolume));
-    volumeValue.textContent = pct + '%';
-    volumeFill.style.width = pct + '%';
-    volumeThumb.style.left = pct + '%';
-  }
-
-  function showVolumePanel() {
-    volumeActive = true;
-    volumePanel.classList.add('visible');
-    centerLabel.textContent = '';
-  }
-
-  function hideVolumePanel() {
-    volumeActive = false;
-    volumePanel.classList.remove('visible');
-  }
-
   // Wedge interactions
   var wedges = document.querySelectorAll('.wedge-group');
   for (var i = 0; i < wedges.length; i++) {
     (function(wedge) {
       wedge.addEventListener('mouseenter', function() {
         var label = wedge.getAttribute('data-label');
-        if (!volumeActive) {
-          centerLabel.textContent = label;
-          centerLabel.classList.add('active');
-        }
+        centerLabel.textContent = label;
+        centerLabel.classList.add('active');
       });
 
       wedge.addEventListener('mouseleave', function() {
-        if (!volumeActive) {
-          centerLabel.textContent = '';
-          centerLabel.classList.remove('active');
-        }
+        centerLabel.textContent = '';
+        centerLabel.classList.remove('active');
       });
 
       wedge.addEventListener('click', function() {
         var action = wedge.getAttribute('data-action');
-        if (action === 'volume') {
-          if (volumeActive) {
-            hideVolumePanel();
-          } else {
-            showVolumePanel();
-          }
-        } else {
-          hideVolumePanel();
-          trayAction(action);
-        }
+        trayAction(action);
       });
     })(wedges[i]);
   }
-
-  // Volume buttons
-  document.getElementById('volUp').addEventListener('click', function(e) {
-    e.stopPropagation();
-    currentVolume = Math.min(100, currentVolume + 5);
-    updateVolumeUI();
-    trayAction('volume_up');
-  });
-
-  document.getElementById('volDown').addEventListener('click', function(e) {
-    e.stopPropagation();
-    currentVolume = Math.max(0, currentVolume - 5);
-    updateVolumeUI();
-    trayAction('volume_down');
-  });
-
-  // Volume slider drag
-  var dragging = false;
-
-  function setVolumeFromX(clientX) {
-    var rect = volumeTrack.getBoundingClientRect();
-    var pct = Math.round(((clientX - rect.left) / rect.width) * 100);
-    currentVolume = Math.max(0, Math.min(100, pct));
-    updateVolumeUI();
-  }
-
-  volumeTrack.addEventListener('mousedown', function(e) {
-    dragging = true;
-    setVolumeFromX(e.clientX);
-  });
-
-  document.addEventListener('mousemove', function(e) {
-    if (dragging) {
-      setVolumeFromX(e.clientX);
-    }
-  });
-
-  document.addEventListener('mouseup', function() {
-    if (dragging) {
-      dragging = false;
-      // Fire the appropriate action based on direction — just send current state
-      trayAction(currentVolume > 50 ? 'volume_up' : 'volume_down');
-    }
-  });
-
-  updateVolumeUI();
 </script>
 
 </body>

@@ -4,7 +4,7 @@ use glam::Vec3;
 pub struct PanelId(u64);
 
 impl PanelId {
-    pub fn new(id: u64) -> Self { Self(id) }
+    pub const fn new(id: u64) -> Self { Self(id) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

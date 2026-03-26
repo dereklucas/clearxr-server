@@ -11,7 +11,6 @@ path = "src/main.rs"
 [features]
 default = ["xr"]
 xr = ["openxr"]
-desktop = ["winit", "raw-window-handle"]
 
 [dependencies]
 # OpenXR bindings – "loaded" dynamically finds the runtime (CloudXR, SteamVR, etc.)
@@ -20,10 +19,6 @@ openxr = { version = "0.17", features = ["loaded"], optional = true }
 # Low-level Vulkan – we drive the GPU directly so the runtime picks the right adapter
 ash = "0.38"
 ash-window = "0.13"
-
-# Cross-platform windowing (desktop mode)
-winit = { version = "0.30", optional = true }
-raw-window-handle = { version = "0.6", optional = true }
 
 # Math (matrices, vectors, quaternions for view transforms)
 glam = "0.27"

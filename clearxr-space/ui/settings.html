@@ -131,6 +131,12 @@
     padding-right: 20px;
   }
 
+  .row-hint {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
   .row-control {
     display: flex;
     align-items: center;
@@ -138,7 +144,7 @@
     flex-shrink: 0;
   }
 
-  /* ---- Toggle switch (48px tall touch target) ---- */
+  /* ---- Toggle switch ---- */
   .toggle {
     position: relative;
     width: 56px;
@@ -326,144 +332,70 @@
 
 <div class="content">
 
+  <!-- Shell -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Shell</span>
+      <span class="section-line"></span>
+    </div>
+
+    <div class="row">
+      <div>
+        <div class="row-label">Default View</div>
+        <div class="row-hint">Which view to show on startup</div>
+      </div>
+      <div class="row-control">
+        <select id="default_view" class="dropdown">
+          <option value="launcher">Launcher</option>
+          <option value="desktop">Desktop</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <div class="row-label">Haptic Feedback</div>
+        <div class="row-hint">Controller vibration on interactions</div>
+      </div>
+      <div class="row-control">
+        <label class="toggle">
+          <input type="checkbox" id="haptics_enabled" checked>
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </div>
+  </div>
+
   <!-- Display -->
   <div class="section">
     <div class="section-header">
       <span class="section-title">Display</span>
       <span class="section-line"></span>
     </div>
-    <div class="row">
-      <span class="row-label">Show FPS</span>
-      <div class="row-control">
-        <label class="toggle">
-          <input type="checkbox" id="showFps">
-          <span class="toggle-track"></span>
-        </label>
-      </div>
-    </div>
-    <div class="row">
-      <span class="row-label">Show Boundary</span>
-      <div class="row-control">
-        <label class="toggle">
-          <input type="checkbox" id="showBoundary">
-          <span class="toggle-track"></span>
-        </label>
-      </div>
-    </div>
-    <div class="row">
-      <span class="row-label">Theme</span>
-      <div class="row-control">
-        <select class="dropdown" id="theme">
-          <option value="default">Default</option>
-          <option value="midnight">Midnight</option>
-          <option value="warm">Warm</option>
-        </select>
-      </div>
-    </div>
-  </div>
 
-  <!-- Audio -->
-  <div class="section">
-    <div class="section-header">
-      <span class="section-title">Audio</span>
-      <span class="section-line"></span>
-    </div>
     <div class="row">
-      <span class="row-label">Master Volume</span>
+      <div>
+        <div class="row-label">Panel Opacity</div>
+        <div class="row-hint">Transparency of content panels</div>
+      </div>
       <div class="row-control">
         <div class="slider-wrap">
-          <input type="range" class="slider" id="masterVolume" min="0" max="100" value="80">
-          <span class="slider-value" id="masterVolumeVal">80%</span>
+          <input type="range" id="panel_opacity" class="slider" min="50" max="100" value="95">
+          <span class="slider-value" id="panel_opacity_val">95%</span>
         </div>
       </div>
     </div>
+
     <div class="row">
-      <span class="row-label">Output Device</span>
-      <div class="row-control">
-        <select class="dropdown" id="outputDevice">
-          <option value="default">System Default</option>
-        </select>
+      <div>
+        <div class="row-label">Show FPS</div>
+        <div class="row-hint">Display frame rate counter</div>
       </div>
-    </div>
-    <div class="row">
-      <span class="row-label">Mic Enabled</span>
       <div class="row-control">
         <label class="toggle">
-          <input type="checkbox" id="micEnabled">
+          <input type="checkbox" id="show_fps" checked>
           <span class="toggle-track"></span>
         </label>
-      </div>
-    </div>
-  </div>
-
-  <!-- Panel -->
-  <div class="section">
-    <div class="section-header">
-      <span class="section-title">Panel</span>
-      <span class="section-line"></span>
-    </div>
-    <div class="row">
-      <span class="row-label">Opacity</span>
-      <div class="row-control">
-        <div class="slider-wrap">
-          <input type="range" class="slider" id="panelOpacity" min="50" max="100" value="100">
-          <span class="slider-value" id="panelOpacityVal">100%</span>
-        </div>
-      </div>
-    </div>
-    <div class="row">
-      <span class="row-label">Default Anchor</span>
-      <div class="row-control">
-        <select class="dropdown" id="defaultAnchor">
-          <option value="world">World</option>
-          <option value="controller">Controller</option>
-          <option value="wrist">Wrist</option>
-          <option value="theater">Theater</option>
-        </select>
-      </div>
-    </div>
-    <div class="row">
-      <span class="row-label">Theater Distance</span>
-      <div class="row-control">
-        <div class="slider-wrap">
-          <input type="range" class="slider" id="theaterDistance" min="2" max="10" step="0.5" value="4">
-          <span class="slider-value" id="theaterDistanceVal">4.0m</span>
-        </div>
-      </div>
-    </div>
-    <div class="row">
-      <span class="row-label">Theater Scale</span>
-      <div class="row-control">
-        <div class="slider-wrap">
-          <input type="range" class="slider" id="theaterScale" min="1" max="5" step="0.5" value="2">
-          <span class="slider-value" id="theaterScaleVal">2.0x</span>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Controls -->
-  <div class="section">
-    <div class="section-header">
-      <span class="section-title">Controls</span>
-      <span class="section-line"></span>
-    </div>
-    <div class="row">
-      <span class="row-label">Haptic Feedback</span>
-      <div class="row-control">
-        <label class="toggle">
-          <input type="checkbox" id="hapticFeedback" checked>
-          <span class="toggle-track"></span>
-        </label>
-      </div>
-    </div>
-    <div class="row">
-      <span class="row-label">Default View on Startup</span>
-      <div class="row-control">
-        <select class="dropdown" id="defaultView">
-          <option value="launcher">Launcher</option>
-          <option value="desktop">Desktop</option>
-        </select>
       </div>
     </div>
   </div>
@@ -473,75 +405,47 @@
 <div class="divider"></div>
 
 <div class="footer">
-  <button class="save-btn" id="saveBtn" onclick="saveConfig()">Save</button>
+  <button class="save-btn" id="save_btn" onclick="saveConfig()">Save</button>
 </div>
 
 <script>
-  // Config populated from Rust: window.CONFIG = { ... }
-
+  // Load config values injected by the shell via window.CONFIG
   function loadConfig() {
-    var c = window.CONFIG || {};
+    var c = window.CONFIG;
+    if (!c) return;
 
-    // Display
-    if (c.showFps !== undefined) document.getElementById('showFps').checked = c.showFps;
-    if (c.showBoundary !== undefined) document.getElementById('showBoundary').checked = c.showBoundary;
-    if (c.theme !== undefined) document.getElementById('theme').value = c.theme;
-
-    // Audio
-    if (c.volume !== undefined) {
-      var volPct = Math.round(c.volume * 100);
-      document.getElementById('masterVolume').value = volPct;
-      document.getElementById('masterVolumeVal').textContent = volPct + '%';
+    if (c.default_view) {
+      document.getElementById('default_view').value = c.default_view;
     }
-    if (c.outputDevice !== undefined) document.getElementById('outputDevice').value = c.outputDevice;
-    if (c.micEnabled !== undefined) document.getElementById('micEnabled').checked = c.micEnabled;
-
-    // Panel
-    if (c.opacity !== undefined) {
-      var opacityPct = Math.round(c.opacity * 100);
-      document.getElementById('panelOpacity').value = opacityPct;
-      document.getElementById('panelOpacityVal').textContent = opacityPct + '%';
+    if (typeof c.panel_opacity === 'number') {
+      var pct = Math.round(c.panel_opacity * 100);
+      document.getElementById('panel_opacity').value = pct;
+      document.getElementById('panel_opacity_val').textContent = pct + '%';
     }
-    if (c.anchor !== undefined) document.getElementById('defaultAnchor').value = c.anchor;
-    if (c.theaterDistance !== undefined) {
-      document.getElementById('theaterDistance').value = c.theaterDistance;
-      document.getElementById('theaterDistanceVal').textContent = parseFloat(c.theaterDistance).toFixed(1) + 'm';
+    if (typeof c.show_fps === 'boolean') {
+      document.getElementById('show_fps').checked = c.show_fps;
     }
-    if (c.theaterScale !== undefined) {
-      document.getElementById('theaterScale').value = c.theaterScale;
-      document.getElementById('theaterScaleVal').textContent = parseFloat(c.theaterScale).toFixed(1) + 'x';
+    if (typeof c.haptics_enabled === 'boolean') {
+      document.getElementById('haptics_enabled').checked = c.haptics_enabled;
     }
-
-    // Controls
-    if (c.haptics_enabled !== undefined) document.getElementById('hapticFeedback').checked = c.haptics_enabled;
-    if (c.defaultView !== undefined) document.getElementById('defaultView').value = c.defaultView;
   }
 
+  // Gather current control values into a JSON-serialisable object
   function gatherConfig() {
     return {
-      showFps: document.getElementById('showFps').checked,
-      showBoundary: document.getElementById('showBoundary').checked,
-      theme: document.getElementById('theme').value,
-      volume: parseInt(document.getElementById('masterVolume').value, 10) / 100,
-      outputDevice: document.getElementById('outputDevice').value,
-      micEnabled: document.getElementById('micEnabled').checked,
-      opacity: parseInt(document.getElementById('panelOpacity').value, 10) / 100,
-      anchor: document.getElementById('defaultAnchor').value,
-      theaterDistance: parseFloat(document.getElementById('theaterDistance').value),
-      theaterScale: parseFloat(document.getElementById('theaterScale').value),
-      haptics_enabled: document.getElementById('hapticFeedback').checked,
-      defaultView: document.getElementById('defaultView').value
+      default_view: document.getElementById('default_view').value,
+      panel_opacity: parseInt(document.getElementById('panel_opacity').value, 10) / 100,
+      show_fps: document.getElementById('show_fps').checked,
+      haptics_enabled: document.getElementById('haptics_enabled').checked
     };
   }
 
+  // Save: write JSON to the bridge variable polled by the shell
   function saveConfig() {
     var config = gatherConfig();
-    // Signal to the Rust shell via polling bridge
     window.__clearxr_pending_save = JSON.stringify(config);
-    if (window.__clearxr_save_config) {
-      window.__clearxr_save_config(JSON.stringify(config));
-    }
-    var btn = document.getElementById('saveBtn');
+
+    var btn = document.getElementById('save_btn');
     btn.textContent = 'Saved';
     btn.classList.add('saved');
     setTimeout(function() {
@@ -550,22 +454,14 @@
     }, 1500);
   }
 
-  // Wire up slider value displays
-  document.getElementById('masterVolume').addEventListener('input', function() {
-    document.getElementById('masterVolumeVal').textContent = this.value + '%';
-  });
-  document.getElementById('panelOpacity').addEventListener('input', function() {
-    document.getElementById('panelOpacityVal').textContent = this.value + '%';
-  });
-  document.getElementById('theaterDistance').addEventListener('input', function() {
-    document.getElementById('theaterDistanceVal').textContent = parseFloat(this.value).toFixed(1) + 'm';
-  });
-  document.getElementById('theaterScale').addEventListener('input', function() {
-    document.getElementById('theaterScaleVal').textContent = parseFloat(this.value).toFixed(1) + 'x';
+  // Slider live value display
+  document.getElementById('panel_opacity').addEventListener('input', function() {
+    document.getElementById('panel_opacity_val').textContent = this.value + '%';
   });
 
-  // Load config on startup
-  loadConfig();
+  // Apply config values once the page is ready
+  // (window.CONFIG is set before the first paint by the shell)
+  setTimeout(loadConfig, 50);
 </script>
 
 </body>

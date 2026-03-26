@@ -471,6 +471,48 @@ mod tests {
     }
 
     #[test]
+    fn trigger_held_does_not_repeat_click() {
+        // Verify that holding trigger for multiple frames only produces one PointerDown.
+        // This is the Track 02 MVP requirement: one trigger press = one logical click.
+        let mut dispatcher = InputDispatcher::new();
+        let panel = make_panel(Vec3::new(0.0, 0.0, -2.0), 2.0, 2.0);
+        let panels: Vec<(PanelId, &PanelTransform)> = vec![(PanelId::new(1), &panel)];
+
+        // Frame 1: no trigger (establish baseline)
+        let state0 = right_hand_state(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 0.0);
+        dispatcher.process(&state0, &panels);
+
+        // Frame 2: trigger pulled — rising edge, should get exactly one PointerDown
+        let state1 = right_hand_state(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 1.0);
+        let events1 = dispatcher.process(&state1, &panels);
+        let down_count_1 = events1.iter().filter(|(_, e)| matches!(e, InputEvent::PointerDown { .. })).count();
+        assert_eq!(down_count_1, 1, "First press frame should produce exactly one PointerDown");
+
+        // Frame 3-6: trigger still held — should NOT get any more PointerDown
+        for frame in 3..=6 {
+            let state = right_hand_state(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 1.0);
+            let events = dispatcher.process(&state, &panels);
+            let down_count = events.iter().filter(|(_, e)| matches!(e, InputEvent::PointerDown { .. })).count();
+            assert_eq!(down_count, 0, "Frame {}: held trigger must not produce PointerDown", frame);
+            // Should still get PointerMove (hover tracking continues)
+            let move_count = events.iter().filter(|(_, e)| matches!(e, InputEvent::PointerMove { .. })).count();
+            assert_eq!(move_count, 1, "Frame {}: should still get PointerMove while held", frame);
+        }
+
+        // Frame 7: release trigger
+        let state_release = right_hand_state(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 0.0);
+        let events_release = dispatcher.process(&state_release, &panels);
+        let up_count = events_release.iter().filter(|(_, e)| matches!(e, InputEvent::PointerUp { .. })).count();
+        assert_eq!(up_count, 1, "Release should produce exactly one PointerUp");
+
+        // Frame 8: press again — should get another PointerDown (new click)
+        let state_repress = right_hand_state(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0), 1.0);
+        let events_repress = dispatcher.process(&state_repress, &panels);
+        let down_count_re = events_repress.iter().filter(|(_, e)| matches!(e, InputEvent::PointerDown { .. })).count();
+        assert_eq!(down_count_re, 1, "Re-press after release should produce new PointerDown");
+    }
+
+    #[test]
     fn dispatcher_left_hand_trigger_edge_detection() {
         let mut dispatcher = InputDispatcher::new();
         let panel = make_panel(Vec3::new(0.0, 0.0, -2.0), 2.0, 2.0);

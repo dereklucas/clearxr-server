@@ -13,17 +13,32 @@ mod vk_backend;
 #[cfg(all(feature = "xr", target_os = "windows"))]
 mod xr_session;
 mod renderer;
-#[cfg(feature = "desktop")]
-mod desktop_session;
-
 use anyhow::Result;
 use log::info;
+
+/// Log system diagnostics before any XR/Vulkan initialization.
+fn log_system_info() {
+    info!("ClearXR Shell starting");
+    info!(
+        "Platform: {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    if let Ok(exe) = std::env::current_exe() {
+        info!("Executable: {}", exe.display());
+    }
+    if let Ok(dir) = std::env::current_dir() {
+        info!("Working directory: {}", dir.display());
+    }
+}
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
     )
     .init();
+
+    log_system_info();
 
     info!("==============================================");
     info!("  Clear XR  –  CloudXR visual splash / test space");
@@ -41,25 +56,7 @@ fn main() -> Result<()> {
     }
 
     let args: Vec<String> = std::env::args().collect();
-    let desktop_mode = args.iter().any(|a| a == "--desktop");
     let screen_capture = args.iter().any(|a| a == "--screen");
-
-    if desktop_mode {
-        #[cfg(feature = "desktop")]
-        {
-            if screen_capture {
-                info!("Running in desktop mode with screen capture.");
-            } else {
-                info!("Running in desktop window mode.");
-            }
-            return desktop_session::run(running, screen_capture);
-        }
-        #[cfg(not(feature = "desktop"))]
-        anyhow::bail!(
-            "Desktop mode requested but the 'desktop' feature is not enabled.\n\
-             Rebuild with: cargo build --features desktop"
-        );
-    }
 
     #[cfg(all(feature = "xr", target_os = "windows"))]
     {
@@ -70,6 +67,6 @@ fn main() -> Result<()> {
 
     #[cfg(not(all(feature = "xr", target_os = "windows")))]
     anyhow::bail!(
-        "No runtime mode available. Build with --features xr (Windows) or --features desktop."
+        "No runtime mode available. Build with --features xr on Windows."
     );
 }

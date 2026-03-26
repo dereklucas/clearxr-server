@@ -53,16 +53,25 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
         info!("XR_KHR_composition_layer_depth not available – depth disabled.");
     }
 
-    let xr_instance = xr_entry.create_instance(
-        &xr::ApplicationInfo {
-            application_name: "Clear XR",
-            application_version: 1,
-            engine_name: "Clear XR Engine",
-            engine_version: 1,
-        },
-        &extensions,
-        &[],
-    )?;
+    let xr_instance = xr_entry
+        .create_instance(
+            &xr::ApplicationInfo {
+                application_name: "Clear XR",
+                application_version: 1,
+                engine_name: "Clear XR Engine",
+                engine_version: 1,
+            },
+            &extensions,
+            &[],
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create OpenXR instance: {}\n\
+                 No OpenXR runtime found. Please install SteamVR, Meta Quest Link, \
+                 or another OpenXR-compatible runtime.",
+                e
+            )
+        })?;
 
     let props = xr_instance.properties()?;
     info!(
@@ -73,7 +82,16 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
     // --------------------------------------------------------
     // 2. System
     // --------------------------------------------------------
-    let system = xr_instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
+    let system = xr_instance
+        .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to get OpenXR system for HMD: {}\n\
+                 Is your VR headset connected and powered on? \
+                 The OpenXR runtime could not find a head-mounted display.",
+                e
+            )
+        })?;
 
     let vk_reqs = xr_instance.graphics_requirements::<xr::Vulkan>(system)?;
     let min_ver = vk_reqs.min_api_version_supported;
@@ -259,7 +277,15 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
                 queue_index: 0,
             },
         )
-    }?;
+    }
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create XR session: {}\n\
+             Is another VR application already running? \
+             Close other VR apps and try again.",
+            e
+        )
+    })?;
 
     // --------------------------------------------------------
     // 6. Reference space

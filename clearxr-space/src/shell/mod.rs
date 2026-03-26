@@ -16,9 +16,31 @@ use log::info;
 use crate::app::{game_scanner, launch_steam_game, LaunchedApp};
 use crate::capture::screen_capture::ScreenCapture;
 use crate::config::Config;
-use crate::input::{ControllerState, InputDispatcher};
+use crate::input::{ControllerState, InputDispatcher, InputEvent, Hand};
 use crate::launcher_panel::{LauncherPanel, ToolbarTab, generate_toolbar_pixels, generate_grab_bar_pixels, generate_grab_bar_pixels_highlighted, generate_fps_pixels, draw_text};
-use crate::panel::{Hand, PanelAnchor};
+use crate::panel::{PanelAnchor, PanelId, PanelTransform};
+
+// Stable PanelIds for InputDispatcher routing
+const PANEL_ID_LAUNCHER: PanelId = PanelId::new(1);
+const PANEL_ID_DESKTOP: PanelId = PanelId::new(2);
+const PANEL_ID_TOOLBAR: PanelId = PanelId::new(3);
+const PANEL_ID_GRAB_BAR: PanelId = PanelId::new(4);
+const PANEL_ID_FPS: PanelId = PanelId::new(5);
+const PANEL_ID_TRAY: PanelId = PanelId::new(6);
+const PANEL_ID_SETTINGS: PanelId = PanelId::new(7);
+
+/// Extract a PanelTransform from a LauncherPanel for InputDispatcher hit-testing.
+fn panel_transform(panel: &LauncherPanel) -> PanelTransform {
+    PanelTransform {
+        center: panel.center,
+        right_dir: panel.right_dir,
+        up_dir: panel.up_dir,
+        width: panel.width,
+        height: panel.height,
+        opacity: panel.opacity,
+        anchor: PanelAnchor::World,
+    }
+}
 use crate::shell::boundary::Boundary;
 use crate::shell::notifications::{Notification, NotificationLevel, NotificationQueue};
 use crate::ui::ui_renderer::UiRenderer;
@@ -75,12 +97,10 @@ pub struct Shell {
 
     // Input
     input: InputDispatcher,
-    prev_trigger: bool, // toolbar click edge detection (right hand)
 
     // Grab state
     grab_offset: Option<Vec3>,  // offset from grip to panel center when grab started
     grab_hand: Option<usize>,   // which hand (0=left, 1=right) is grabbing
-    prev_a_click: bool,        // edge detection for A button during grab
 
     // Grab bar highlight state
     grab_bar_highlighted: bool,
@@ -118,10 +138,10 @@ pub struct Shell {
     pub notifications: NotificationQueue,
     notification_panel: Option<LauncherPanel>,
 
-    // Virtual keyboard
-    keyboard_panel: Option<LauncherPanel>,
-    keyboard_ui: Option<UiRenderer>,
-    keyboard_visible: bool,
+    // Virtual keyboard — disabled for MVP (not wired end-to-end; no text input target)
+    // keyboard_panel: Option<LauncherPanel>,
+    // keyboard_ui: Option<UiRenderer>,
+    // keyboard_visible: bool,
 
     // Boundary
     pub boundary: Boundary,
@@ -152,13 +172,17 @@ impl Shell {
         let active_view = if use_screen_capture {
             ViewMode::Desktop
         } else {
-            ViewMode::Launcher
+            match config.shell.default_view.as_str() {
+                "desktop" => ViewMode::Desktop,
+                _ => ViewMode::Launcher,
+            }
         };
 
         // ---- Launcher panel + UI renderer ----
         let launcher_tex_w = 1024u32;
         let launcher_tex_h = 640u32;
-        let games = game_scanner::scan_all();
+        let mut games = game_scanner::scan_all();
+        games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         info!("Initializing launcher UI...");
         let html_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("ui/launcher-v2.html");
@@ -233,6 +257,10 @@ impl Shell {
         fps_panel.right_dir = Vec3::X;
         fps_panel.up_dir = -Vec3::Z;
 
+        // Apply config opacity to content panels
+        launcher_panel.opacity = config.panel.opacity;
+        screen_panel.opacity = config.panel.opacity;
+
         Ok(Self {
             config,
             active_view,
@@ -244,10 +272,8 @@ impl Shell {
             grab_bar,
             fps_panel,
             input: InputDispatcher::new(),
-            prev_trigger: false,
             grab_offset: None,
             grab_hand: None,
-            prev_a_click: false,
             grab_bar_highlighted: false,
             grab_bar_w,
             grab_bar_h,
@@ -268,9 +294,10 @@ impl Shell {
             settings_panel: None,
             settings_ui: None,
             settings_visible: false,
-            keyboard_panel: None,
-            keyboard_ui: None,
-            keyboard_visible: false,
+            // keyboard disabled for MVP
+            // keyboard_panel: None,
+            // keyboard_ui: None,
+            // keyboard_visible: false,
             notifications: NotificationQueue::new(3),
             notification_panel: None,
             boundary: Boundary::default(),
@@ -288,10 +315,8 @@ impl Shell {
     /// and the Vulkan backend (for texture uploads). Returns a `ShellFrame`
     /// with the ray-hit distance the caller should write into `HandData`.
     pub fn tick(&mut self, vk: &VkBackend, controller: &ControllerState) -> ShellFrame {
-        // Both hands can interact with panels independently.
         let hands: [&crate::input::HandState; 2] = [&controller.left, &controller.right];
-        let mut haptic_left: Option<HapticPulse> = None;
-        let mut haptic_right: Option<HapticPulse> = None;
+        let mut haptic: [Option<HapticPulse>; 2] = [None, None];
 
         // ------------------------------------------------------------------
         // 1. Toolbar: position below active panel
@@ -324,73 +349,38 @@ impl Shell {
             self.grab_bar.up_dir = active_p_up_dir;
         }
 
-        // Compute hover zone from toolbar hit-test (for hover highlight)
-        let mut current_hover_zone: Option<u8> = None;
-        for hand in hands.iter() {
-            if !hand.active { continue; }
-            if let Some((u, _v, _t)) = self.toolbar_panel.hit_test(
-                hand.aim_pos, hand.aim_dir, hand.aim_pos,
-            ) {
-                current_hover_zone = Some(if u < 0.35 { 0 }
-                    else if u < 0.70 { 1 }
-                    else if u < 0.80 { 2 }
-                    else if u < 0.90 { 3 }
-                    else { 4 });
-                break; // first hand that hits wins
+        // ------------------------------------------------------------------
+        // 2. Build panel list and process input through InputDispatcher
+        // ------------------------------------------------------------------
+        // Build panel list in front-to-back priority order
+        let mut input_panels: Vec<(PanelId, PanelTransform)> = Vec::new();
+        if self.tray_visible {
+            if let Some(ref tray) = self.tray_panel {
+                input_panels.push((PANEL_ID_TRAY, panel_transform(tray)));
             }
         }
-
-        // Only regenerate toolbar texture when hover_zone changes
-        if current_hover_zone != self.prev_hover_zone {
-            self.prev_hover_zone = current_hover_zone;
-            self.update_toolbar(vk);
-        }
-
-        // Process toolbar clicks from either hand
-        for (i, hand) in hands.iter().enumerate() {
-            if !hand.active { continue; }
-            let trigger_pulled = hand.trigger > 0.5;
-            if let Some((u, _v, _t)) = self.toolbar_panel.hit_test(
-                hand.aim_pos, hand.aim_dir, hand.aim_pos,
-            ) {
-                if trigger_pulled && !self.prev_trigger {
-                    // Haptic feedback for toolbar click
-                    let pulse = HapticPulse { duration_ms: 20, frequency: 200.0, amplitude: 0.2 };
-                    if i == 0 { haptic_left = Some(pulse); } else { haptic_right = Some(pulse); }
-
-                    if u < 0.35 {
-                        if self.active_view != ViewMode::Launcher {
-                            self.active_view = ViewMode::Launcher;
-                            info!("Switched to Launcher view.");
-                            self.update_toolbar(vk);
-                        }
-                    } else if u < 0.70 {
-                        if self.active_view != ViewMode::Desktop {
-                            self.active_view = ViewMode::Desktop;
-                            info!("Switched to Desktop view.");
-                            self.update_toolbar(vk);
-                        }
-                    } else if u < 0.80 {
-                        self.show_settings(vk);
-                        info!("Settings opened via toolbar.");
-                    } else if u < 0.90 {
-                        self.anchor = cycle_anchor(self.anchor);
-                        info!("Panel anchor: {:?}", self.anchor);
-                        self.update_toolbar(vk);
-                    } else {
-                        self.screenshot_requested = true;
-                        info!("Screenshot requested via toolbar.");
-                        self.notifications.push(Notification::success(
-                            "Screenshot",
-                            "Saved to Pictures/ClearXR",
-                        ));
-                    }
-                }
+        if self.settings_visible {
+            if let Some(ref settings) = self.settings_panel {
+                input_panels.push((PANEL_ID_SETTINGS, panel_transform(settings)));
             }
         }
+        // Active panel
+        let active_id = match self.active_view {
+            ViewMode::Launcher => PANEL_ID_LAUNCHER,
+            ViewMode::Desktop => PANEL_ID_DESKTOP,
+        };
+        input_panels.push((active_id, panel_transform(self.active_panel())));
+        input_panels.push((PANEL_ID_TOOLBAR, panel_transform(&self.toolbar_panel)));
+        input_panels.push((PANEL_ID_GRAB_BAR, panel_transform(&self.grab_bar)));
+
+        // Process all input through the dispatcher (hit-testing + edge detection)
+        let panel_refs: Vec<(PanelId, &PanelTransform)> = input_panels.iter()
+            .map(|(id, t)| (*id, t))
+            .collect();
+        let events = self.input.process(controller, &panel_refs);
 
         // ------------------------------------------------------------------
-        // 2. Per-hand panel interaction (both hands independently)
+        // 2b. Dispatch events from InputDispatcher
         // ------------------------------------------------------------------
         let mut per_hand_ray = [0.0f32; 2]; // [left, right] ray hit distances
         let mut any_bar_hit = false;
@@ -398,71 +388,131 @@ impl Shell {
         self.screen_panel.dot_uv = None;
         self.grab_bar.dot_uv = None;
 
-        for (i, hand) in hands.iter().enumerate() {
-            if !hand.active { continue; }
-            let aim_pos = hand.aim_pos;
-            let aim_dir = hand.aim_dir;
-            let trigger = hand.trigger > 0.5;
+        for (panel_id, event) in &events {
+            match event {
+                InputEvent::PointerMove { hand, u, v, distance } => {
+                    let hand_idx = match hand { Hand::Left => 0, Hand::Right => 1 };
+                    if per_hand_ray[hand_idx] == 0.0 || *distance < per_hand_ray[hand_idx] {
+                        per_hand_ray[hand_idx] = *distance;
+                    }
 
-            // Hit-test active panel
-            match self.active_view {
-                ViewMode::Launcher => {
-                    if let Some((u, v, t)) = self.launcher_panel.hit_test(aim_pos, aim_dir, aim_pos) {
-                        per_hand_ray[i] = t;
-                        self.launcher_panel.dot_uv = Some((u, v));
-                        self.launcher_ui.mouse_move(u, v);
-                        if trigger {
-                            self.launcher_ui.mouse_click(u, v);
-                            // Haptic feedback for panel click
-                            let pulse = HapticPulse { duration_ms: 20, frequency: 200.0, amplitude: 0.2 };
-                            if i == 0 { haptic_left = Some(pulse); } else { haptic_right = Some(pulse); }
+                    match *panel_id {
+                        id if id == PANEL_ID_LAUNCHER => {
+                            self.launcher_panel.dot_uv = Some((*u, *v));
+                            self.launcher_ui.mouse_move(*u, *v);
+                        }
+                        id if id == PANEL_ID_DESKTOP => {
+                            // No dot on desktop — real cursor is drawn in capture
+                            self.screen_capture.inject_mouse_move(*u, *v);
+                        }
+                        id if id == PANEL_ID_TOOLBAR => {
+                            // Hover highlight
+                            let zone = if *u < 0.35 { 0u8 }
+                                else if *u < 0.70 { 1 }
+                                else if *u < 0.80 { 2 }
+                                else if *u < 0.90 { 3 }
+                                else { 4 };
+                            let current_hover_zone = Some(zone);
+                            if current_hover_zone != self.prev_hover_zone {
+                                self.prev_hover_zone = current_hover_zone;
+                                self.update_toolbar(vk);
+                            }
+                        }
+                        id if id == PANEL_ID_GRAB_BAR => {
+                            any_bar_hit = true;
+                        }
+                        id if id == PANEL_ID_TRAY => {
+                            if let Some(ref mut ui) = self.tray_ui {
+                                if let Some(ref mut panel) = self.tray_panel {
+                                    panel.dot_uv = Some((*u, *v));
+                                    ui.mouse_move(*u, *v);
+                                }
+                            }
+                        }
+                        id if id == PANEL_ID_SETTINGS => {
+                            if let Some(ref mut ui) = self.settings_ui {
+                                if let Some(ref mut panel) = self.settings_panel {
+                                    panel.dot_uv = Some((*u, *v));
+                                    ui.mouse_move(*u, *v);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                InputEvent::PointerDown { hand, u, v } => {
+                    let hand_idx = match hand { Hand::Left => 0, Hand::Right => 1 };
+
+                    match *panel_id {
+                        id if id == PANEL_ID_LAUNCHER => {
+                            self.launcher_ui.mouse_click(*u, *v);
+                        }
+                        id if id == PANEL_ID_DESKTOP => {
+                            self.screen_capture.inject_mouse_click(*u, *v);
+                        }
+                        id if id == PANEL_ID_TOOLBAR => {
+                            self.handle_toolbar_click(*u, vk);
+                        }
+                        id if id == PANEL_ID_TRAY => {
+                            if let Some(ref mut ui) = self.tray_ui {
+                                ui.mouse_click(*u, *v);
+                            }
+                        }
+                        id if id == PANEL_ID_SETTINGS => {
+                            if let Some(ref mut ui) = self.settings_ui {
+                                ui.mouse_click(*u, *v);
+                            }
+                        }
+                        _ => {}
+                    }
+                    // Haptic feedback on any click
+                    haptic[hand_idx] = Some(HapticPulse { duration_ms: 20, frequency: 200.0, amplitude: 0.2 });
+                }
+                InputEvent::GrabStart { hand, grip_pos, .. } => {
+                    if *panel_id == PANEL_ID_GRAB_BAR || *panel_id == PANEL_ID_TOOLBAR {
+                        // Only start grab if not already grabbing
+                        if self.grab_offset.is_none() && self.grab_hand.is_none() {
+                            let hand_idx = match hand { Hand::Left => 0, Hand::Right => 1 };
+                            let active_center = self.active_panel().center;
+                            self.grab_offset = Some(active_center - *grip_pos);
+                            self.grab_hand = Some(hand_idx);
+                            haptic[hand_idx] = Some(HapticPulse { duration_ms: 50, frequency: 200.0, amplitude: 0.6 });
+                            info!("Panel grabbed by hand {}.", hand_idx);
                         }
                     }
                 }
-                ViewMode::Desktop => {
-                    if let Some((u, v, t)) = self.screen_panel.hit_test(aim_pos, aim_dir, aim_pos) {
-                        per_hand_ray[i] = t;
-                        // No dot on desktop — real cursor is drawn in capture
-                        self.screen_capture.inject_mouse_move(u, v);
-                        if trigger {
-                            self.screen_capture.inject_mouse_click(u, v);
-                            // Haptic feedback for panel click
-                            let pulse = HapticPulse { duration_ms: 20, frequency: 200.0, amplitude: 0.2 };
-                            if i == 0 { haptic_left = Some(pulse); } else { haptic_right = Some(pulse); }
-                        }
+                InputEvent::ButtonPress { hand: _, button: crate::input::Button::A } => {
+                    // A button during grab → cycle anchor
+                    if self.grab_hand.is_some() {
+                        self.anchor = cycle_anchor(self.anchor);
+                        info!("Panel anchor: {:?}", self.anchor);
+                        self.update_toolbar(vk);
                     }
                 }
+                _ => {}
             }
+        }
 
-            // Hit-test toolbar (use shorter distance if closer)
-            if let Some((_u, _v, t)) = self.toolbar_panel.hit_test(aim_pos, aim_dir, aim_pos) {
-                if per_hand_ray[i] == 0.0 || t < per_hand_ray[i] {
-                    per_hand_ray[i] = t;
+        // If no panel was hit by toolbar hover this frame, clear hover zone
+        let toolbar_hovered = events.iter().any(|(pid, evt)| {
+            *pid == PANEL_ID_TOOLBAR && matches!(evt, InputEvent::PointerMove { .. })
+        });
+        if !toolbar_hovered && self.prev_hover_zone.is_some() {
+            self.prev_hover_zone = None;
+            self.update_toolbar(vk);
+        }
+
+        // Clear tray dot_uv if no tray hit this frame
+        if self.tray_visible {
+            let tray_hovered = events.iter().any(|(pid, evt)| {
+                *pid == PANEL_ID_TRAY && matches!(evt, InputEvent::PointerMove { .. })
+            });
+            if !tray_hovered {
+                if let Some(ref mut panel) = self.tray_panel {
+                    panel.dot_uv = None;
                 }
             }
-
-            // Check if ray hits grab bar (for highlight, no dot)
-            let bar_hit = self.grab_bar.hit_test(aim_pos, aim_dir, aim_pos).is_some();
-            if bar_hit {
-                any_bar_hit = true;
-            }
-
-            // Start grab: squeeze OR trigger on the grab bar/toolbar (only if not already grabbed by another hand)
-            let wants_grab = hand.squeeze > 0.5 || hand.trigger > 0.5;
-            if wants_grab && self.grab_offset.is_none() && self.grab_hand.is_none() {
-                let grab_hit = self.grab_bar.hit_test(aim_pos, aim_dir, aim_pos)
-                    .or_else(|| self.toolbar_panel.hit_test(aim_pos, aim_dir, aim_pos));
-                if let Some((_u, _v, _t)) = grab_hit {
-                    let active_center = self.active_panel().center;
-                    self.grab_offset = Some(active_center - hand.grip_pos);
-                    self.grab_hand = Some(i);
-                    // Haptic feedback for grab start: strong pulse
-                    let pulse = HapticPulse { duration_ms: 50, frequency: 200.0, amplitude: 0.6 };
-                    if i == 0 { haptic_left = Some(pulse); } else { haptic_right = Some(pulse); }
-                    info!("Panel grabbed by hand {}.", i);
-                }
-            }
-        } // end per-hand loop
+        }
 
         // Update grab bar highlight based on hover or active grab
         let grabbing = self.grab_hand.is_some();
@@ -477,7 +527,7 @@ impl Shell {
             self.grab_bar.upload_pixels(vk, &pixels).ok();
         }
 
-        // Grab continue/release (outside per-hand loop, only the grabbing hand matters)
+        // Grab continue/release (outside event loop, only the grabbing hand matters)
         if let Some(hand_idx) = self.grab_hand {
             let grab_hand = hands[hand_idx];
             let still_holding = grab_hand.squeeze > 0.3 || grab_hand.trigger > 0.3;
@@ -488,26 +538,12 @@ impl Shell {
                 }
             } else {
                 // Haptic feedback for grab release: light pulse
-                let pulse = HapticPulse { duration_ms: 30, frequency: 150.0, amplitude: 0.3 };
-                if hand_idx == 0 { haptic_left = Some(pulse); } else { haptic_right = Some(pulse); }
+                haptic[hand_idx] = Some(HapticPulse { duration_ms: 30, frequency: 150.0, amplitude: 0.3 });
                 self.grab_offset = None;
                 self.grab_hand = None;
                 info!("Panel released.");
             }
-
-            // A button while grabbing → cycle anchor
-            if grab_hand.a_click && !self.prev_a_click {
-                self.anchor = cycle_anchor(self.anchor);
-                info!("Panel anchor: {:?}", self.anchor);
-                self.update_toolbar(vk);
-            }
         }
-
-        // Edge detection state (use either hand's state)
-        let any_trigger = hands.iter().any(|h| h.active && h.trigger > 0.5);
-        let any_a_click = hands.iter().any(|h| h.active && h.a_click);
-        self.prev_trigger = any_trigger;
-        self.prev_a_click = any_a_click;
 
         let left_ray_hit_dist = per_hand_ray[0];
         let right_ray_hit_dist = per_hand_ray[1];
@@ -578,7 +614,8 @@ impl Shell {
         }
 
         // ------------------------------------------------------------------
-        // 5b. Process system tray interactions
+        // 5b. System tray positioning, texture update, and action polling
+        //     (hit-testing is now handled by InputDispatcher above)
         // ------------------------------------------------------------------
         if self.tray_visible {
             if let (Some(ref mut tray_ui), Some(ref mut tray_panel)) =
@@ -589,25 +626,6 @@ impl Shell {
                     tray_panel.center = anchor_hand.grip_pos
                         + anchor_hand.aim_dir * 0.3
                         + Vec3::Y * 0.1;
-                }
-
-                // Hit-test tray with either hand
-                for hand in &hands {
-                    if !hand.active { continue; }
-                    if let Some((u, v, t)) = tray_panel.hit_test(
-                        hand.aim_pos, hand.aim_dir, hand.aim_pos,
-                    ) {
-                        tray_panel.dot_uv = Some((u, v));
-                        tray_ui.mouse_move(u, v);
-                        if hand.trigger > 0.5 {
-                            tray_ui.mouse_click(u, v);
-                        }
-                        // Tray hit contributes to both hands' ray distance
-                        // (already computed in per-hand loop for main panels)
-                    } else {
-                        tray_panel.dot_uv = None;
-                    }
-                    break; // first hand that hits the tray wins
                 }
 
                 // Update tray texture
@@ -635,6 +653,15 @@ impl Shell {
                                 self.hide_system_tray();
                                 self.show_settings(vk);
                             }
+                            "screenshot" => {
+                                self.screenshot_requested = true;
+                                self.hide_system_tray();
+                                self.notifications.push(Notification::success(
+                                    "Screenshot",
+                                    "Saved to Pictures/ClearXR",
+                                ));
+                                info!("Screenshot requested via system tray.");
+                            }
                             _ => {}
                         }
                     }
@@ -643,30 +670,9 @@ impl Shell {
         }
 
         // ------------------------------------------------------------------
-        // 5c. Virtual keyboard interactions
+        // 5c. Virtual keyboard interactions — disabled for MVP
+        //     (not wired end-to-end; no text input target)
         // ------------------------------------------------------------------
-        if self.keyboard_visible {
-            if let (Some(ref mut kb_ui), Some(ref mut kb_panel)) =
-                (&mut self.keyboard_ui, &mut self.keyboard_panel)
-            {
-                for hand in &hands {
-                    if !hand.active { continue; }
-                    if let Some((u, v, _t)) = kb_panel.hit_test(
-                        hand.aim_pos, hand.aim_dir, hand.aim_pos,
-                    ) {
-                        kb_panel.dot_uv = Some((u, v));
-                        kb_ui.mouse_move(u, v);
-                        if hand.trigger > 0.5 {
-                            kb_ui.mouse_click(u, v);
-                        }
-                        break;
-                    }
-                }
-                if let Some(pixels) = kb_ui.update() {
-                    kb_panel.upload_pixels(vk, pixels).ok();
-                }
-            }
-        }
 
         // ------------------------------------------------------------------
         // 6. FPS counter update (every 0.5s)
@@ -713,25 +719,37 @@ impl Shell {
         }
 
         // ------------------------------------------------------------------
-        // 9. Settings panel hit-test and content update
+        // 8b. Check launched app status
+        // ------------------------------------------------------------------
+        {
+            let mut exited = false;
+            if let Some(ref mut app) = self.launched_app {
+                use crate::app::AppStatus;
+                match app.status() {
+                    AppStatus::Running => {}
+                    AppStatus::ExitedOk | AppStatus::Exited(_) => {
+                        info!("Launched app '{}' has exited", app.name);
+                        self.notifications.push(Notification::info(
+                            "Game ended",
+                            &format!("{}", app.name),
+                        ));
+                        exited = true;
+                    }
+                }
+            }
+            if exited {
+                self.launched_app = None;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 9. Settings panel content update and action polling
+        //    (hit-testing is now handled by InputDispatcher above)
         // ------------------------------------------------------------------
         if self.settings_visible {
             if let (Some(ref mut panel), Some(ref mut ui)) =
                 (&mut self.settings_panel, &mut self.settings_ui)
             {
-                for hand in &hands {
-                    if !hand.active { continue; }
-                    if let Some((u, v, _t)) = panel.hit_test(
-                        hand.aim_pos, hand.aim_dir, hand.aim_pos,
-                    ) {
-                        panel.dot_uv = Some((u, v));
-                        ui.mouse_move(u, v);
-                        if hand.trigger > 0.5 {
-                            ui.mouse_click(u, v);
-                        }
-                        break;
-                    }
-                }
                 if let Some(pixels) = ui.update() {
                     if let Err(e) = panel.upload_pixels(vk, pixels) {
                         log::error!("Settings texture upload failed: {}", e);
@@ -807,6 +825,14 @@ impl Shell {
             self.notification_panel = None;
         }
 
+        // Gate haptic feedback on config toggle
+        let (haptic_left, haptic_right) = if self.config.shell.haptics_enabled {
+            let [hl, hr] = haptic;
+            (hl, hr)
+        } else {
+            (None, None)
+        };
+
         ShellFrame { left_ray_hit_dist, right_ray_hit_dist, haptic_left, haptic_right }
     }
 
@@ -823,6 +849,37 @@ impl Shell {
         match self.active_view {
             ViewMode::Launcher => &mut self.launcher_panel,
             ViewMode::Desktop => &mut self.screen_panel,
+        }
+    }
+
+    /// Handle a click on the toolbar at the given U coordinate.
+    fn handle_toolbar_click(&mut self, u: f32, vk: &VkBackend) {
+        if u < 0.35 {
+            if self.active_view != ViewMode::Launcher {
+                self.active_view = ViewMode::Launcher;
+                info!("Switched to Launcher view.");
+                self.update_toolbar(vk);
+            }
+        } else if u < 0.70 {
+            if self.active_view != ViewMode::Desktop {
+                self.active_view = ViewMode::Desktop;
+                info!("Switched to Desktop view.");
+                self.update_toolbar(vk);
+            }
+        } else if u < 0.80 {
+            self.show_settings(vk);
+            info!("Settings opened via toolbar.");
+        } else if u < 0.90 {
+            self.anchor = cycle_anchor(self.anchor);
+            info!("Panel anchor: {:?}", self.anchor);
+            self.update_toolbar(vk);
+        } else {
+            self.screenshot_requested = true;
+            info!("Screenshot requested via toolbar.");
+            self.notifications.push(Notification::success(
+                "Screenshot",
+                "Saved to Pictures/ClearXR",
+            ));
         }
     }
 
@@ -885,7 +942,6 @@ impl Shell {
     fn anchor_str(&self) -> &'static str {
         match self.anchor {
             PanelAnchor::World => "world",
-            PanelAnchor::Controller { .. } => "ctrl",
             PanelAnchor::Theater { .. } => "theater",
             _ => "world",
         }
@@ -917,23 +973,14 @@ impl Shell {
             }
         };
 
-        // Inject current config as JSON so the settings page populates correctly
+        // Inject current config values into the settings page
         let config_json = serde_json::json!({
-            "showFps": self.config.display.show_fps,
-            "showBoundary": self.config.display.show_boundary,
-            "theme": self.config.display.theme,
-            "volume": self.config.audio.volume,
-            "outputDevice": self.config.audio.output_device,
-            "micEnabled": self.config.audio.mic_enabled,
-            "opacity": self.config.panel.opacity,
-            "anchor": format!("{:?}", self.config.panel.anchor).to_lowercase(),
-            "theaterDistance": self.config.panel.theater_distance,
-            "theaterScale": self.config.panel.theater_scale,
+            "default_view": self.config.shell.default_view,
+            "panel_opacity": self.config.panel.opacity,
+            "show_fps": self.config.display.show_fps,
             "haptics_enabled": self.config.shell.haptics_enabled,
-            "defaultView": self.config.shell.default_view,
         });
-        let inject_script = format!("window.CONFIG = {}; loadConfig();", config_json);
-        ui.evaluate_js(&inject_script);
+        ui.evaluate_js(&format!("window.CONFIG = {};", config_json));
 
         let mut panel = match LauncherPanel::new(vk, self.render_pass, w, h, vk::Format::R8G8B8A8_SRGB) {
             Ok(p) => p,
@@ -979,79 +1026,53 @@ impl Shell {
         }
     }
 
-    /// Show the virtual keyboard panel below the active panel.
-    pub fn show_keyboard(&mut self, vk: &VkBackend) {
-        if self.keyboard_panel.is_some() { return; }
-        let w = 512u32;
-        let h = 260u32;
-        let html_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("ui/keyboard.html");
-        let ui = match UiRenderer::new(w, h, &html_path) {
-            Ok(u) => u,
-            Err(e) => {
-                log::error!("Failed to create keyboard UI: {}", e);
-                return;
-            }
-        };
-        let mut panel = match LauncherPanel::new(vk, self.render_pass, w, h, vk::Format::R8G8B8A8_SRGB) {
-            Ok(p) => p,
-            Err(e) => {
-                log::error!("Failed to create keyboard panel: {}", e);
-                return;
-            }
-        };
-        panel.width = 0.6;
-        panel.height = 0.31;
-        panel.opacity = 0.95;
-        // Position below the active panel
-        let active = self.active_panel();
-        panel.center = active.center - active.up_dir * (active.height * 0.5 + panel.height * 0.5 + 0.15);
-        panel.right_dir = active.right_dir;
-        panel.up_dir = active.up_dir;
-        self.keyboard_ui = Some(ui);
-        self.keyboard_panel = Some(panel);
-        self.keyboard_visible = true;
-        info!("Virtual keyboard opened.");
-    }
-
-    /// Hide and destroy the virtual keyboard panel.
-    pub fn hide_keyboard(&mut self, device: &ash::Device) {
-        if let Some(ref mut p) = self.keyboard_panel {
-            p.destroy(device);
-        }
-        self.keyboard_panel = None;
-        self.keyboard_ui = None;
-        self.keyboard_visible = false;
-    }
+    // Virtual keyboard methods disabled for MVP — not wired end-to-end
+    // (no text input target, no user action triggers show_keyboard).
+    // Kept as comments for future use.
+    //
+    // pub fn show_keyboard(&mut self, vk: &VkBackend) { ... }
+    // pub fn hide_keyboard(&mut self, device: &ash::Device) { ... }
 
     /// Launch a game by Steam app_id, looked up from the scanned games list.
     fn launch_game(&mut self, app_id: u32, _vk: &VkBackend) {
-        // Kill any previously launched app
-        if let Some(ref mut app) = self.launched_app {
-            info!("Killing previous app: {}", app.name);
-            app.kill();
-        }
-        self.launched_app = None;
-
         // Find the game in our scanned list
         let game = self.games.iter().find(|g| g.app_id == app_id);
         let name = game.map(|g| g.name.as_str()).unwrap_or("Unknown");
+
+        // Prevent double-launch: if an app is already running, don't launch again
+        if let Some(ref mut app) = self.launched_app {
+            use crate::app::AppStatus;
+            match app.status() {
+                AppStatus::Running => {
+                    self.notifications.push(Notification::info(
+                        "Already running",
+                        &format!("{}", app.name),
+                    ));
+                    return;
+                }
+                _ => {
+                    // Previous app exited, clear it and proceed
+                    info!("Previous app '{}' has exited, clearing state", app.name);
+                }
+            }
+        }
+        self.launched_app = None;
 
         info!("Launching game: {} (app_id: {})", name, app_id);
 
         match launch_steam_game(name, app_id) {
             Ok(app) => {
-                self.notifications.push(Notification::success(
+                self.notifications.push(Notification::info(
                     "Launching",
-                    &format!("{}", app.name),
+                    &format!("{}...", app.name),
                 ));
                 self.launched_app = Some(app);
             }
             Err(e) => {
                 log::error!("Failed to launch game {}: {}", app_id, e);
                 self.notifications.push(Notification::warning(
-                    "Launch Failed",
-                    &format!("{}", e),
+                    "Failed to launch",
+                    &format!("{}", name),
                 ));
             }
         }
@@ -1060,59 +1081,45 @@ impl Shell {
     /// Apply settings JSON received from the settings UI save button.
     fn apply_settings_json(&mut self, json: &str) {
         #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct SettingsData {
-            show_fps: Option<bool>,
-            show_boundary: Option<bool>,
-            theme: Option<String>,
-            volume: Option<f32>,
-            output_device: Option<String>,
-            mic_enabled: Option<bool>,
-            opacity: Option<f32>,
-            anchor: Option<String>,
-            theater_distance: Option<f32>,
-            theater_scale: Option<f32>,
-            haptics_enabled: Option<bool>,
+        struct SettingsPayload {
+            #[serde(default)]
             default_view: Option<String>,
+            #[serde(default)]
+            panel_opacity: Option<f32>,
+            #[serde(default)]
+            show_fps: Option<bool>,
+            #[serde(default)]
+            haptics_enabled: Option<bool>,
         }
 
-        let data: SettingsData = match serde_json::from_str(json) {
-            Ok(d) => d,
+        let payload: SettingsPayload = match serde_json::from_str(json) {
+            Ok(p) => p,
             Err(e) => {
-                log::error!("Failed to parse settings JSON: {}", e);
+                log::warn!("Failed to parse settings JSON: {}", e);
                 return;
             }
         };
 
-        if let Some(v) = data.show_fps { self.config.display.show_fps = v; }
-        if let Some(v) = data.show_boundary { self.config.display.show_boundary = v; }
-        if let Some(v) = data.theme { self.config.display.theme = v; }
-        if let Some(v) = data.volume { self.config.audio.volume = v; }
-        if let Some(v) = data.output_device { self.config.audio.output_device = v; }
-        if let Some(v) = data.mic_enabled { self.config.audio.mic_enabled = v; }
-        if let Some(v) = data.opacity { self.config.panel.opacity = v; }
-        if let Some(v) = data.anchor {
-            self.config.panel.anchor = match v.as_str() {
-                "world" => crate::config::AnchorMode::World,
-                "controller" => crate::config::AnchorMode::Controller,
-                "wrist" => crate::config::AnchorMode::Wrist,
-                "theater" => crate::config::AnchorMode::Theater,
-                "head" => crate::config::AnchorMode::Head,
-                _ => crate::config::AnchorMode::World,
-            };
+        if let Some(view) = payload.default_view {
+            self.config.shell.default_view = view;
         }
-        if let Some(v) = data.theater_distance { self.config.panel.theater_distance = v; }
-        if let Some(v) = data.theater_scale { self.config.panel.theater_scale = v; }
-        if let Some(v) = data.haptics_enabled { self.config.shell.haptics_enabled = v; }
-        if let Some(v) = data.default_view { self.config.shell.default_view = v; }
+        if let Some(opacity) = payload.panel_opacity {
+            let clamped = opacity.clamp(0.5, 1.0);
+            self.config.panel.opacity = clamped;
+            self.launcher_panel.opacity = clamped;
+            self.screen_panel.opacity = clamped;
+        }
+        if let Some(show_fps) = payload.show_fps {
+            self.config.display.show_fps = show_fps;
+        }
+        if let Some(haptics) = payload.haptics_enabled {
+            self.config.shell.haptics_enabled = haptics;
+        }
 
-        // Persist to disk
         if let Err(e) = self.config.save() {
             log::error!("Failed to save config: {}", e);
-            self.notifications.push(Notification::warning("Settings", "Failed to save config"));
         } else {
             info!("Settings saved.");
-            self.notifications.push(Notification::success("Settings", "Configuration saved"));
         }
     }
 
@@ -1132,7 +1139,11 @@ impl Shell {
         let fps: *mut LauncherPanel = &mut self.fps_panel;
         // SAFETY: active, toolbar, grab_bar, fps, etc. are distinct fields of self.
         let mut panels = unsafe {
-            vec![&mut *active, &mut *toolbar, &mut *grab_bar, &mut *fps]
+            let mut v = vec![&mut *active, &mut *toolbar, &mut *grab_bar];
+            if self.config.display.show_fps {
+                v.push(&mut *fps);
+            }
+            v
         };
         if self.tray_visible {
             if let Some(ref mut tray) = self.tray_panel {
@@ -1144,11 +1155,12 @@ impl Shell {
                 panels.push(settings);
             }
         }
-        if self.keyboard_visible {
-            if let Some(ref mut kb) = self.keyboard_panel {
-                panels.push(kb);
-            }
-        }
+        // keyboard disabled for MVP
+        // if self.keyboard_visible {
+        //     if let Some(ref mut kb) = self.keyboard_panel {
+        //         panels.push(kb);
+        //     }
+        // }
         if let Some(ref mut notif) = self.notification_panel {
             panels.push(notif);
         }
@@ -1184,9 +1196,10 @@ impl Shell {
         if let Some(ref mut settings) = self.settings_panel {
             settings.destroy(device);
         }
-        if let Some(ref mut kb) = self.keyboard_panel {
-            kb.destroy(device);
-        }
+        // keyboard disabled for MVP
+        // if let Some(ref mut kb) = self.keyboard_panel {
+        //     kb.destroy(device);
+        // }
         if let Some(ref mut notif) = self.notification_panel {
             notif.destroy(device);
         }
@@ -1250,13 +1263,13 @@ fn generate_notification_pixels(width: u32, height: u32, title: &str, body: &str
     pixels
 }
 
-/// Cycle through the simplified anchor modes: World -> Controller -> Theater -> World.
+/// Cycle through anchor modes: World -> Theater -> World.
+/// Controller mode removed from visible cycle for MVP (functional but crude).
 fn cycle_anchor(current: PanelAnchor) -> PanelAnchor {
     match current {
-        PanelAnchor::World => PanelAnchor::Controller { hand: Hand::Right },
-        PanelAnchor::Controller { .. } => PanelAnchor::Theater { distance: 5.0, scale: 3.0 },
+        PanelAnchor::World => PanelAnchor::Theater { distance: 5.0, scale: 3.0 },
         PanelAnchor::Theater { .. } => PanelAnchor::World,
-        _ => PanelAnchor::World, // simplify cycle for now
+        _ => PanelAnchor::World,
     }
 }
 

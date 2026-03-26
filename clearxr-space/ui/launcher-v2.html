@@ -16,8 +16,7 @@
     --accent-glow: rgba(74, 158, 255, 0.25);
     --text: #e4e4ee;
     --text-muted: #6a7088;
-    --badge-vr: #4a9eff;
-    --badge-flat: #555568;
+    /* badge vars removed — we don't detect VR vs flat */
     --card-radius: 10px;
     --transition: 0.18s ease;
   }
@@ -97,35 +96,14 @@
     color: var(--text-muted);
   }
 
-  /* ---- Category tabs ---- */
-  .tabs {
-    display: flex;
-    gap: 6px;
-    margin-bottom: 2px;
-  }
-
-  .tab {
-    height: 40px;
-    padding: 0 20px;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    color: var(--text-muted);
+  /* ---- Section label (replaces old category tabs) ---- */
+  .section-label {
     font-size: 15px;
     font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    transition: background var(--transition), color var(--transition), border-color var(--transition);
-    min-width: 48px;
-  }
-  .tab:hover {
-    background: var(--surface);
-    color: var(--text);
-  }
-  .tab.active {
-    background: var(--surface);
-    color: var(--accent);
-    border-color: #252540;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    margin-bottom: 2px;
   }
 
   /* ---- Divider ---- */
@@ -201,28 +179,7 @@
     user-select: none;
   }
 
-  /* Badge */
-  .card-badge {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-  }
-  .card-badge.vr {
-    background: rgba(74, 158, 255, 0.2);
-    color: var(--badge-vr);
-    border: 1px solid rgba(74, 158, 255, 0.3);
-  }
-  .card-badge.flat {
-    background: rgba(85, 85, 104, 0.25);
-    color: #888898;
-    border: 1px solid rgba(85, 85, 104, 0.3);
-  }
+  /* Badge styles removed — we can't reliably detect VR vs flat */
 
   .card-info {
     padding: 10px 12px;
@@ -311,12 +268,7 @@
     <span class="search-icon">&#x1F50D;</span>
     <input class="search" type="text" placeholder="Search games..." id="searchBox" autocomplete="off">
   </div>
-  <div class="tabs" id="tabBar">
-    <button class="tab active" data-cat="all">All</button>
-    <button class="tab" data-cat="recent">Recent</button>
-    <button class="tab" data-cat="vr">VR</button>
-    <button class="tab" data-cat="flat">Flat</button>
-  </div>
+  <div class="section-label">All Games</div>
 </div>
 
 <div class="divider"></div>
@@ -329,8 +281,6 @@
 
 <script>
   // Game data injected from Rust via: window.GAMES = [{ name, app_id, install_dir }]
-
-  var _activeCategory = 'all';
 
   // Simple hash to pick gradient colors per game name
   function nameHash(str) {
@@ -358,31 +308,16 @@
     return (words[0][0] + words[1][0]).toUpperCase();
   }
 
-  // Determine if game is VR (stub: check name for VR keywords)
-  function isVR(game) {
-    var n = game.name.toLowerCase();
-    return n.indexOf(' vr') !== -1 || n.indexOf('vr ') !== -1 || n === 'vr';
-  }
-
   function renderGames(filter) {
     var grid = document.getElementById('gameGrid');
     var countEl = document.getElementById('gameCount');
     var games = window.GAMES || [];
 
-    // Apply category filter
-    var catFiltered = games;
-    if (_activeCategory === 'vr') {
-      catFiltered = games.filter(function(g) { return isVR(g); });
-    } else if (_activeCategory === 'flat') {
-      catFiltered = games.filter(function(g) { return !isVR(g); });
-    }
-    // 'recent' and 'all' show everything for now
-
     // Apply search filter
-    var filtered = catFiltered;
+    var filtered = games;
     if (filter) {
       var q = filter.toLowerCase();
-      filtered = catFiltered.filter(function(g) {
+      filtered = games.filter(function(g) {
         return g.name.toLowerCase().indexOf(q) !== -1;
       });
     }
@@ -393,7 +328,7 @@
       grid.innerHTML =
         '<div class="empty-state">' +
           '<div class="empty-state-icon">&#x1F3AE;</div>' +
-          '<h2>No games found</h2>' +
+          '<h2>No Steam games found</h2>' +
           '<p>Install games via Steam to see them here.</p>' +
         '</div>';
       return;
@@ -404,7 +339,7 @@
         '<div class="empty-state">' +
           '<div class="empty-state-icon">&#x1F50D;</div>' +
           '<h2>No matches</h2>' +
-          '<p>Try a different search term or category.</p>' +
+          '<p>Try a different search term.</p>' +
         '</div>';
       return;
     }
@@ -412,14 +347,10 @@
     var html = '';
     for (var i = 0; i < filtered.length; i++) {
       var g = filtered[i];
-      var vr = isVR(g);
-      var badgeClass = vr ? 'vr' : 'flat';
-      var badgeText = vr ? 'VR' : 'FLAT';
       html +=
         '<div class="card" data-appid="' + g.app_id + '" onclick="launchGame(' + g.app_id + ')">' +
           '<div class="card-art" style="background:' + artGradient(g.name) + '">' +
             '<span class="card-art-initials">' + initials(g.name) + '</span>' +
-            '<span class="card-badge ' + badgeClass + '">' + badgeText + '</span>' +
           '</div>' +
           '<div class="card-info">' +
             '<div class="card-title">' + g.name + '</div>' +
@@ -443,17 +374,6 @@
   // Search filtering
   document.getElementById('searchBox').addEventListener('input', function(e) {
     renderGames(e.target.value);
-  });
-
-  // Category tabs
-  document.getElementById('tabBar').addEventListener('click', function(e) {
-    var btn = e.target;
-    if (!btn.classList.contains('tab')) return;
-    var tabs = document.querySelectorAll('.tab');
-    for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
-    btn.classList.add('active');
-    _activeCategory = btn.getAttribute('data-cat');
-    renderGames(document.getElementById('searchBox').value);
   });
 
   // Initial render with placeholder data if no games injected yet
