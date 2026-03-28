@@ -161,16 +161,19 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
             };
         }
 
-        // Poll screen capture
+        // Poll screen capture — upload directly to GPU staging buffer (bypasses egui's
+        // set_textures which does vkQueueWaitIdle). The renderer owns the Vulkan texture.
         if let Some(ref mut sc) = screen_capture {
             if sc.poll() {
                 if let Some(frame) = sc.take_latest_frame() {
-                    dashboard.update_desktop_frame_data(frame);
+                    let tex_id = renderer.update_desktop_pixels(&frame.data, frame.width, frame.height);
+                    dashboard.set_desktop_texture_id(tex_id, frame.width, frame.height);
                 }
             }
         }
 
         // Render egui frame
+        let has_desktop_tex = renderer.desktop_texture_id().is_some();
         let mut actions = Vec::new();
         let result = renderer.render_frame(
             pointer_uv,
@@ -178,7 +181,10 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
             secondary,
             scroll_delta,
             |ctx| {
-                dashboard.apply_pending_desktop_frame(ctx);
+                // Request repaint when desktop tab is active to keep the mirror updating
+                if dashboard.is_desktop_active() && has_desktop_tex {
+                    ctx.request_repaint();
+                }
                 actions = dashboard.render(ctx);
             },
         );

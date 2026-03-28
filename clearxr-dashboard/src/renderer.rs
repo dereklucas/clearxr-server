@@ -8,6 +8,27 @@ use ash::vk;
 use egui::{Context, Event, Pos2, PointerButton, RawInput, Rect, Vec2};
 use std::mem::ManuallyDrop;
 
+/// User-managed Vulkan texture for the desktop capture image.
+/// Bypasses egui-ash-renderer's set_textures (which does vkQueueWaitIdle)
+/// by uploading directly via our own staging buffer + command buffer.
+struct DesktopTexture {
+    image: vk::Image,
+    image_memory: vk::DeviceMemory,
+    image_view: vk::ImageView,
+    sampler: vk::Sampler,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_set: vk::DescriptorSet,
+    staging_buffer: vk::Buffer,
+    staging_memory: vk::DeviceMemory,
+    staging_ptr: *mut u8,
+    width: u32,
+    height: u32,
+    texture_id: egui::TextureId,
+    needs_upload: bool,
+    initialized: bool,
+}
+
 /// Per-flight-frame GPU resources for double-buffering.
 struct FlightFrame {
     command_buffer: vk::CommandBuffer,
@@ -52,6 +73,9 @@ pub struct HeadlessRenderer {
     prev_button: bool,
     prev_secondary: bool,
     has_rendered: bool,
+
+    // User-managed desktop texture (bypasses set_textures bottleneck)
+    desktop_texture: Option<DesktopTexture>,
 }
 
 unsafe impl Send for HeadlessRenderer {}
@@ -281,6 +305,7 @@ impl HeadlessRenderer {
             prev_button: false,
             prev_secondary: false,
             has_rendered: false,
+            desktop_texture: None,
         })
     }
 
@@ -425,6 +450,11 @@ impl HeadlessRenderer {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
 
+            // Upload desktop texture (batched into this command buffer — no vkQueueWaitIdle)
+            if let Some(ref mut dt) = self.desktop_texture {
+                Self::record_desktop_upload(device, dt, cmd);
+            }
+
             let barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(if self.has_rendered {
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL
@@ -527,6 +557,219 @@ impl HeadlessRenderer {
         }))
     }
 
+    /// Upload desktop capture pixels to a user-managed Vulkan texture.
+    /// Bypasses egui's set_textures entirely — no vkQueueWaitIdle, no per-pixel copy.
+    /// Returns the TextureId for use in egui UI code.
+    pub fn update_desktop_pixels(&mut self, data: &[u8], width: u32, height: u32) -> egui::TextureId {
+        let pixel_count = (width * height * 4) as usize;
+        assert_eq!(data.len(), pixel_count, "desktop pixel data size mismatch");
+
+        // Recreate if size changed or first call
+        if self.desktop_texture.as_ref().map_or(true, |dt| dt.width != width || dt.height != height) {
+            // Clean up old
+            if let Some(old) = self.desktop_texture.take() {
+                self.egui_renderer.remove_user_texture(old.texture_id);
+                unsafe { self.destroy_desktop_texture_resources(&old); }
+            }
+            // Create new
+            let dt = unsafe { self.create_desktop_texture(width, height) }
+                .expect("Failed to create desktop texture");
+            log::info!(
+                "[ClearXR Dashboard] Desktop texture created: {}x{}, TextureId={:?}",
+                width, height, dt.texture_id
+            );
+            self.desktop_texture = Some(dt);
+        }
+
+        let dt = self.desktop_texture.as_mut().unwrap();
+
+        // Copy pixels to persistently-mapped staging buffer (fast CPU memcpy)
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dt.staging_ptr, pixel_count);
+        }
+        dt.needs_upload = true;
+
+        dt.texture_id
+    }
+
+    /// Get the desktop texture's TextureId (if created).
+    pub fn desktop_texture_id(&self) -> Option<egui::TextureId> {
+        self.desktop_texture.as_ref().map(|dt| dt.texture_id)
+    }
+
+    /// Record GPU commands to upload the desktop staging buffer to the image.
+    /// Called inside render_frame's command buffer recording, BEFORE the render pass.
+    unsafe fn record_desktop_upload(device: &ash::Device, dt: &mut DesktopTexture, cmd: vk::CommandBuffer) {
+        if !dt.needs_upload { return; }
+
+        // Transition to TRANSFER_DST
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(if dt.initialized {
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+            } else {
+                vk::ImageLayout::UNDEFINED
+            })
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(dt.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(1)
+                    .layer_count(1),
+            )
+            .src_access_mask(if dt.initialized {
+                vk::AccessFlags::SHADER_READ
+            } else {
+                vk::AccessFlags::empty()
+            })
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+        device.cmd_pipeline_barrier(
+            cmd,
+            if dt.initialized { vk::PipelineStageFlags::FRAGMENT_SHADER }
+            else { vk::PipelineStageFlags::TOP_OF_PIPE },
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[], &[], &[barrier],
+        );
+
+        // Copy staging buffer → image
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .layer_count(1),
+            )
+            .image_extent(vk::Extent3D { width: dt.width, height: dt.height, depth: 1 });
+        device.cmd_copy_buffer_to_image(
+            cmd, dt.staging_buffer, dt.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region],
+        );
+
+        // Transition to SHADER_READ_ONLY for sampling during egui render
+        let barrier2 = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .image(dt.image)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(1)
+                    .layer_count(1),
+            )
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[], &[], &[barrier2],
+        );
+
+        dt.initialized = true;
+        dt.needs_upload = false;
+    }
+
+    unsafe fn create_desktop_texture(&mut self, width: u32, height: u32) -> Result<DesktopTexture> {
+        let device = &self.device;
+        let pixel_size = (width * height * 4) as usize;
+
+        // Image (DEVICE_LOCAL, for sampling in egui render pass)
+        let image_ci = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED);
+        let image = device.create_image(&image_ci, None)?;
+
+        let mem_reqs = device.get_image_memory_requirements(image);
+        let mem_props = self.instance.get_physical_device_memory_properties(self.physical_device);
+        let mem_type = find_memory_type(&mem_props, mem_reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .ok_or_else(|| anyhow::anyhow!("No DEVICE_LOCAL memory for desktop texture"))?;
+        let image_memory = device.allocate_memory(
+            &vk::MemoryAllocateInfo::default().allocation_size(mem_reqs.size).memory_type_index(mem_type), None)?;
+        device.bind_image_memory(image, image_memory, 0)?;
+
+        let image_view = device.create_image_view(
+            &vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(1)
+                        .layer_count(1),
+                ),
+            None,
+        )?;
+
+        // Sampler (LINEAR filtering, matching egui TextureOptions::LINEAR)
+        let sampler = device.create_sampler(
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR),
+            None,
+        )?;
+
+        // Descriptor set (compatible with egui-ash-renderer's pipeline layout)
+        let descriptor_set_layout = egui_ash_renderer::vulkan::create_vulkan_descriptor_set_layout(device)
+            .map_err(|e| anyhow::anyhow!("desktop texture DSL: {e}"))?;
+        let descriptor_pool = egui_ash_renderer::vulkan::create_vulkan_descriptor_pool(device, 1)
+            .map_err(|e| anyhow::anyhow!("desktop texture pool: {e}"))?;
+        let descriptor_set = egui_ash_renderer::vulkan::create_vulkan_descriptor_set(
+            device, descriptor_set_layout, descriptor_pool, image_view, sampler,
+        ).map_err(|e| anyhow::anyhow!("desktop texture descriptor set: {e}"))?;
+
+        // Staging buffer (HOST_VISIBLE, persistently mapped)
+        let buf_ci = vk::BufferCreateInfo::default()
+            .size(pixel_size as u64)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC);
+        let staging_buffer = device.create_buffer(&buf_ci, None)?;
+        let buf_reqs = device.get_buffer_memory_requirements(staging_buffer);
+        let buf_mem_type = find_memory_type(
+            &mem_props, buf_reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ).ok_or_else(|| anyhow::anyhow!("No HOST_VISIBLE memory for desktop staging"))?;
+        let staging_memory = device.allocate_memory(
+            &vk::MemoryAllocateInfo::default().allocation_size(buf_reqs.size).memory_type_index(buf_mem_type), None)?;
+        device.bind_buffer_memory(staging_buffer, staging_memory, 0)?;
+        let staging_ptr = device.map_memory(staging_memory, 0, pixel_size as u64, vk::MemoryMapFlags::empty())?
+            as *mut u8;
+
+        // Register with egui-ash-renderer as a user texture
+        let texture_id = self.egui_renderer.add_user_texture(descriptor_set);
+
+        Ok(DesktopTexture {
+            image, image_memory, image_view, sampler,
+            descriptor_set_layout, descriptor_pool, descriptor_set,
+            staging_buffer, staging_memory, staging_ptr,
+            width, height, texture_id,
+            needs_upload: false, initialized: false,
+        })
+    }
+
+    unsafe fn destroy_desktop_texture_resources(&self, dt: &DesktopTexture) {
+        let device = &self.device;
+        device.unmap_memory(dt.staging_memory);
+        device.destroy_buffer(dt.staging_buffer, None);
+        device.free_memory(dt.staging_memory, None);
+        device.destroy_descriptor_pool(dt.descriptor_pool, None);
+        device.destroy_descriptor_set_layout(dt.descriptor_set_layout, None);
+        device.destroy_sampler(dt.sampler, None);
+        device.destroy_image_view(dt.image_view, None);
+        device.destroy_image(dt.image, None);
+        device.free_memory(dt.image_memory, None);
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -541,6 +784,11 @@ impl Drop for HeadlessRenderer {
         unsafe {
             log::info!("[ClearXR Dashboard] HeadlessRenderer dropping...");
             self.device.device_wait_idle().ok();
+
+            // Destroy desktop texture before egui renderer (it holds a user texture ref)
+            if let Some(ref dt) = self.desktop_texture {
+                self.destroy_desktop_texture_resources(dt);
+            }
 
             // CRITICAL: Drop the egui renderer FIRST — it uses the device internally.
             ManuallyDrop::drop(&mut self.egui_renderer);

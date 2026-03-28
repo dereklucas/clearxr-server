@@ -6,7 +6,7 @@
 use crate::config::Config;
 use crate::game_scanner::Game;
 use crate::notifications::{Notification, NotificationQueue};
-use crate::screen_capture::CaptureFrame;
+
 
 /// Active tab in the dashboard.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,13 +37,11 @@ pub struct LayerDashboard {
     fps_timer: std::time::Instant,
     fps_frame_count: u32,
     fps_current: f32,
-    /// Desktop capture texture handle, re-uploaded each frame a new capture arrives.
-    desktop_texture: Option<egui::TextureHandle>,
+    /// Desktop capture texture — user-managed Vulkan texture registered with egui.
+    /// Tuple of (TextureId, width, height). The renderer owns the actual GPU resources.
+    desktop_texture_id: Option<(egui::TextureId, u32, u32)>,
     /// Error message if screen capture failed to initialize.
     desktop_error: Option<String>,
-    /// Pending desktop frame data (BGRA, raw from capture). Stored here so the
-    /// background thread can set it outside of ctx.run, then we apply it inside.
-    pending_desktop_frame: Option<CaptureFrame>,
     /// Rect of the desktop image within the egui canvas (set during render).
     /// Used for mapping panel UV → screen UV for mouse injection.
     desktop_image_rect: Option<egui::Rect>,
@@ -68,9 +66,8 @@ impl LayerDashboard {
             fps_timer: std::time::Instant::now(),
             fps_frame_count: 0,
             fps_current: 0.0,
-            desktop_texture: None,
+            desktop_texture_id: None,
             desktop_error: None,
-            pending_desktop_frame: None,
             desktop_image_rect: None,
             visuals_set: false,
         }
@@ -91,51 +88,9 @@ impl LayerDashboard {
         self.desktop_image_rect
     }
 
-    /// Store a desktop capture frame for later upload. Call this outside of ctx.run().
-    pub fn update_desktop_frame_data(&mut self, frame: CaptureFrame) {
-        self.pending_desktop_frame = Some(frame);
-    }
-
-    /// Upload the pending desktop frame to egui. Call this inside ctx.run().
-    pub fn apply_pending_desktop_frame(&mut self, ctx: &egui::Context) {
-        if let Some(frame) = self.pending_desktop_frame.take() {
-            self.update_desktop_frame(ctx, frame);
-            // Force repaint so the desktop tab refreshes even when
-            // the pointer isn't aimed at the panel (no input events).
-            ctx.request_repaint();
-        }
-    }
-
-    /// Upload a pre-processed RGBA desktop frame as an egui texture.
-    /// The capture thread already handles BGRA→RGBA conversion and downscaling.
-    pub fn update_desktop_frame(&mut self, ctx: &egui::Context, frame: CaptureFrame) {
-        let w = frame.width as usize;
-        let h = frame.height as usize;
-        let pixel_count = w * h;
-
-        // Zero-copy reinterpret Vec<u8> as Vec<Color32>.
-        // Desktop capture is always opaque (a=255), so RGBA bytes are already
-        // premultiplied and match Color32's in-memory layout exactly.
-        // This avoids the 60ms+ per-pixel loop of from_rgba_unmultiplied in debug builds.
-        let pixels: Vec<egui::Color32> = unsafe {
-            let mut data = frame.data;
-            assert_eq!(data.len(), pixel_count * 4, "desktop frame size mismatch");
-            let ptr = data.as_mut_ptr() as *mut egui::Color32;
-            let cap = data.capacity() / 4;
-            std::mem::forget(data);
-            Vec::from_raw_parts(ptr, pixel_count, cap)
-        };
-        let image = egui::ColorImage { size: [w, h], pixels };
-
-        match &mut self.desktop_texture {
-            Some(handle) => {
-                handle.set(image, egui::TextureOptions::LINEAR);
-            }
-            None => {
-                self.desktop_texture =
-                    Some(ctx.load_texture("desktop_capture", image, egui::TextureOptions::LINEAR));
-            }
-        }
+    /// Set the desktop texture ID (managed by HeadlessRenderer, not egui).
+    pub fn set_desktop_texture_id(&mut self, id: egui::TextureId, width: u32, height: u32) {
+        self.desktop_texture_id = Some((id, width, height));
     }
 
     /// Render the full dashboard UI and return any actions produced this frame.
@@ -380,7 +335,7 @@ impl LayerDashboard {
         }
 
         // ---- Main content ----
-        let desktop_texture = &self.desktop_texture;
+        let desktop_texture_id = self.desktop_texture_id;
         let desktop_error = &self.desktop_error;
 
         egui::CentralPanel::default()
@@ -390,7 +345,7 @@ impl LayerDashboard {
                     render_launcher_content(ui, games, &mut search, &mut launch_id);
                 }
                 DashboardTab::Desktop => {
-                    desktop_image_rect_out = render_desktop_content(ui, desktop_texture, desktop_error);
+                    desktop_image_rect_out = render_desktop_content(ui, desktop_texture_id, desktop_error);
                 }
                 DashboardTab::Settings => {
                     render_settings_content(ui, config, &mut save_clicked);
@@ -615,7 +570,7 @@ fn render_launcher_content(
 
 fn render_desktop_content(
     ui: &mut egui::Ui,
-    texture: &Option<egui::TextureHandle>,
+    texture_id: Option<(egui::TextureId, u32, u32)>,
     error: &Option<String>,
 ) -> Option<egui::Rect> {
     if let Some(err) = error {
@@ -636,10 +591,10 @@ fn render_desktop_content(
         return None;
     }
 
-    match texture {
-        Some(handle) => {
+    match texture_id {
+        Some((tex_id, w, h)) => {
             let available = ui.available_size();
-            let tex_size = handle.size_vec2();
+            let tex_size = egui::vec2(w as f32, h as f32);
             let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
             let display_size = egui::vec2(tex_size.x * scale, tex_size.y * scale);
 
@@ -649,7 +604,7 @@ fn render_desktop_content(
                 if vertical_pad > 0.0 {
                     ui.add_space(vertical_pad);
                 }
-                let response = ui.image(egui::load::SizedTexture::new(handle.id(), display_size));
+                let response = ui.image(egui::load::SizedTexture::new(tex_id, display_size));
                 image_rect = Some(response.rect);
             });
             image_rect
