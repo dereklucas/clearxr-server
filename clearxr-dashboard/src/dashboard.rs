@@ -216,7 +216,7 @@ impl LayerDashboard {
                 let rect = ui.available_rect_before_wrap();
                 let pill_rect = egui::Rect::from_center_size(
                     rect.center(),
-                    egui::vec2(rect.width() * 0.25, 14.0 * s),
+                    egui::vec2(rect.width() * 0.12, 5.0 * s),
                 );
                 let is_hovered = ui.rect_contains_pointer(pill_rect);
                 let color = if is_hovered {
@@ -230,13 +230,19 @@ impl LayerDashboard {
 
         // ---- Tab bar above grab bar ----
         egui::TopBottomPanel::bottom("tabs")
-            .exact_height(40.0 * s)
+            .exact_height(44.0 * s)
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_premultiplied(18, 18, 36, 230))
-                    .inner_margin(egui::Margin::symmetric((12.0 * s) as i8, (4.0 * s) as i8)),
+                    .fill(egui::Color32::from_rgba_premultiplied(22, 22, 40, 245))
+                    .inner_margin(egui::Margin::symmetric((16.0 * s) as i8, (6.0 * s) as i8)),
             )
             .show(ctx, |ui| {
+                // Top edge highlight for visual separation from content
+                let bar_rect = ui.max_rect();
+                ui.painter().line_segment(
+                    [bar_rect.left_top(), bar_rect.right_top()],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 18)),
+                );
                 ui.horizontal_centered(|ui| {
                     // Build tab list — CurrentApp only shown when an app is running
                     let current_app_name = self.current_app.clone();
@@ -249,28 +255,40 @@ impl LayerDashboard {
                     tabs.push((DashboardTab::Settings, "SETTINGS".into()));
 
                     for (tab, label) in &tabs {
-                        let color = if active_tab == *tab {
+                        let is_active = active_tab == *tab;
+                        let color = if is_active {
                             egui::Color32::WHITE
                         } else {
-                            egui::Color32::from_rgb(128, 128, 144)
+                            egui::Color32::from_rgb(120, 124, 148)
+                        };
+                        // Title case: first char uppercase, rest lowercase
+                        let display_label = {
+                            let mut c = label.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(f) => f.to_uppercase().to_string() + &c.as_str().to_lowercase(),
+                            }
                         };
                         let btn = egui::Button::new(
-                            egui::RichText::new(label).size(15.0 * s).color(color),
+                            egui::RichText::new(&display_label).size(13.0 * s).color(color),
                         )
                         .frame(false)
-                        .min_size(egui::vec2(80.0 * s, 36.0 * s));
+                        .min_size(egui::vec2(80.0 * s, 32.0 * s));
                         let btn_response = ui.add(btn);
-                        // Active tab indicator
-                        if active_tab == *tab {
+                        // Active tab indicator — visionOS-style pill highlight behind active tab
+                        if is_active {
                             let r = btn_response.rect;
-                            let indicator = egui::Rect::from_min_size(
-                                egui::pos2(r.left() + 8.0 * s, r.bottom() - 3.0 * s),
-                                egui::vec2(r.width() - 16.0 * s, 3.0 * s),
-                            );
+                            let pill = r.shrink2(egui::vec2(4.0 * s, 3.0 * s));
                             ui.painter().rect_filled(
-                                indicator,
-                                1.5,
-                                egui::Color32::from_rgb(74, 158, 255),
+                                pill,
+                                pill.height() / 2.0,
+                                egui::Color32::from_rgba_premultiplied(74, 158, 255, 50),
+                            );
+                            ui.painter().rect_stroke(
+                                pill,
+                                pill.height() / 2.0,
+                                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(74, 158, 255, 100)),
+                                epaint::StrokeKind::Inside,
                             );
                         }
                         debug_rect(ui, btn_response.rect, egui::Color32::from_rgb(255, 128, 0), dbg);
@@ -286,7 +304,7 @@ impl LayerDashboard {
                             ui.label(
                                 egui::RichText::new(format!("{:.0} fps", fps))
                                     .size(11.0 * s)
-                                    .color(egui::Color32::from_rgb(0, 255, 96))
+                                    .color(egui::Color32::from_rgb(100, 106, 130))
                                     .monospace(),
                             );
                         },
@@ -501,33 +519,49 @@ fn render_launcher_content(
     s: f32,
 ) {
     // Header
-    ui.add_space(4.0 * s);
+    ui.add_space(8.0 * s);
     let header_response = ui.horizontal(|ui| {
         debug_rect(ui, ui.available_rect_before_wrap(), egui::Color32::from_rgb(0, 255, 255), dbg);
-        ui.heading(
-            egui::RichText::new("ClearXR")
-                .size(22.0 * s)
-                .color(egui::Color32::from_rgb(74, 158, 255)),
-        );
-        ui.add_space(8.0 * s);
+        ui.vertical(|ui| {
+            ui.heading(
+                egui::RichText::new("ClearXR")
+                    .size(26.0 * s)
+                    .color(egui::Color32::from_rgb(74, 158, 255)),
+            );
+            ui.label(
+                egui::RichText::new("Game Library")
+                    .size(12.0 * s)
+                    .color(egui::Color32::from_rgb(145, 150, 178)),
+            );
+        });
+        ui.add_space(16.0 * s);
+        let search_width = (ui.available_width() * 0.45).min(320.0 * s);
         let search_response = ui.add_sized(
-            egui::vec2(ui.available_width(), 32.0 * s),
-            egui::TextEdit::singleline(search_buf).hint_text("Search games..."),
+            egui::vec2(search_width, 32.0 * s),
+            egui::TextEdit::singleline(search_buf)
+                .hint_text("Search games...")
+                .text_color(egui::Color32::WHITE)
+                .background_color(egui::Color32::from_rgb(30, 30, 55)),
+        );
+        // Draw border around search field
+        ui.painter().rect_stroke(
+            search_response.rect,
+            4.0 * s,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 40)),
+            epaint::StrokeKind::Inside,
         );
         debug_rect(ui, search_response.rect, egui::Color32::from_rgb(255, 0, 255), dbg);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{} games", games.len()))
                     .size(13.0 * s)
-                    .color(egui::Color32::from_rgb(106, 112, 136)),
+                    .color(egui::Color32::from_rgb(110, 114, 140)),
             );
         });
     });
     debug_rect(ui, header_response.response.rect, egui::Color32::from_rgb(0, 255, 255), dbg);
 
-    ui.add_space(8.0 * s);
-    ui.separator();
-    ui.add_space(8.0 * s);
+    ui.add_space(20.0 * s);
 
     // Filter
     let search_lower = search_buf.to_lowercase();
@@ -560,13 +594,13 @@ fn render_launcher_content(
         });
     } else {
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            let spacing = 8.0 * s;
+            let spacing = 16.0 * s;
             let available_width = ui.available_width();
-            let min_card_width = 180.0 * s;
+            let min_card_width = 200.0 * s;
             let cols = ((available_width + spacing) / (min_card_width + spacing)).max(1.0) as usize;
             let card_width = (available_width - spacing * (cols as f32 - 1.0)) / cols as f32;
-            let art_height = 85.0 * s;
-            let card_height = 130.0 * s;
+            let art_height = 110.0 * s;
+            let card_height = 165.0 * s;
 
             egui::Grid::new("game_grid")
                 .min_col_width(card_width)
@@ -587,18 +621,18 @@ fn render_launcher_content(
 
                                 // Card background
                                 let bg = if is_hovered {
-                                    egui::Color32::from_rgb(35, 35, 70)
+                                    egui::Color32::from_rgb(38, 38, 72)
                                 } else {
-                                    egui::Color32::from_rgb(19, 19, 42)
+                                    egui::Color32::from_rgb(24, 24, 50)
                                 };
-                                let cr = 12.0 * s;
+                                let cr = 8.0 * s;
                                 ui.painter().rect_filled(rect, cr, bg);
 
                                 // Card border
                                 let stroke_color = if is_hovered {
-                                    egui::Color32::from_rgba_premultiplied(74, 158, 255, 100)
+                                    egui::Color32::from_rgba_premultiplied(74, 158, 255, 120)
                                 } else {
-                                    egui::Color32::from_white_alpha(18)
+                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 32)
                                 };
                                 ui.painter().rect_stroke(rect, cr, egui::Stroke::new(1.0, stroke_color), epaint::StrokeKind::Inside);
 
@@ -683,18 +717,34 @@ fn render_launcher_content(
                                     ));
                                 }
 
+                                // Title footer strip
+                                let footer_rect = egui::Rect::from_min_max(
+                                    egui::pos2(rect.min.x, rect.min.y + art_height),
+                                    rect.max,
+                                );
+                                let cri_b = cr as u8;
+                                let bottom_rounding = egui::CornerRadius {
+                                    nw: 0, ne: 0,
+                                    sw: cri_b, se: cri_b,
+                                };
+                                ui.painter().rect_filled(
+                                    footer_rect,
+                                    bottom_rounding,
+                                    egui::Color32::from_rgba_premultiplied(22, 22, 44, 170),
+                                );
+
                                 // Title
-                                ui.add_space(art_height + 8.0 * s);
+                                ui.add_space(art_height + 12.0 * s);
                                 let title_rect = ui.available_rect_before_wrap();
                                 debug_rect(ui, title_rect, egui::Color32::YELLOW, dbg);
                                 ui.horizontal(|ui| {
-                                    ui.add_space(8.0 * s);
-                                    ui.set_max_width(rect.width() - 16.0 * s);
+                                    ui.add_space(10.0 * s);
+                                    ui.set_max_width(rect.width() - 20.0 * s);
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(&game.name)
                                                 .size(14.0 * s)
-                                                .color(egui::Color32::WHITE),
+                                                .color(egui::Color32::from_rgb(195, 198, 215)),
                                         )
                                         .truncate(),
                                     );
@@ -838,17 +888,29 @@ fn render_desktop_content(
 // ============================================================
 
 fn render_settings_content(ui: &mut egui::Ui, config: &mut Config, save_clicked: &mut bool, s: f32) {
+    ui.add_space(12.0 * s);
+    ui.heading(
+        egui::RichText::new("Settings")
+            .size(22.0 * s)
+            .color(egui::Color32::WHITE),
+    );
     ui.add_space(4.0 * s);
-    ui.heading(egui::RichText::new("Settings").size(20.0 * s));
-    ui.add_space(4.0 * s);
-    ui.separator();
-    ui.add_space(8.0 * s);
+    ui.label(
+        egui::RichText::new("Configure your ClearXR experience")
+            .size(12.0 * s)
+            .color(egui::Color32::from_rgb(120, 126, 155)),
+    );
+    ui.add_space(20.0 * s);
 
     egui::Grid::new("settings_grid")
         .num_columns(2)
-        .spacing([20.0 * s, 12.0 * s])
+        .spacing([24.0 * s, 16.0 * s])
         .show(ui, |ui| {
-            ui.label("Default View");
+            ui.label(
+                egui::RichText::new("Default View")
+                    .size(14.0 * s)
+                    .color(egui::Color32::from_rgb(200, 200, 220)),
+            );
             egui::ComboBox::from_id_salt("view")
                 .selected_text(if config.shell.default_view == "desktop" {
                     "Desktop"
@@ -869,28 +931,54 @@ fn render_settings_content(ui: &mut egui::Ui, config: &mut Config, save_clicked:
                 });
             ui.end_row();
 
-            ui.label("Panel Opacity");
+            ui.label(
+                egui::RichText::new("Panel Opacity")
+                    .size(14.0 * s)
+                    .color(egui::Color32::from_rgb(200, 200, 220)),
+            );
             {
                 let pct = format!("{:.0}%", config.panel.opacity * 100.0);
                 ui.add(egui::Slider::new(&mut config.panel.opacity, 0.5..=1.0).text(pct));
             }
             ui.end_row();
 
-            ui.label("Show FPS");
+            ui.label(
+                egui::RichText::new("Show FPS")
+                    .size(14.0 * s)
+                    .color(egui::Color32::from_rgb(200, 200, 220)),
+            );
             ui.checkbox(&mut config.display.show_fps, "");
             ui.end_row();
 
-            ui.label("Haptic Feedback");
+            ui.label(
+                egui::RichText::new("Haptic Feedback")
+                    .size(14.0 * s)
+                    .color(egui::Color32::from_rgb(200, 200, 220)),
+            );
             ui.checkbox(&mut config.shell.haptics_enabled, "");
             ui.end_row();
 
-            ui.label("Debug Borders");
+            ui.label(
+                egui::RichText::new("Debug Borders")
+                    .size(14.0 * s)
+                    .color(egui::Color32::from_rgb(200, 200, 220)),
+            );
             ui.checkbox(&mut config.display.debug_borders, "");
             ui.end_row();
         });
 
-    ui.separator();
-    if ui.button("Save").clicked() {
+    ui.add_space(24.0 * s);
+    let save_btn = ui.add_sized(
+        egui::vec2(120.0 * s, 36.0 * s),
+        egui::Button::new(
+            egui::RichText::new("Save")
+                .size(15.0 * s)
+                .color(egui::Color32::WHITE),
+        )
+        .fill(egui::Color32::from_rgb(44, 108, 210))
+        .corner_radius(6.0 * s),
+    );
+    if save_btn.clicked() {
         *save_clicked = true;
     }
 }
