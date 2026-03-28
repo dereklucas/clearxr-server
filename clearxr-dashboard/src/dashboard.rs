@@ -3,6 +3,8 @@
 //! Ported from clearxr-space's dashboard, adapted for the layer host model.
 //! This renders into the layer's overlay swapchain via EguiOverlayRenderer.
 
+use std::collections::HashMap;
+
 use crate::config::Config;
 use crate::game_scanner::Game;
 use crate::notifications::{Notification, NotificationQueue};
@@ -45,6 +47,9 @@ pub struct LayerDashboard {
     /// Rect of the desktop image within the egui canvas (set during render).
     /// Used for mapping panel UV → screen UV for mouse injection.
     desktop_image_rect: Option<egui::Rect>,
+    /// Cached game art textures, keyed by app_id.
+    game_textures: HashMap<u32, egui::TextureHandle>,
+    game_textures_loaded: bool,
 }
 
 impl LayerDashboard {
@@ -70,6 +75,8 @@ impl LayerDashboard {
             desktop_error: None,
             desktop_image_rect: None,
             visuals_set: false,
+            game_textures: HashMap::new(),
+            game_textures_loaded: false,
         }
     }
 
@@ -93,9 +100,46 @@ impl LayerDashboard {
         self.desktop_texture_id = Some((id, width, height));
     }
 
+    /// Load game art textures from disk (called once on first render).
+    fn load_game_textures(&mut self, ctx: &egui::Context) {
+        for game in &self.games {
+            if let Some(path) = &game.art_path {
+                match image::open(path) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        let pixels = rgba.into_raw();
+                        let color_image =
+                            egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+                        let handle = ctx.load_texture(
+                            format!("game-{}", game.app_id),
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.game_textures.insert(game.app_id, handle);
+                    }
+                    Err(e) => {
+                        log::warn!("[Dashboard] Failed to load art for {}: {}", game.name, e);
+                    }
+                }
+            }
+        }
+        log::info!(
+            "[Dashboard] Loaded {} / {} game art textures",
+            self.game_textures.len(),
+            self.games.len()
+        );
+    }
+
     /// Render the full dashboard UI and return any actions produced this frame.
     pub fn render(&mut self, ctx: &egui::Context) -> Vec<DashboardAction> {
         let mut actions = Vec::new();
+
+        // Load game art on first render (needs ctx for texture creation)
+        if !self.game_textures_loaded {
+            self.load_game_textures(ctx);
+            self.game_textures_loaded = true;
+        }
 
         // Tick notifications
         self.notifications.tick();
@@ -338,11 +382,17 @@ impl LayerDashboard {
         let desktop_texture_id = self.desktop_texture_id;
         let desktop_error = &self.desktop_error;
 
+        let game_textures = &self.game_textures;
+
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(egui::Color32::from_rgba_premultiplied(10, 10, 20, 250)))
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgba_premultiplied(10, 10, 20, 250))
+                    .inner_margin(egui::Margin::symmetric(24, 16)),
+            )
             .show(ctx, |ui| match active_tab {
                 DashboardTab::Launcher => {
-                    render_launcher_content(ui, games, &mut search, &mut launch_id);
+                    render_launcher_content(ui, games, &mut search, &mut launch_id, game_textures);
                 }
                 DashboardTab::Desktop => {
                     desktop_image_rect_out = render_desktop_content(ui, desktop_texture_id, desktop_error);
@@ -405,8 +455,10 @@ fn render_launcher_content(
     games: &[Game],
     search_buf: &mut String,
     launch_app_id: &mut Option<u32>,
+    game_textures: &HashMap<u32, egui::TextureHandle>,
 ) {
     // Header
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.heading(
             egui::RichText::new("ClearXR")
@@ -438,7 +490,7 @@ fn render_launcher_content(
 
     ui.add_space(8.0);
     ui.separator();
-    ui.add_space(4.0);
+    ui.add_space(8.0);
 
     // Filter
     let search_lower = search_buf.to_lowercase();
@@ -474,6 +526,8 @@ fn render_launcher_content(
             let available_width = ui.available_width();
             let card_width = 200.0_f32;
             let cols = ((available_width / card_width) as usize).max(1);
+            let art_height = 85.0_f32;
+            let card_height = 130.0_f32;
 
             egui::Grid::new("game_grid")
                 .num_columns(cols)
@@ -485,7 +539,7 @@ fn render_launcher_content(
                         }
 
                         let response = ui.allocate_ui_with_layout(
-                            egui::vec2(card_width - 12.0, 120.0),
+                            egui::vec2(card_width - 12.0, card_height),
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
                                 let rect = ui.available_rect_before_wrap();
@@ -497,60 +551,83 @@ fn render_launcher_content(
                                 };
                                 ui.painter().rect_filled(rect, 8.0, bg);
 
-                                // Art placeholder
-                                let hash = game
-                                    .name
-                                    .bytes()
-                                    .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-                                let hue = (hash % 360) as f32;
-                                let art_color = egui::Color32::from_rgb(
-                                    (40.0 + 30.0 * (hue * 0.017).sin()) as u8,
-                                    (30.0 + 20.0 * ((hue + 120.0) * 0.017).sin()) as u8,
-                                    (50.0 + 30.0 * ((hue + 240.0) * 0.017).sin()) as u8,
-                                );
                                 let art_rect = egui::Rect::from_min_size(
                                     rect.min,
-                                    egui::vec2(rect.width(), 70.0),
+                                    egui::vec2(rect.width(), art_height),
                                 );
-                                ui.painter().rect_filled(
-                                    art_rect,
-                                    egui::CornerRadius {
-                                        nw: 8,
-                                        ne: 8,
-                                        sw: 0,
-                                        se: 0,
-                                    },
-                                    art_color,
-                                );
+                                let top_rounding = egui::CornerRadius {
+                                    nw: 8,
+                                    ne: 8,
+                                    sw: 0,
+                                    se: 0,
+                                };
 
-                                // Initials
-                                let initials: String = game
-                                    .name
-                                    .split_whitespace()
-                                    .take(2)
-                                    .map(|w| w.chars().next().unwrap_or(' '))
-                                    .collect();
-                                ui.painter().text(
-                                    art_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    &initials,
-                                    egui::FontId::proportional(24.0),
-                                    egui::Color32::from_white_alpha(60),
-                                );
+                                if let Some(tex) = game_textures.get(&game.app_id) {
+                                    // Clip to rounded top corners
+                                    ui.painter().rect_filled(art_rect, top_rounding, egui::Color32::BLACK);
+                                    ui.painter().with_clip_rect(art_rect).image(
+                                        tex.id(),
+                                        art_rect,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        egui::Color32::WHITE,
+                                    );
+                                } else {
+                                    // Fallback: colored placeholder with initials
+                                    let hash = game
+                                        .name
+                                        .bytes()
+                                        .fold(0u32, |acc, b| {
+                                            acc.wrapping_mul(31).wrapping_add(b as u32)
+                                        });
+                                    let hue = (hash % 360) as f32;
+                                    let art_color = egui::Color32::from_rgb(
+                                        (40.0 + 30.0 * (hue * 0.017).sin()) as u8,
+                                        (30.0 + 20.0 * ((hue + 120.0) * 0.017).sin()) as u8,
+                                        (50.0 + 30.0 * ((hue + 240.0) * 0.017).sin()) as u8,
+                                    );
+                                    ui.painter().rect_filled(art_rect, top_rounding, art_color);
 
-                                // Title
-                                ui.add_space(74.0);
-                                ui.label(
-                                    egui::RichText::new(&game.name)
-                                        .size(13.0)
-                                        .color(egui::Color32::WHITE),
-                                );
+                                    let initials: String = game
+                                        .name
+                                        .split_whitespace()
+                                        .take(2)
+                                        .map(|w| w.chars().next().unwrap_or(' '))
+                                        .collect();
+                                    ui.painter().text(
+                                        art_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        &initials,
+                                        egui::FontId::proportional(24.0),
+                                        egui::Color32::from_white_alpha(60),
+                                    );
+                                }
+
+                                // Title with padding
+                                ui.add_space(art_height + 6.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(8.0);
+                                    ui.set_max_width(rect.width() - 16.0);
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&game.name)
+                                                .size(13.0)
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
 
                                 // Play button on hover
                                 if is_hovered {
-                                    if ui.button("Play").clicked() {
-                                        // Click handled by card response below
-                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(8.0);
+                                        if ui.button("Play").clicked() {
+                                            // Click handled by card response below
+                                        }
+                                    });
                                 }
                             },
                         );
@@ -629,8 +706,11 @@ fn render_desktop_content(
 // ============================================================
 
 fn render_settings_content(ui: &mut egui::Ui, config: &mut Config, save_clicked: &mut bool) {
+    ui.add_space(4.0);
     ui.heading("Settings");
+    ui.add_space(4.0);
     ui.separator();
+    ui.add_space(8.0);
 
     egui::Grid::new("settings_grid")
         .num_columns(2)

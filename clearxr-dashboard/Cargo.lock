@@ -682,6 +682,7 @@ dependencies = [
  "enigo",
  "env_logger",
  "epaint",
+ "image",
  "log",
  "serde",
  "shared_memory",
@@ -1756,6 +1757,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

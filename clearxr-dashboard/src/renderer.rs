@@ -17,14 +17,7 @@ const IMAGE_HANDLE_NAME: &[u16] = &[
     b'r' as u16, b'd' as u16, b'I' as u16, b'm' as u16, b'a' as u16,
     b'g' as u16, b'e' as u16, 0,
 ];
-const SEMAPHORE_HANDLE_NAME: &[u16] = &[
-    b'C' as u16, b'l' as u16, b'e' as u16, b'a' as u16, b'r' as u16,
-    b'X' as u16, b'R' as u16, b'_' as u16, b'D' as u16, b'a' as u16,
-    b's' as u16, b'h' as u16, b'b' as u16, b'o' as u16, b'a' as u16,
-    b'r' as u16, b'd' as u16, b'S' as u16, b'e' as u16, b'm' as u16,
-    b'a' as u16, b'p' as u16, b'h' as u16, b'o' as u16, b'r' as u16,
-    b'e' as u16, 0,
-];
+
 
 /// User-managed Vulkan texture for the desktop capture image.
 /// Bypasses egui-ash-renderer's set_textures (which does vkQueueWaitIdle)
@@ -76,10 +69,6 @@ pub struct HeadlessRenderer {
     render_pass: vk::RenderPass,
     framebuffer: vk::Framebuffer,
 
-    // Shared timeline semaphore for cross-process synchronization
-    timeline_semaphore: vk::Semaphore,
-    semaphore_counter: u64,
-
     width: u32,
     height: u32,
 
@@ -104,9 +93,8 @@ impl HeadlessRenderer {
         // ── Instance (with external memory/semaphore capability extensions) ──
         let app_info = vk::ApplicationInfo::default()
             .api_version(vk::make_api_version(0, 1, 2, 0));
-        let instance_extensions: [*const std::ffi::c_char; 3] = [
+        let instance_extensions: [*const std::ffi::c_char; 2] = [
             vk::KHR_EXTERNAL_MEMORY_CAPABILITIES_NAME.as_ptr(),
-            vk::KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_NAME.as_ptr(),
             vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME.as_ptr(),
         ];
         let instance_ci = vk::InstanceCreateInfo::default()
@@ -130,17 +118,11 @@ impl HeadlessRenderer {
         .map(|(i, _)| i as u32)
         .ok_or_else(|| anyhow::anyhow!("No graphics queue family found"))?;
 
-        // ── Device (with external memory/semaphore + timeline semaphore extensions) ──
-        let device_extensions: [*const std::ffi::c_char; 5] = [
+        // ── Device (with external memory extensions for shared image) ──
+        let device_extensions: [*const std::ffi::c_char; 2] = [
             vk::KHR_EXTERNAL_MEMORY_NAME.as_ptr(),
             vk::KHR_EXTERNAL_MEMORY_WIN32_NAME.as_ptr(),
-            vk::KHR_EXTERNAL_SEMAPHORE_NAME.as_ptr(),
-            vk::KHR_EXTERNAL_SEMAPHORE_WIN32_NAME.as_ptr(),
-            vk::KHR_TIMELINE_SEMAPHORE_NAME.as_ptr(),
         ];
-
-        let mut timeline_features = vk::PhysicalDeviceTimelineSemaphoreFeatures::default()
-            .timeline_semaphore(true);
 
         let queue_priorities = [1.0f32];
         let queue_ci = vk::DeviceQueueCreateInfo::default()
@@ -148,8 +130,7 @@ impl HeadlessRenderer {
             .queue_priorities(&queue_priorities);
         let device_ci = vk::DeviceCreateInfo::default()
             .queue_create_infos(std::slice::from_ref(&queue_ci))
-            .enabled_extension_names(&device_extensions)
-            .push_next(&mut timeline_features);
+            .enabled_extension_names(&device_extensions);
         let device = unsafe { instance.create_device(physical_device, &device_ci, None)? };
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
 
@@ -232,20 +213,6 @@ impl HeadlessRenderer {
             );
         let render_image_view = unsafe { device.create_image_view(&view_ci, None)? };
 
-        // ── Timeline semaphore (exported via named Win32 handle) ──
-        let mut sem_type_info = vk::SemaphoreTypeCreateInfo::default()
-            .semaphore_type(vk::SemaphoreType::TIMELINE)
-            .initial_value(0);
-        let mut export_sem_info = vk::ExportSemaphoreCreateInfo::default()
-            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32);
-        let mut export_sem_win32_info = vk::ExportSemaphoreWin32HandleInfoKHR::default()
-            .name(SEMAPHORE_HANDLE_NAME.as_ptr());
-        let sem_ci = vk::SemaphoreCreateInfo::default()
-            .push_next(&mut sem_type_info)
-            .push_next(&mut export_sem_info)
-            .push_next(&mut export_sem_win32_info);
-        let timeline_semaphore = unsafe { device.create_semaphore(&sem_ci, None)? };
-
         // Render pass
         let attachment = vk::AttachmentDescription::default()
             .format(format)
@@ -324,8 +291,6 @@ impl HeadlessRenderer {
             render_image_view,
             render_pass,
             framebuffer,
-            timeline_semaphore,
-            semaphore_counter: 0,
             width,
             height,
             ctx,
@@ -553,17 +518,13 @@ impl HeadlessRenderer {
 
             device.end_command_buffer(cmd)?;
 
-            // Signal the timeline semaphore with incremented counter
-            self.semaphore_counter += 1;
-            let signal_values = [self.semaphore_counter];
-            let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
-                .signal_semaphore_values(&signal_values);
-            let signal_semaphores = [self.timeline_semaphore];
             let submit = vk::SubmitInfo::default()
-                .command_buffers(std::slice::from_ref(&cmd))
-                .signal_semaphores(&signal_semaphores)
-                .push_next(&mut timeline_info);
+                .command_buffers(std::slice::from_ref(&cmd));
             device.queue_submit(self.queue, &[submit], self.flights[slot].fence)?;
+
+            // Wait for the GPU to finish so the shared image is safe to read
+            // by the layer process. The SHM counter is bumped AFTER this returns.
+            device.wait_for_fences(&[self.flights[slot].fence], true, u64::MAX)?;
         }
 
         // Defer texture frees until this flight's fence is waited on (next use of this slot).
@@ -574,12 +535,6 @@ impl HeadlessRenderer {
         self.current_flight = 1 - self.current_flight;
 
         Ok(true)
-    }
-
-    /// Current timeline semaphore value. The layer waits for this value before
-    /// sampling the shared image.
-    pub fn semaphore_counter(&self) -> u64 {
-        self.semaphore_counter
     }
 
     /// Upload desktop capture pixels to a user-managed Vulkan texture.
@@ -818,10 +773,8 @@ impl Drop for HeadlessRenderer {
             // CRITICAL: Drop the egui renderer FIRST — it uses the device internally.
             ManuallyDrop::drop(&mut self.egui_renderer);
 
-            // Destroy timeline semaphore (named Win32 handle is reference-counted by the OS)
-            self.device.destroy_semaphore(self.timeline_semaphore, None);
+            // Destroy both flight frames
 
-            // Destroy both flight frames (no staging buffers — only fences)
             for flight in &self.flights {
                 self.device.destroy_fence(flight.fence, None);
             }
@@ -867,30 +820,12 @@ mod tests {
     }
 
     #[test]
-    fn test_wide_string_semaphore_handle_name() {
-        let name: String = SEMAPHORE_HANDLE_NAME.iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| char::from_u32(c as u32).unwrap())
-            .collect();
-        assert_eq!(name, "ClearXR_DashboardSemaphore");
-        assert_eq!(*SEMAPHORE_HANDLE_NAME.last().unwrap(), 0u16, "must be null-terminated");
-    }
-
-    #[test]
-    fn test_handle_names_match_shm_constants() {
-        // The names in renderer.rs must match what the layer expects to import.
-        // shm.rs defines the string versions; renderer.rs uses wide strings.
+    fn test_handle_name_matches_shm_constant() {
         use crate::shm;
         let image_name: String = IMAGE_HANDLE_NAME.iter()
             .take_while(|&&c| c != 0)
             .map(|&c| char::from_u32(c as u32).unwrap())
             .collect();
         assert_eq!(image_name, shm::IMAGE_HANDLE_NAME);
-
-        let sem_name: String = SEMAPHORE_HANDLE_NAME.iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| char::from_u32(c as u32).unwrap())
-            .collect();
-        assert_eq!(sem_name, shm::SEMAPHORE_HANDLE_NAME);
     }
 }

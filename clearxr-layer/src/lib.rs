@@ -2044,24 +2044,17 @@ mod tests {
 
     #[test]
     fn test_wide_string_names_decode() {
-        use crate::overlay::{IMAGE_HANDLE_NAME, SEMAPHORE_HANDLE_NAME};
+        use crate::overlay::IMAGE_HANDLE_NAME;
         let image_name: String = IMAGE_HANDLE_NAME.iter()
             .take_while(|&&c| c != 0)
             .map(|&c| char::from_u32(c as u32).unwrap())
             .collect();
         assert_eq!(image_name, "ClearXR_DashboardImage");
-
-        let sem_name: String = SEMAPHORE_HANDLE_NAME.iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| char::from_u32(c as u32).unwrap())
-            .collect();
-        assert_eq!(sem_name, "ClearXR_DashboardSemaphore");
     }
 
     #[test]
     fn test_wide_string_null_terminated() {
-        use crate::overlay::{IMAGE_HANDLE_NAME, SEMAPHORE_HANDLE_NAME};
+        use crate::overlay::IMAGE_HANDLE_NAME;
         assert_eq!(*IMAGE_HANDLE_NAME.last().unwrap(), 0u16);
-        assert_eq!(*SEMAPHORE_HANDLE_NAME.last().unwrap(), 0u16);
     }
 }

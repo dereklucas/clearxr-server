@@ -8,7 +8,7 @@ use openxr_sys as xr;
 use shared_memory::{Shmem, ShmemConf};
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 const SHM_NAME: &str = "ClearXR_Dashboard_Meta";
 const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
@@ -22,14 +22,6 @@ pub(crate) const IMAGE_HANDLE_NAME: &[u16] = &[
     b'r' as u16, b'd' as u16, b'I' as u16, b'm' as u16, b'a' as u16,
     b'g' as u16, b'e' as u16, 0,
 ];
-pub(crate) const SEMAPHORE_HANDLE_NAME: &[u16] = &[
-    b'C' as u16, b'l' as u16, b'e' as u16, b'a' as u16, b'r' as u16,
-    b'X' as u16, b'R' as u16, b'_' as u16, b'D' as u16, b'a' as u16,
-    b's' as u16, b'h' as u16, b'b' as u16, b'o' as u16, b'a' as u16,
-    b'r' as u16, b'd' as u16, b'S' as u16, b'e' as u16, b'm' as u16,
-    b'a' as u16, b'p' as u16, b'h' as u16, b'o' as u16, b'r' as u16,
-    b'e' as u16, 0,
-];
 
 /// Minimal SHM header v2 (must match clearxr-dashboard/src/shm.rs).
 /// Metadata only — no pixel data. Pixels shared via VK_KHR_external_memory_win32.
@@ -42,23 +34,13 @@ pub(crate) struct ShmHeader {
     panel_pos: [f32; 3],          // 16
     panel_orient: [f32; 4],       // 28
     panel_size: [f32; 2],         // 44
-    // 4 bytes padding (AtomicU64 alignment)
-    semaphore_counter: AtomicU64, // 56
-    gpu_luid: [u8; 8],           // 64
-    _reserved: [u8; 4],          // 72 -> total 80 with tail padding
+    gpu_luid: [u8; 8],           // 52
+    _reserved: [u8; 4],          // 60 -> total 64
 }
 
 // Safety: DashboardOverlay is only accessed from the thread that calls xrEndFrame.
 // The raw pointers (pipe handle) are not shared.
 unsafe impl Send for DashboardOverlay {}
-
-/// Raw Vulkan function pointer for vkImportSemaphoreWin32HandleKHR.
-/// Loaded via vkGetDeviceProcAddr since we can't construct ash extension loaders
-/// without a full ash::Instance (the layer wraps the host app's Vulkan handles).
-type PfnImportSemaphoreWin32HandleKHR = unsafe extern "system" fn(
-    device: vk::Device,
-    p_import_semaphore_win32_handle_info: *const vk::ImportSemaphoreWin32HandleInfoKHR,
-) -> vk::Result;
 
 pub struct DashboardOverlay {
     session: xr::Session,
@@ -74,11 +56,8 @@ pub struct DashboardOverlay {
     // Shared Vulkan resources (imported from dashboard process)
     shared_image: vk::Image,
     shared_image_memory: vk::DeviceMemory,
-    shared_semaphore: vk::Semaphore,
-    last_semaphore_value: u64,
+    last_frame_counter: u32,
     shared_resources_imported: bool,
-    // Extension function pointer
-    import_semaphore_win32: Option<PfnImportSemaphoreWin32HandleKHR>,
     // SHM reader
     shmem: Option<Shmem>,
     // Pipe client for controller input
@@ -141,22 +120,6 @@ impl DashboardOverlay {
             None,
         ).map_err(|e| format!("create fence: {e}"))?;
 
-        // Load vkImportSemaphoreWin32HandleKHR extension function via instance's
-        // vkGetDeviceProcAddr (ash exposes it on InstanceFnV1_0, not DeviceFnV1_0).
-        let import_semaphore_win32 = {
-            let name = b"vkImportSemaphoreWin32HandleKHR\0";
-            let fp = (vk.instance_ref().fp_v1_0().get_device_proc_addr)(
-                vk.device().handle(),
-                name.as_ptr() as *const std::ffi::c_char,
-            );
-            if let Some(fp) = fp {
-                Some(std::mem::transmute::<_, PfnImportSemaphoreWin32HandleKHR>(fp))
-            } else {
-                log::warn!("[ClearXR Layer] vkImportSemaphoreWin32HandleKHR not available");
-                None
-            }
-        };
-
         // Try to connect pipe
         #[cfg(target_os = "windows")]
         let pipe = connect_pipe();
@@ -175,10 +138,8 @@ impl DashboardOverlay {
             vk,
             shared_image: vk::Image::null(),
             shared_image_memory: vk::DeviceMemory::null(),
-            shared_semaphore: vk::Semaphore::null(),
-            last_semaphore_value: 0,
+            last_frame_counter: 0,
             shared_resources_imported: false,
-            import_semaphore_win32,
             shmem,
             #[cfg(target_os = "windows")]
             pipe,
@@ -193,8 +154,8 @@ impl DashboardOverlay {
         })
     }
 
-    /// Import the dashboard's shared Vulkan image and timeline semaphore
-    /// via named Win32 handles. Called once when SHM is first connected.
+    /// Import the dashboard's shared Vulkan image via named Win32 handle.
+    /// Called once when SHM is first connected.
     unsafe fn import_shared_resources(&mut self) -> Result<(), String> {
         let device = self.vk.device();
 
@@ -244,30 +205,6 @@ impl DashboardOverlay {
             self.width, self.height, mem_type
         );
 
-        // ── Import timeline semaphore ──
-        // Create a timeline semaphore locally
-        let mut sem_type_info = vk::SemaphoreTypeCreateInfo::default()
-            .semaphore_type(vk::SemaphoreType::TIMELINE)
-            .initial_value(0);
-        let sem_ci = vk::SemaphoreCreateInfo::default()
-            .push_next(&mut sem_type_info);
-        self.shared_semaphore = device.create_semaphore(&sem_ci, None)
-            .map_err(|e| format!("create timeline semaphore: {e}"))?;
-
-        // Import the dashboard's semaphore via named Win32 handle
-        let import_sem_fn = self.import_semaphore_win32
-            .ok_or("vkImportSemaphoreWin32HandleKHR not loaded")?;
-        let import_sem_info = vk::ImportSemaphoreWin32HandleInfoKHR::default()
-            .semaphore(self.shared_semaphore)
-            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32)
-            .handle(vk::HANDLE::default())
-            .name(SEMAPHORE_HANDLE_NAME.as_ptr());
-        let result = (import_sem_fn)(device.handle(), &import_sem_info);
-        if result != vk::Result::SUCCESS {
-            return Err(format!("vkImportSemaphoreWin32HandleKHR: {:?}", result));
-        }
-
-        log::info!("[ClearXR Layer] Shared timeline semaphore imported.");
         self.shared_resources_imported = true;
         Ok(())
     }
@@ -460,9 +397,10 @@ impl DashboardOverlay {
             }
         }
 
-        // Check timeline semaphore counter for new frames
-        let sem_counter = header.semaphore_counter.load(Ordering::Acquire);
-        if sem_counter == self.last_semaphore_value {
+        // Check frame counter for new frames (dashboard bumps this after its GPU
+        // fence signals, so a new value means the shared image is stable).
+        let frame_counter = header.frame_counter.load(Ordering::Acquire);
+        if frame_counter == self.last_frame_counter {
             return Ok(()); // No new frame from dashboard
         }
 
@@ -561,22 +499,14 @@ impl DashboardOverlay {
         device.end_command_buffer(cmd)
             .map_err(|e| format!("end cmd: {e}"))?;
 
-        // Submit with timeline semaphore wait — ensures dashboard GPU work is
-        // complete before we read the shared image.
-        let wait_semaphores = [self.shared_semaphore];
-        let wait_stages = [vk::PipelineStageFlags::TRANSFER];
-        let wait_values = [sem_counter];
-        let mut timeline_submit = vk::TimelineSemaphoreSubmitInfo::default()
-            .wait_semaphore_values(&wait_values);
+        // Submit — no semaphore wait needed; the dashboard waits for its own GPU
+        // fence before bumping frame_counter, so the shared image is already stable.
         let submit = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&cmd))
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .push_next(&mut timeline_submit);
+            .command_buffers(std::slice::from_ref(&cmd));
         device.queue_submit(self.vk.queue(), &[submit], self.fence)
             .map_err(|e| format!("queue submit: {e}"))?;
 
-        self.last_semaphore_value = sem_counter;
+        self.last_frame_counter = frame_counter;
         self.image_layouts[idx] = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
 
         // Release swapchain image
@@ -600,9 +530,6 @@ impl Drop for DashboardOverlay {
             device.device_wait_idle().ok();
 
             // Shared Vulkan resources
-            if self.shared_semaphore != vk::Semaphore::null() {
-                device.destroy_semaphore(self.shared_semaphore, None);
-            }
             if self.shared_image != vk::Image::null() {
                 device.destroy_image(self.shared_image, None);
             }

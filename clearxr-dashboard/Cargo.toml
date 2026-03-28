@@ -17,6 +17,7 @@ desktop = ["dep:eframe"]
 
 [dependencies]
 eframe = { version = "0.31", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 ash = "0.38"
 egui = "0.31"
 egui-ash-renderer = "0.8"

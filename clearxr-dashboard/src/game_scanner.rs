@@ -8,6 +8,8 @@ pub struct Game {
     pub name: String,
     pub install_dir: String,
     pub source: GameSource,
+    /// Path to header art (e.g. Steam library cache `<appid>_header.jpg`).
+    pub art_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +40,8 @@ fn scan_steam() -> Vec<Game> {
         }
     };
 
+    let cache_dir = locator.path().join("appcache").join("librarycache");
+
     let libraries = match locator.libraries() {
         Ok(iter) => iter,
         Err(e) => {
@@ -60,11 +64,17 @@ fn scan_steam() -> Vec<Game> {
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("App {}", app.app_id));
+            let app_cache = cache_dir.join(format!("{}", app.app_id));
+            let art_path = ["header.jpg", "library_header.jpg", "library_600x900.jpg"]
+                .iter()
+                .map(|name| app_cache.join(name))
+                .find(|p| p.exists());
             games.push(Game {
                 app_id: app.app_id,
                 name,
                 install_dir: app.install_dir.clone(),
                 source: GameSource::Steam,
+                art_path,
             });
         }
     }
