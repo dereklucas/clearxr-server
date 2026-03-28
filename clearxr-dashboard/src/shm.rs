@@ -1,18 +1,22 @@
-//! Shared memory writer for the dashboard framebuffer.
+//! Shared memory for dashboard metadata.
 //!
-//! Creates a named shared memory region containing a header + RGBA pixel buffer.
-//! The layer reads this to display the dashboard overlay.
+//! Contains panel pose, visibility, GPU LUID, and timeline semaphore counter.
+//! NO pixel data — pixels are shared via VK_KHR_external_memory_win32.
 
 use shared_memory::{Shmem, ShmemConf, ShmemError};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Name of the shared memory region.
-pub const SHM_NAME: &str = "ClearXR_Dashboard_Frame";
+pub const SHM_NAME: &str = "ClearXR_Dashboard_Meta";
 
-/// Fixed header at the start of shared memory (64 bytes).
+/// Named Vulkan handles for cross-process GPU resource sharing.
+pub const IMAGE_HANDLE_NAME: &str = "ClearXR_DashboardImage";
+pub const SEMAPHORE_HANDLE_NAME: &str = "ClearXR_DashboardSemaphore";
+
+/// Fixed header (80 bytes). Metadata only — no pixel data.
 #[repr(C)]
 pub struct ShmHeader {
-    /// Incremented after each frame write. Layer checks this for new content.
+    /// Incremented after each GPU render submit. Layer checks for new frames.
     pub frame_counter: AtomicU32,
     /// Frame width in pixels.
     pub width: u32,
@@ -26,34 +30,27 @@ pub struct ShmHeader {
     pub panel_orient: [f32; 4],
     /// Panel physical size in meters [width, height].
     pub panel_size: [f32; 2],
+    /// Timeline semaphore value the dashboard signaled after its last render.
+    pub semaphore_counter: AtomicU64,
+    /// GPU LUID (from VkPhysicalDeviceIDProperties). Dashboard matches against this.
+    pub gpu_luid: [u8; 8],
     /// Reserved for future use.
-    pub _reserved: [u8; 12],
+    pub _reserved: [u8; 4],
 }
 
-const HEADER_SIZE: usize = 64;
+pub const HEADER_SIZE: usize = 80;
 const _: () = assert!(std::mem::size_of::<ShmHeader>() == HEADER_SIZE);
 
-/// Writer side (dashboard process). Creates the shared memory and writes frames.
+/// Writer side (dashboard process). Creates shared memory for metadata.
 pub struct ShmWriter {
     shmem: Shmem,
-    width: u32,
-    height: u32,
 }
 
 impl ShmWriter {
-    /// Raw pointer to the start of the shared memory region.
-    pub fn ptr(&self) -> *const u8 {
-        self.shmem.as_ptr()
-    }
-
-    /// Create or open the shared memory region for the given frame size.
-    /// If a previous run left SHM behind, we reuse it.
+    /// Create or open the shared memory region (metadata only, no pixels).
     pub fn create(width: u32, height: u32) -> Result<Self, ShmemError> {
-        let pixel_size = (width * height * 4) as usize;
-        let total_size = HEADER_SIZE + pixel_size;
-
         let shmem = match ShmemConf::new()
-            .size(total_size)
+            .size(HEADER_SIZE)
             .os_id(SHM_NAME)
             .create()
         {
@@ -66,45 +63,44 @@ impl ShmWriter {
         };
 
         // Initialize header
-        let ptr = shmem.as_ptr();
         unsafe {
-            let header = &mut *(ptr as *mut ShmHeader);
+            let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
             header.frame_counter = AtomicU32::new(0);
             header.width = width;
             header.height = height;
             header.flags = 1; // visible by default
-            header.panel_pos = [0.0, 1.2, -2.0]; // 2m in front, chest height
-            header.panel_orient = [0.0, 0.0, 0.0, 1.0]; // identity (facing -Z)
-            header.panel_size = [1.6, 1.0]; // 1.6m x 1.0m
+            header.panel_pos = [0.0, 1.2, -2.0];
+            header.panel_orient = [0.0, 0.0, 0.0, 1.0];
+            header.panel_size = [1.6, 1.0];
+            header.semaphore_counter = AtomicU64::new(0);
+            header.gpu_luid = [0; 8];
         }
 
-        log::info!(
-            "[ClearXR Dashboard] SHM created: {}x{}, {} bytes total",
-            width, height, total_size
-        );
-
-        Ok(Self { shmem, width, height })
+        log::info!("[ClearXR Dashboard] SHM created: {}x{}, metadata only ({} bytes)", width, height, HEADER_SIZE);
+        Ok(Self { shmem })
     }
 
-    /// Write RGBA pixel data and increment the frame counter.
-    pub fn write_frame(&self, pixels: &[u8]) {
-        let expected = (self.width * self.height * 4) as usize;
-        if pixels.len() != expected {
-            log::warn!(
-                "[ClearXR Dashboard] Frame size mismatch: got {}, expected {}",
-                pixels.len(), expected
-            );
-            return;
-        }
-
+    /// Increment the frame counter (release ordering).
+    pub fn bump_frame_counter(&self) {
         unsafe {
-            let ptr = self.shmem.as_ptr();
-            let pixel_dst = ptr.add(HEADER_SIZE);
-            std::ptr::copy_nonoverlapping(pixels.as_ptr(), pixel_dst, pixels.len());
-
-            // Increment frame counter AFTER writing pixels (release ordering).
-            let header = &*(ptr as *const ShmHeader);
+            let header = &*(self.shmem.as_ptr() as *const ShmHeader);
             header.frame_counter.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    /// Write the timeline semaphore counter value.
+    pub fn set_semaphore_counter(&self, value: u64) {
+        unsafe {
+            let header = &*(self.shmem.as_ptr() as *const ShmHeader);
+            header.semaphore_counter.store(value, Ordering::Release);
+        }
+    }
+
+    /// Write the GPU LUID so the layer can verify device matching.
+    pub fn set_gpu_luid(&self, luid: [u8; 8]) {
+        unsafe {
+            let header = &mut *(self.shmem.as_ptr() as *mut ShmHeader);
+            header.gpu_luid = luid;
         }
     }
 
@@ -122,76 +118,43 @@ impl ShmWriter {
     pub fn set_visible(&self, visible: bool) {
         unsafe {
             let header = &mut *(self.shmem.as_ptr() as *mut ShmHeader);
-            if visible {
-                header.flags |= 1;
-            } else {
-                header.flags &= !1;
-            }
+            if visible { header.flags |= 1; } else { header.flags &= !1; }
         }
     }
 }
 
-/// Reader side (layer process). Opens existing shared memory and reads frames.
-pub struct ShmReader {
-    shmem: Shmem,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl ShmReader {
-    /// Open an existing shared memory region by name.
-    pub fn open() -> Result<Self, ShmemError> {
-        let shmem = ShmemConf::new()
-            .os_id(SHM_NAME)
-            .open()?;
-        Ok(Self { shmem })
+    #[test]
+    fn test_shm_header_size() {
+        assert_eq!(std::mem::size_of::<ShmHeader>(), 80);
     }
 
-    /// Get a reference to the header.
-    pub fn header(&self) -> &ShmHeader {
-        unsafe { &*(self.shmem.as_ptr() as *const ShmHeader) }
-    }
-
-    /// Read the current frame counter (acquire ordering).
-    pub fn frame_counter(&self) -> u32 {
-        self.header().frame_counter.load(Ordering::Acquire)
-    }
-
-    /// Copy pixel data into the provided buffer.
-    pub fn read_pixels(&self, dst: &mut [u8]) {
-        let header = self.header();
-        let expected = (header.width * header.height * 4) as usize;
-        let copy_len = dst.len().min(expected);
-        unsafe {
-            let src = self.shmem.as_ptr().add(HEADER_SIZE);
-            std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), copy_len);
-        }
-    }
-
-    /// Get the pixel data pointer directly (for zero-copy staging buffer writes).
-    pub fn pixel_ptr(&self) -> *const u8 {
-        unsafe { self.shmem.as_ptr().add(HEADER_SIZE) }
-    }
-
-    pub fn width(&self) -> u32 {
-        self.header().width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.header().height
-    }
-
-    pub fn visible(&self) -> bool {
-        self.header().flags & 1 != 0
-    }
-
-    pub fn panel_pos(&self) -> [f32; 3] {
-        self.header().panel_pos
-    }
-
-    pub fn panel_orient(&self) -> [f32; 4] {
-        self.header().panel_orient
-    }
-
-    pub fn panel_size(&self) -> [f32; 2] {
-        self.header().panel_size
+    #[test]
+    fn test_shm_header_field_offsets() {
+        assert_eq!(memoffset_of!(ShmHeader, frame_counter), 0);
+        assert_eq!(memoffset_of!(ShmHeader, width), 4);
+        assert_eq!(memoffset_of!(ShmHeader, height), 8);
+        assert_eq!(memoffset_of!(ShmHeader, flags), 12);
+        assert_eq!(memoffset_of!(ShmHeader, panel_pos), 16);
+        assert_eq!(memoffset_of!(ShmHeader, panel_orient), 28);
+        assert_eq!(memoffset_of!(ShmHeader, panel_size), 44);
+        assert_eq!(memoffset_of!(ShmHeader, semaphore_counter), 56); // 4 bytes padding after panel_size for u64 alignment
+        assert_eq!(memoffset_of!(ShmHeader, gpu_luid), 64);
     }
 }
+
+/// Compile-time offset-of macro (no external dependency).
+#[cfg(test)]
+macro_rules! memoffset_of {
+    ($type:ty, $field:ident) => {{
+        let uninit = std::mem::MaybeUninit::<$type>::uninit();
+        let base = uninit.as_ptr() as usize;
+        let field = unsafe { std::ptr::addr_of!((*uninit.as_ptr()).$field) } as usize;
+        field - base
+    }};
+}
+#[cfg(test)]
+use memoffset_of;

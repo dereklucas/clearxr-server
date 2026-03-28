@@ -211,6 +211,9 @@ struct NextDispatch {
     locate_space: xr::pfn::LocateSpace,
     get_action_state_float: xr::pfn::GetActionStateFloat,
     get_action_state_vector2f: xr::pfn::GetActionStateVector2f,
+    /// Optional: xrCreateVulkanDeviceKHR (from XR_KHR_vulkan_enable2).
+    /// Used to inject VK_KHR_external_memory_win32 into the host app's device.
+    create_vulkan_device_khr: Option<xr::pfn::CreateVulkanDeviceKHR>,
 }
 
 // ============================================================
@@ -703,6 +706,17 @@ unsafe fn load_fn<T>(
     )))
 }
 
+/// Try to load a function pointer (returns None if not available).
+unsafe fn try_load_fn<T: Copy>(
+    gpa: xr::pfn::GetInstanceProcAddr,
+    instance: xr::Instance,
+    name: &[u8],
+) -> Option<T> {
+    let mut fp: Option<xr::pfn::VoidFunction> = None;
+    (gpa)(instance, name.as_ptr() as *const c_char, &mut fp);
+    fp.map(|_| std::mem::transmute_copy(&fp))
+}
+
 unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instance) -> NextDispatch {
     NextDispatch {
         get_instance_proc_addr: gpa,
@@ -733,6 +747,7 @@ unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instan
         locate_space: load_fn(gpa, instance, b"xrLocateSpace\0"),
         get_action_state_float: load_fn(gpa, instance, b"xrGetActionStateFloat\0"),
         get_action_state_vector2f: load_fn(gpa, instance, b"xrGetActionStateVector2f\0"),
+        create_vulkan_device_khr: try_load_fn(gpa, instance, b"xrCreateVulkanDeviceKHR\0"),
     }
 }
 
@@ -853,6 +868,7 @@ unsafe extern "system" fn layer_get_instance_proc_addr(
     intercept!(b"xrStopHapticFeedback", hook_stop_haptic_feedback as xr::pfn::StopHapticFeedback);
     intercept!(b"xrCreateActionSpace", hook_create_action_space as xr::pfn::CreateActionSpace);
     intercept!(b"xrLocateSpace", hook_locate_space as xr::pfn::LocateSpace);
+    intercept!(b"xrCreateVulkanDeviceKHR", hook_create_vulkan_device_khr as xr::pfn::CreateVulkanDeviceKHR);
     // xrGetActionStateFloat and xrGetActionStateVector2f are NOT intercepted.
     // We actively query these values in poll_opaque_and_update_overlay instead.
 
@@ -1134,6 +1150,92 @@ unsafe extern "system" fn hook_get_system(
             }
         }
     }
+    result
+}
+
+/// Extensions we inject into the host app's VkDevice for shared Vulkan image support.
+const REQUIRED_VK_DEVICE_EXTENSIONS: &[&[u8]] = &[
+    b"VK_KHR_external_memory\0",
+    b"VK_KHR_external_memory_win32\0",
+    b"VK_KHR_external_semaphore\0",
+    b"VK_KHR_external_semaphore_win32\0",
+    b"VK_KHR_timeline_semaphore\0",
+];
+
+/// Hook xrCreateVulkanDeviceKHR to inject external memory/semaphore extensions.
+/// This allows the layer to import shared Vulkan images from the dashboard process.
+unsafe extern "system" fn hook_create_vulkan_device_khr(
+    instance: xr::Instance,
+    create_info: *const xr::VulkanDeviceCreateInfoKHR,
+    vulkan_device: *mut xr::platform::VkDevice,
+    vulkan_result: *mut xr::platform::VkResult,
+) -> xr::Result {
+    let next = match NEXT.get() {
+        Some(n) => *n,
+        None => return xr::Result::ERROR_HANDLE_INVALID,
+    };
+    let real_fn = match next.create_vulkan_device_khr {
+        Some(f) => f,
+        None => return xr::Result::ERROR_FUNCTION_UNSUPPORTED,
+    };
+
+    let ci = &*create_info;
+    let vk_ci = ci.vulkan_create_info as *const ash::vk::DeviceCreateInfo;
+    if vk_ci.is_null() {
+        return real_fn(instance, create_info, vulkan_device, vulkan_result);
+    }
+
+    let orig_ci = &*vk_ci;
+
+    // Collect existing extension names
+    let existing_count = orig_ci.enabled_extension_count as usize;
+    let mut ext_names: Vec<*const c_char> = if existing_count > 0 && !orig_ci.pp_enabled_extension_names.is_null() {
+        std::slice::from_raw_parts(orig_ci.pp_enabled_extension_names, existing_count).to_vec()
+    } else {
+        Vec::new()
+    };
+
+    // Append our required extensions (skip duplicates)
+    for &required in REQUIRED_VK_DEVICE_EXTENSIONS {
+        let required_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(required);
+        let already_present = ext_names.iter().any(|&name| {
+            std::ffi::CStr::from_ptr(name) == required_cstr
+        });
+        if !already_present {
+            ext_names.push(required.as_ptr() as *const c_char);
+        }
+    }
+
+    layer_log!(info,
+        "[ClearXR Layer] Injecting {} Vulkan device extensions ({} total) for shared image support.",
+        ext_names.len() - existing_count, ext_names.len()
+    );
+
+    // Build modified VkDeviceCreateInfo
+    let mut modified_vk_ci = orig_ci.clone();
+    modified_vk_ci.enabled_extension_count = ext_names.len() as u32;
+    modified_vk_ci.pp_enabled_extension_names = ext_names.as_ptr();
+
+    // Build modified XrVulkanDeviceCreateInfoKHR
+    let modified_ci = xr::VulkanDeviceCreateInfoKHR {
+        ty: ci.ty,
+        next: ci.next,
+        system_id: ci.system_id,
+        create_flags: ci.create_flags,
+        pfn_get_instance_proc_addr: ci.pfn_get_instance_proc_addr,
+        vulkan_physical_device: ci.vulkan_physical_device,
+        vulkan_create_info: &modified_vk_ci as *const ash::vk::DeviceCreateInfo as *const std::ffi::c_void,
+        vulkan_allocator: ci.vulkan_allocator,
+    };
+
+    let result = real_fn(instance, &modified_ci, vulkan_device, vulkan_result);
+
+    if result == xr::Result::SUCCESS {
+        layer_log!(info, "[ClearXR Layer] VkDevice created with shared image extensions.");
+    } else {
+        layer_log!(warn, "[ClearXR Layer] xrCreateVulkanDeviceKHR failed: {:?}", result);
+    }
+
     result
 }
 

@@ -193,7 +193,11 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
         scroll_delta = 0.0; // consumed
 
         match result {
-            Ok(Some(pixels)) => shm.write_frame(pixels),
+            Ok(Some(_pixels)) => {
+                // TODO: Once shared Vulkan image is wired up, this path goes away.
+                // For now, bump the frame counter to signal the layer.
+                shm.bump_frame_counter();
+            }
             Ok(None) => {}
             Err(e) => log::warn!("[ClearXR Dashboard] Render failed: {}", e),
         }
@@ -258,6 +262,16 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
                     log::info!("[ClearXR Dashboard] Config saved.");
                 }
             }
+        }
+
+        // Frame timing diagnostic (periodic)
+        static FRAME_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let fc = FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if fc % 200 == 0 {
+            log::info!(
+                "[ClearXR Dashboard] Frame {} took {:.1}ms",
+                fc, frame_start.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         // Sleep to target framerate

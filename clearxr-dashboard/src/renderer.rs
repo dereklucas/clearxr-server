@@ -408,12 +408,21 @@ impl HeadlessRenderer {
             .values()
             .any(|vo| vo.repaint_delay == std::time::Duration::ZERO);
 
-        // 4. Texture uploads (opt-level=3 for egui-ash-renderer makes this fast)
+        // 4. Texture uploads — only font atlas now (desktop texture bypasses this)
         let textures_delta = full_output.textures_delta;
         if !textures_delta.set.is_empty() {
+            let t0 = std::time::Instant::now();
+            let count = textures_delta.set.len();
             self.egui_renderer
                 .set_textures(self.queue, self.command_pool, &textures_delta.set)
                 .map_err(|e| anyhow::anyhow!("set_textures failed: {e}"))?;
+            let elapsed = t0.elapsed();
+            if elapsed.as_millis() > 2 {
+                log::warn!(
+                    "[ClearXR Dashboard] set_textures took {:.1}ms for {} textures",
+                    elapsed.as_secs_f64() * 1000.0, count
+                );
+            }
         }
 
         // 5. Skip GPU work if no repaint needed (but still return pending readback)
