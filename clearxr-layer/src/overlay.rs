@@ -354,10 +354,15 @@ impl DashboardOverlay {
                 self.pose.position.y = new_center[1];
                 self.pose.position.z = new_center[2];
 
-                // Keep orientation unchanged — identity faces -Z which is correct
-                // for panels positioned in front of the user. Computing yaw from
-                // the head-to-panel vector has sign convention issues that cause
-                // the panel to flip 180° and become invisible.
+                // Orient panel to face the user. OpenXR quad -Z is the front face.
+                // We need -Z to point from panel toward head, so rotate by the yaw
+                // of the (head - panel) direction vector.
+                let to_head = sub(head, new_center);
+                let yaw = to_head[0].atan2(-to_head[2]); // atan2(x, -z) for -Z forward convention
+                let half = yaw / 2.0;
+                self.pose.orientation = xr::Quaternionf {
+                    x: 0.0, y: half.sin(), z: 0.0, w: half.cos(),
+                };
 
                 // Scale size proportionally with distance
                 let dist_scale = new_dist / self.grab_initial_distance.max(0.1);
@@ -458,6 +463,7 @@ impl DashboardOverlay {
         }
     }
 
+    /// Front face (dashboard content).
     pub fn quad_layer(&self) -> xr::CompositionLayerQuad {
         xr::CompositionLayerQuad {
             ty: xr::CompositionLayerQuad::TYPE,
@@ -477,6 +483,44 @@ impl DashboardOverlay {
                 image_array_index: 0,
             },
             pose: self.pose,
+            size: self.size,
+        }
+    }
+
+    /// Back face — rotated 180° around Y so it's visible from behind.
+    /// Shows the same swapchain content (mirrored) so you can find the panel.
+    pub fn backface_quad_layer(&self) -> xr::CompositionLayerQuad {
+        // For yaw-only quaternion (0, sin(θ/2), 0, cos(θ/2)):
+        // Adding π to θ: sin((θ+π)/2) = cos(θ/2), cos((θ+π)/2) = -sin(θ/2)
+        let q = self.pose.orientation;
+        let back_orient = xr::Quaternionf {
+            x: 0.0,
+            y: q.w,    // cos(θ/2) → sin((θ+π)/2)
+            z: 0.0,
+            w: -q.y,   // sin(θ/2) → -cos((θ+π)/2) → but cos = -sin, so w = -sin(θ/2)
+        };
+
+        xr::CompositionLayerQuad {
+            ty: xr::CompositionLayerQuad::TYPE,
+            next: ptr::null(),
+            layer_flags: xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
+            space: self.space,
+            eye_visibility: xr::EyeVisibility::BOTH,
+            sub_image: xr::SwapchainSubImage {
+                swapchain: self.swapchain,
+                image_rect: xr::Rect2Di {
+                    offset: xr::Offset2Di { x: 0, y: 0 },
+                    extent: xr::Extent2Di {
+                        width: self.width as i32,
+                        height: self.height as i32,
+                    },
+                },
+                image_array_index: 0,
+            },
+            pose: xr::Posef {
+                orientation: back_orient,
+                position: self.pose.position,
+            },
             size: self.size,
         }
     }

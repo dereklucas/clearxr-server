@@ -283,16 +283,16 @@ impl LayerDashboard {
                         // Active tab indicator — visionOS-style pill highlight behind active tab
                         if is_active {
                             let r = btn_response.rect;
-                            let pill = r.shrink2(egui::vec2(4.0 * s, 3.0 * s));
+                            let pill = r.shrink2(egui::vec2(6.0 * s, 4.0 * s));
                             ui.painter().rect_filled(
                                 pill,
                                 pill.height() / 2.0,
-                                egui::Color32::from_rgba_premultiplied(74, 158, 255, 50),
+                                egui::Color32::from_rgba_premultiplied(74, 158, 255, 110),
                             );
                             ui.painter().rect_stroke(
                                 pill,
                                 pill.height() / 2.0,
-                                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(74, 158, 255, 100)),
+                                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 180, 255, 180)),
                                 epaint::StrokeKind::Inside,
                             );
                         }
@@ -541,18 +541,20 @@ fn render_launcher_content(
         });
         ui.add_space(16.0 * s);
         let search_width = (ui.available_width() * 0.45).min(320.0 * s);
+        let search_height = 34.0 * s;
+        let search_cr = search_height / 2.0;
         let search_response = ui.add_sized(
-            egui::vec2(search_width, 32.0 * s),
+            egui::vec2(search_width, search_height),
             egui::TextEdit::singleline(search_buf)
                 .hint_text("Search games...")
                 .text_color(egui::Color32::WHITE)
-                .background_color(egui::Color32::from_rgb(30, 30, 55)),
+                .background_color(egui::Color32::from_rgba_premultiplied(20, 20, 42, 200)),
         );
-        // Draw border around search field
+        // Rounded inset border around search field
         ui.painter().rect_stroke(
             search_response.rect,
-            4.0 * s,
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 40)),
+            search_cr,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 28)),
             epaint::StrokeKind::Inside,
         );
         debug_rect(ui, search_response.rect, egui::Color32::from_rgb(255, 0, 255), dbg);
@@ -604,8 +606,8 @@ fn render_launcher_content(
             let min_card_width = 200.0 * s;
             let cols = ((available_width + spacing) / (min_card_width + spacing)).max(1.0) as usize;
             let card_width = (available_width - spacing * (cols as f32 - 1.0)) / cols as f32;
-            let art_height = 110.0 * s;
-            let card_height = 165.0 * s;
+            let art_height = (card_width / 2.15).round();
+            let card_height = art_height + 42.0 * s;
 
             egui::Grid::new("game_grid")
                 .min_col_width(card_width)
@@ -633,11 +635,11 @@ fn render_launcher_content(
                                 let cr = 8.0 * s;
                                 ui.painter().rect_filled(rect, cr, bg);
 
-                                // Card border
+                                // Card border — visible at rest, accented on hover
                                 let stroke_color = if is_hovered {
-                                    egui::Color32::from_rgba_premultiplied(74, 158, 255, 120)
+                                    egui::Color32::from_rgba_premultiplied(90, 170, 255, 160)
                                 } else {
-                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 32)
+                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 55)
                                 };
                                 ui.painter().rect_stroke(rect, cr, egui::Stroke::new(1.0, stroke_color), epaint::StrokeKind::Inside);
 
@@ -738,22 +740,23 @@ fn render_launcher_content(
                                     egui::Color32::from_rgba_premultiplied(22, 22, 44, 170),
                                 );
 
-                                // Title
-                                ui.add_space(art_height + 12.0 * s);
-                                let title_rect = ui.available_rect_before_wrap();
-                                debug_rect(ui, title_rect, egui::Color32::YELLOW, dbg);
-                                ui.horizontal(|ui| {
-                                    ui.add_space(10.0 * s);
-                                    ui.set_max_width(rect.width() - 20.0 * s);
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&game.name)
-                                                .size(14.0 * s)
-                                                .color(egui::Color32::from_rgb(195, 198, 215)),
-                                        )
-                                        .truncate(),
-                                    );
-                                });
+                                // Title — vertically centered within the footer strip
+                                debug_rect(ui, footer_rect, egui::Color32::YELLOW, dbg);
+                                let title_inset = footer_rect.shrink2(egui::vec2(12.0 * s, 0.0));
+                                let galley = ui.painter().layout_no_wrap(
+                                    game.name.clone(),
+                                    egui::FontId::proportional(13.0 * s),
+                                    egui::Color32::from_rgb(210, 212, 225),
+                                );
+                                let text_pos = egui::pos2(
+                                    title_inset.min.x,
+                                    footer_rect.center().y - galley.size().y * 0.5,
+                                );
+                                ui.painter().with_clip_rect(title_inset).galley(
+                                    text_pos,
+                                    galley,
+                                    egui::Color32::from_rgb(210, 212, 225),
+                                );
                             },
                         );
 

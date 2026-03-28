@@ -1557,14 +1557,14 @@ unsafe extern "system" fn hook_end_frame(
                 if let Err(err) = overlay.render_frame(&next) {
                     layer_log!(warn, "[ClearXR Layer] Dashboard overlay render failed: {}", err);
                 }
-                Some(overlay.quad_layer())
+                Some((overlay.quad_layer(), overlay.backface_quad_layer()))
             }
             _ => None,
         }
         // LAYER mutex dropped here
     };
 
-    let Some(overlay_quad) = overlay_quad else {
+    let Some((front_quad, back_quad)) = overlay_quad else {
         return (next.end_frame)(session, frame_end_info);
     };
 
@@ -1575,15 +1575,18 @@ unsafe extern "system" fn hook_end_frame(
     } else {
         end_info.layer_count as usize
     };
-    // Stack array: up to 8 base layers + 1 overlay. Most apps use 1-4.
-    let mut layers: [*const xr::CompositionLayerBaseHeader; 9] =
-        [std::ptr::null(); 9];
-    let total = (base_count + 1).min(9);
+    // Stack array: up to 8 base layers + 2 overlay quads (front + back). Most apps use 1-4.
+    let mut layers: [*const xr::CompositionLayerBaseHeader; 10] =
+        [std::ptr::null(); 10];
+    let total = (base_count + 2).min(10);
     for i in 0..base_count.min(8) {
         layers[i] = *end_info.layers.add(i);
     }
-    layers[base_count.min(8)] =
-        &overlay_quad as *const xr::CompositionLayerQuad as *const xr::CompositionLayerBaseHeader;
+    let front_idx = base_count.min(8);
+    layers[front_idx] =
+        &front_quad as *const xr::CompositionLayerQuad as *const xr::CompositionLayerBaseHeader;
+    layers[front_idx + 1] =
+        &back_quad as *const xr::CompositionLayerQuad as *const xr::CompositionLayerBaseHeader;
 
     let wrapped_end_info = xr::FrameEndInfo {
         ty: end_info.ty,
