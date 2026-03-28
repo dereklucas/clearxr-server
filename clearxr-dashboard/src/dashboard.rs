@@ -246,7 +246,7 @@ impl LayerDashboard {
                 let bar_rect = ui.max_rect();
                 ui.painter().line_segment(
                     [bar_rect.left_top(), bar_rect.right_top()],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 18)),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 32)),
                 );
                 ui.horizontal_centered(|ui| {
                     // Build tab list — CurrentApp only shown when an app is running
@@ -274,6 +274,9 @@ impl LayerDashboard {
                                 Some(f) => f.to_uppercase().to_string() + &c.as_str().to_lowercase(),
                             }
                         };
+                        // Reserve paint slots BEFORE the button so the pill renders behind text
+                        let pill_fill_idx = ui.painter().add(egui::Shape::Noop);
+                        let pill_stroke_idx = ui.painter().add(egui::Shape::Noop);
                         let btn = egui::Button::new(
                             egui::RichText::new(&display_label).size(13.0 * s).color(color),
                         )
@@ -284,16 +287,22 @@ impl LayerDashboard {
                         if is_active {
                             let r = btn_response.rect;
                             let pill = r.shrink2(egui::vec2(6.0 * s, 4.0 * s));
-                            ui.painter().rect_filled(
-                                pill,
-                                pill.height() / 2.0,
-                                egui::Color32::from_rgba_premultiplied(74, 158, 255, 110),
+                            ui.painter().set(
+                                pill_fill_idx,
+                                egui::Shape::rect_filled(
+                                    pill,
+                                    pill.height() / 2.0,
+                                    egui::Color32::from_rgba_premultiplied(74, 158, 255, 110),
+                                ),
                             );
-                            ui.painter().rect_stroke(
-                                pill,
-                                pill.height() / 2.0,
-                                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 180, 255, 180)),
-                                epaint::StrokeKind::Inside,
+                            ui.painter().set(
+                                pill_stroke_idx,
+                                egui::Shape::rect_stroke(
+                                    pill,
+                                    pill.height() / 2.0,
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 180, 255, 180)),
+                                    epaint::StrokeKind::Inside,
+                                ),
                             );
                         }
                         debug_rect(ui, btn_response.rect, egui::Color32::from_rgb(255, 128, 0), dbg);
@@ -321,18 +330,18 @@ impl LayerDashboard {
         let focused_before_keyboard = ctx.memory(|m| m.focused());
         if kb_visible {
             egui::TopBottomPanel::bottom("keyboard")
-                .exact_height(200.0)
+                .exact_height(200.0 * s)
                 .frame(
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgba_premultiplied(24, 24, 48, 240))
-                        .inner_margin(egui::Margin::symmetric(8, 4)),
+                        .inner_margin(egui::Margin::symmetric((8.0 * s) as i8, (4.0 * s) as i8)),
                 )
                 .show(ctx, |ui| {
                     let rows: &[&str] =
                         &["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
                     for row in rows {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.spacing_mut().item_spacing.x = 4.0 * s;
                             for ch in row.chars() {
                                 let label = if kb_shift {
                                     ch.to_uppercase().to_string()
@@ -340,9 +349,9 @@ impl LayerDashboard {
                                     ch.to_string()
                                 };
                                 let btn = ui.add_sized(
-                                    egui::vec2(36.0, 36.0),
+                                    egui::vec2(36.0 * s, 36.0 * s),
                                     egui::Button::new(
-                                        egui::RichText::new(&label).size(16.0).monospace(),
+                                        egui::RichText::new(&label).size(16.0 * s).monospace(),
                                     ),
                                 );
                                 if btn.clicked() {
@@ -354,11 +363,11 @@ impl LayerDashboard {
                     }
                     // Bottom row: shift, space, backspace, hide
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = 4.0 * s;
                         if ui
                             .add_sized(
-                                egui::vec2(60.0, 36.0),
-                                egui::Button::new(egui::RichText::new("Shift").size(14.0)),
+                                egui::vec2(60.0 * s, 36.0 * s),
+                                egui::Button::new(egui::RichText::new("Shift").size(14.0 * s)),
                             )
                             .clicked()
                         {
@@ -366,8 +375,8 @@ impl LayerDashboard {
                         }
                         if ui
                             .add_sized(
-                                egui::vec2(200.0, 36.0),
-                                egui::Button::new(egui::RichText::new("SPACE").size(14.0)),
+                                egui::vec2(200.0 * s, 36.0 * s),
+                                egui::Button::new(egui::RichText::new("SPACE").size(14.0 * s)),
                             )
                             .clicked()
                         {
@@ -375,8 +384,8 @@ impl LayerDashboard {
                         }
                         if ui
                             .add_sized(
-                                egui::vec2(60.0, 36.0),
-                                egui::Button::new(egui::RichText::new("Bksp").size(14.0)),
+                                egui::vec2(60.0 * s, 36.0 * s),
+                                egui::Button::new(egui::RichText::new("Bksp").size(14.0 * s)),
                             )
                             .clicked()
                         {
@@ -384,8 +393,8 @@ impl LayerDashboard {
                         }
                         if ui
                             .add_sized(
-                                egui::vec2(60.0, 36.0),
-                                egui::Button::new(egui::RichText::new("Hide").size(14.0)),
+                                egui::vec2(60.0 * s, 36.0 * s),
+                                egui::Button::new(egui::RichText::new("Hide").size(14.0 * s)),
                             )
                             .clicked()
                         {
@@ -404,23 +413,25 @@ impl LayerDashboard {
         // ---- Notification overlay ----
         if let Some(notif) = notifications.visible().first() {
             egui::Area::new(egui::Id::new("notification"))
-                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0 * s, 12.0 * s))
                 .show(ctx, |ui| {
+                    ui.set_max_width(280.0 * s);
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgba_premultiplied(16, 24, 48, 230))
-                        .corner_radius(6.0)
-                        .inner_margin(8.0)
+                        .corner_radius(8.0 * s)
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)))
+                        .inner_margin(egui::Margin::symmetric((12.0 * s) as i8, (8.0 * s) as i8))
                         .show(ui, |ui| {
                             ui.label(
                                 egui::RichText::new(&notif.title)
-                                    .size(14.0)
+                                    .size(14.0 * s)
                                     .color(egui::Color32::WHITE)
                                     .strong(),
                             );
                             if !notif.body.is_empty() {
                                 ui.label(
                                     egui::RichText::new(&notif.body)
-                                        .size(11.0)
+                                        .size(11.0 * s)
                                         .color(egui::Color32::from_rgb(180, 180, 200)),
                                 );
                             }
@@ -526,42 +537,68 @@ fn render_launcher_content(
     // Header
     ui.add_space(8.0 * s);
     let header_response = ui.horizontal(|ui| {
+        // Ensure row is tall enough to encompass the painted subtitle beneath the title
+        ui.set_min_height(40.0 * s);
         debug_rect(ui, ui.available_rect_before_wrap(), egui::Color32::from_rgb(0, 255, 255), dbg);
-        ui.vertical(|ui| {
-            ui.heading(
-                egui::RichText::new("ClearXR")
-                    .size(26.0 * s)
-                    .color(egui::Color32::from_rgb(74, 158, 255)),
-            );
-            ui.label(
-                egui::RichText::new("Game Library")
-                    .size(12.0 * s)
-                    .color(egui::Color32::from_rgb(145, 150, 178)),
-            );
-        });
+        let title_response = ui.heading(
+            egui::RichText::new("ClearXR")
+                .size(26.0 * s)
+                .color(egui::Color32::from_rgb(74, 158, 255)),
+        );
+        // Paint subtitle below the title
+        let subtitle_pos = egui::pos2(title_response.rect.left(), title_response.rect.bottom() + 2.0 * s);
+        ui.painter().text(
+            subtitle_pos,
+            egui::Align2::LEFT_TOP,
+            "Game Library",
+            egui::FontId::proportional(12.0 * s),
+            egui::Color32::from_rgb(145, 150, 178),
+        );
         ui.add_space(16.0 * s);
         let search_width = (ui.available_width() * 0.45).min(320.0 * s);
         let search_height = 34.0 * s;
         let search_cr = search_height / 2.0;
+        // Reserve paint slots so pill fill + stroke render behind the text input
+        let search_fill_idx = ui.painter().add(egui::Shape::Noop);
+        let search_stroke_idx = ui.painter().add(egui::Shape::Noop);
         let search_response = ui.add_sized(
             egui::vec2(search_width, search_height),
             egui::TextEdit::singleline(search_buf)
                 .hint_text("Search games...")
                 .text_color(egui::Color32::WHITE)
-                .background_color(egui::Color32::from_rgba_premultiplied(20, 20, 42, 200)),
+                .background_color(egui::Color32::TRANSPARENT)
+                .margin(egui::vec2(14.0 * s, 8.0 * s)),
         );
-        // Rounded inset border around search field
-        ui.painter().rect_stroke(
-            search_response.rect,
-            search_cr,
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 28)),
-            epaint::StrokeKind::Inside,
+        // Pill background + border — painted via reserved slots so fill matches stroke rounding
+        let search_focused = search_response.has_focus();
+        ui.painter().set(
+            search_fill_idx,
+            egui::Shape::rect_filled(
+                search_response.rect,
+                search_cr,
+                egui::Color32::from_rgba_premultiplied(20, 20, 42, 200),
+            ),
+        );
+        let search_border_color = if search_focused {
+            egui::Color32::from_rgba_premultiplied(74, 158, 255, 180)
+        } else {
+            egui::Color32::from_rgba_premultiplied(255, 255, 255, 28)
+        };
+        let search_border_width = if search_focused { 1.5 } else { 1.0 };
+        ui.painter().set(
+            search_stroke_idx,
+            egui::Shape::rect_stroke(
+                search_response.rect,
+                search_cr,
+                egui::Stroke::new(search_border_width, search_border_color),
+                epaint::StrokeKind::Inside,
+            ),
         );
         debug_rect(ui, search_response.rect, egui::Color32::from_rgb(255, 0, 255), dbg);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{} games", games.len()))
-                    .size(13.0 * s)
+                    .size(11.0 * s)
                     .color(egui::Color32::from_rgb(110, 114, 140)),
             );
         });
@@ -625,6 +662,9 @@ fn render_launcher_content(
                             |ui| {
                                 let rect = ui.available_rect_before_wrap();
                                 let is_hovered = ui.rect_contains_pointer(rect);
+                                if is_hovered {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
 
                                 // Card background
                                 let bg = if is_hovered {
@@ -637,9 +677,9 @@ fn render_launcher_content(
 
                                 // Card border — visible at rest, accented on hover
                                 let stroke_color = if is_hovered {
-                                    egui::Color32::from_rgba_premultiplied(90, 170, 255, 160)
+                                    egui::Color32::from_rgba_premultiplied(90, 170, 255, 130)
                                 } else {
-                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 55)
+                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)
                                 };
                                 ui.painter().rect_stroke(rect, cr, egui::Stroke::new(1.0, stroke_color), epaint::StrokeKind::Inside);
 
@@ -696,7 +736,7 @@ fn render_launcher_content(
                                         egui::Align2::CENTER_CENTER,
                                         &initials,
                                         egui::FontId::proportional(24.0 * s),
-                                        egui::Color32::from_white_alpha(60),
+                                        egui::Color32::from_white_alpha(140),
                                     );
                                 }
 
@@ -737,25 +777,41 @@ fn render_launcher_content(
                                 ui.painter().rect_filled(
                                     footer_rect,
                                     bottom_rounding,
-                                    egui::Color32::from_rgba_premultiplied(22, 22, 44, 170),
+                                    egui::Color32::from_rgba_premultiplied(16, 16, 36, 220),
+                                );
+                                // Hairline separator between art and footer
+                                ui.painter().line_segment(
+                                    [footer_rect.left_top(), footer_rect.right_top()],
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 36)),
                                 );
 
-                                // Title — vertically centered within the footer strip
+                                // Title — vertically centered, ellipsis-truncated to footer width
                                 debug_rect(ui, footer_rect, egui::Color32::YELLOW, dbg);
                                 let title_inset = footer_rect.shrink2(egui::vec2(12.0 * s, 0.0));
-                                let galley = ui.painter().layout_no_wrap(
+                                let title_color = egui::Color32::from_rgb(230, 232, 242);
+                                let mut job = egui::text::LayoutJob::single_section(
                                     game.name.clone(),
-                                    egui::FontId::proportional(13.0 * s),
-                                    egui::Color32::from_rgb(210, 212, 225),
+                                    egui::TextFormat {
+                                        font_id: egui::FontId::proportional(13.0 * s),
+                                        color: title_color,
+                                        ..Default::default()
+                                    },
                                 );
+                                job.wrap = egui::text::TextWrapping {
+                                    max_width: title_inset.width(),
+                                    max_rows: 1,
+                                    overflow_character: Some('\u{2026}'),
+                                    ..Default::default()
+                                };
+                                let galley = ui.fonts(|f| f.layout_job(job));
                                 let text_pos = egui::pos2(
                                     title_inset.min.x,
                                     footer_rect.center().y - galley.size().y * 0.5,
                                 );
-                                ui.painter().with_clip_rect(title_inset).galley(
+                                ui.painter().galley(
                                     text_pos,
                                     galley,
-                                    egui::Color32::from_rgb(210, 212, 225),
+                                    title_color,
                                 );
                             },
                         );
@@ -765,6 +821,8 @@ fn render_launcher_content(
                         }
                     }
                 });
+            // Bottom breathing room so last row doesn't crowd the tab bar
+            ui.add_space(24.0 * s);
         });
     }
 }
