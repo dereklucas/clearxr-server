@@ -133,6 +133,8 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
     let mut trigger = false;
     let mut secondary = false;
     let mut scroll_delta = 0.0f32;
+    let mut prev_trigger = false;
+    let mut prev_secondary = false;
 
     let target_interval = std::time::Duration::from_micros(13_889); // ~72fps
 
@@ -187,6 +189,52 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
             Ok(None) => {}
             Err(e) => log::warn!("[ClearXR Dashboard] Render failed: {}", e),
         }
+
+        // Mouse injection — when Desktop tab is active, map panel UV to screen
+        // coordinates and inject native mouse events (same pattern as Space).
+        if dashboard.is_desktop_active() {
+            if let Some(ref sc) = screen_capture {
+                if let (Some((pu, pv)), Some(img_rect)) = (pointer_uv, dashboard.desktop_image_rect()) {
+                    // Convert panel UV to pixel coords within the egui canvas
+                    let px = pu * DASHBOARD_WIDTH as f32;
+                    let py = pv * DASHBOARD_HEIGHT as f32;
+
+                    // Check if pointer is within the desktop image rect
+                    if px >= img_rect.min.x && px <= img_rect.max.x
+                        && py >= img_rect.min.y && py <= img_rect.max.y
+                    {
+                        // Normalize to [0,1] within the image (= screen UV)
+                        let screen_u = (px - img_rect.min.x) / img_rect.width();
+                        let screen_v = (py - img_rect.min.y) / img_rect.height();
+
+                        sc.inject_mouse_move(screen_u, screen_v);
+
+                        // Trigger → left click (edge-detect)
+                        if trigger && !prev_trigger {
+                            sc.inject_mouse_down(screen_u, screen_v);
+                        } else if !trigger && prev_trigger {
+                            sc.inject_mouse_up();
+                        }
+                        // Grip → right click (edge-detect)
+                        if secondary && !prev_secondary {
+                            sc.inject_right_mouse_down(screen_u, screen_v);
+                        } else if !secondary && prev_secondary {
+                            sc.inject_right_mouse_up();
+                        }
+                    }
+                } else {
+                    // Pointer left — release any held buttons
+                    if prev_trigger {
+                        sc.inject_mouse_up();
+                    }
+                    if prev_secondary {
+                        sc.inject_right_mouse_up();
+                    }
+                }
+            }
+        }
+        prev_trigger = trigger;
+        prev_secondary = secondary;
 
         // Handle actions
         for action in actions {

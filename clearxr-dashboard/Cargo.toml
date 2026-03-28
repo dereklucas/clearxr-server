@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 directories = "6"
 shared_memory = "0.12"
+enigo = "0.6"
 log = "0.4"
 anyhow = "1"
 env_logger = "0.11"

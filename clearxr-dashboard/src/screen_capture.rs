@@ -24,6 +24,9 @@ pub struct ScreenCapture {
     thread: Option<std::thread::JoinHandle<()>>,
     /// Cache the latest frame for the main thread
     latest_frame: Option<CaptureFrame>,
+    /// Native screen dimensions (for mouse injection coordinate mapping)
+    screen_width: u32,
+    screen_height: u32,
 }
 
 impl ScreenCapture {
@@ -52,6 +55,8 @@ impl ScreenCapture {
             keep_running,
             thread: Some(thread),
             latest_frame: None,
+            screen_width,
+            screen_height,
         })
     }
 
@@ -73,6 +78,67 @@ impl ScreenCapture {
     /// Take ownership of the latest frame (avoids cloning the pixel buffer).
     pub fn take_latest_frame(&mut self) -> Option<CaptureFrame> {
         self.latest_frame.take()
+    }
+
+    pub fn screen_width(&self) -> u32 { self.screen_width }
+    pub fn screen_height(&self) -> u32 { self.screen_height }
+
+    /// Move the OS mouse cursor to screen position corresponding to UV [0,1].
+    pub fn inject_mouse_move(&self, u: f32, v: f32) {
+        use enigo::{Enigo, Mouse, Settings, Coordinate};
+        let x = (u * self.screen_width as f32) as i32;
+        let y = (v * self.screen_height as f32) as i32;
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+        }
+    }
+
+    /// Press the left mouse button at (u,v).
+    pub fn inject_mouse_down(&self, u: f32, v: f32) {
+        use enigo::{Enigo, Mouse, Settings, Coordinate, Button, Direction};
+        let x = (u * self.screen_width as f32) as i32;
+        let y = (v * self.screen_height as f32) as i32;
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+            let _ = enigo.button(Button::Left, Direction::Press);
+        }
+    }
+
+    /// Release the left mouse button.
+    pub fn inject_mouse_up(&self) {
+        use enigo::{Enigo, Mouse, Settings, Button, Direction};
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.button(Button::Left, Direction::Release);
+        }
+    }
+
+    /// Press the right mouse button at (u,v).
+    pub fn inject_right_mouse_down(&self, u: f32, v: f32) {
+        use enigo::{Enigo, Mouse, Settings, Coordinate, Button, Direction};
+        let x = (u * self.screen_width as f32) as i32;
+        let y = (v * self.screen_height as f32) as i32;
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.move_mouse(x, y, Coordinate::Abs);
+            let _ = enigo.button(Button::Right, Direction::Press);
+        }
+    }
+
+    /// Release the right mouse button.
+    pub fn inject_right_mouse_up(&self) {
+        use enigo::{Enigo, Mouse, Settings, Button, Direction};
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            let _ = enigo.button(Button::Right, Direction::Release);
+        }
+    }
+
+    /// Scroll the mouse wheel.
+    pub fn inject_scroll(&self, dy: i32) {
+        use enigo::{Enigo, Mouse, Settings, Axis};
+        if let Ok(mut enigo) = Enigo::new(&Settings::default()) {
+            if dy != 0 {
+                let _ = enigo.scroll(dy, Axis::Vertical);
+            }
+        }
     }
 }
 

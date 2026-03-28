@@ -44,6 +44,9 @@ pub struct LayerDashboard {
     /// Pending desktop frame data (BGRA, raw from capture). Stored here so the
     /// background thread can set it outside of ctx.run, then we apply it inside.
     pending_desktop_frame: Option<CaptureFrame>,
+    /// Rect of the desktop image within the egui canvas (set during render).
+    /// Used for mapping panel UV → screen UV for mouse injection.
+    desktop_image_rect: Option<egui::Rect>,
 }
 
 impl LayerDashboard {
@@ -68,6 +71,7 @@ impl LayerDashboard {
             desktop_texture: None,
             desktop_error: None,
             pending_desktop_frame: None,
+            desktop_image_rect: None,
             visuals_set: false,
         }
     }
@@ -75,6 +79,16 @@ impl LayerDashboard {
     /// Set an error message for the desktop tab (if screen capture failed to init).
     pub fn set_desktop_error(&mut self, msg: String) {
         self.desktop_error = Some(msg);
+    }
+
+    /// Whether the Desktop tab is currently active.
+    pub fn is_desktop_active(&self) -> bool {
+        self.active_tab == DashboardTab::Desktop
+    }
+
+    /// The desktop image rect within the egui canvas (for UV mapping).
+    pub fn desktop_image_rect(&self) -> Option<egui::Rect> {
+        self.desktop_image_rect
     }
 
     /// Store a desktop capture frame for later upload. Call this outside of ctx.run().
@@ -156,6 +170,7 @@ impl LayerDashboard {
         let mut kb_visible = self.keyboard_visible;
         let mut kb_shift = self.keyboard_shift;
         let mut kb_keys: Vec<String> = Vec::new();
+        let mut desktop_image_rect_out: Option<egui::Rect> = None;
 
         // Set dark background (once — calling every frame defeats repaint skipping)
         if !self.visuals_set {
@@ -375,12 +390,15 @@ impl LayerDashboard {
                     render_launcher_content(ui, games, &mut search, &mut launch_id);
                 }
                 DashboardTab::Desktop => {
-                    render_desktop_content(ui, desktop_texture, desktop_error);
+                    desktop_image_rect_out = render_desktop_content(ui, desktop_texture, desktop_error);
                 }
                 DashboardTab::Settings => {
                     render_settings_content(ui, config, &mut save_clicked);
                 }
             });
+
+        // Store desktop image rect for mouse injection coordinate mapping
+        self.desktop_image_rect = desktop_image_rect_out;
 
         // Apply state changes
         self.search = search;
@@ -599,7 +617,7 @@ fn render_desktop_content(
     ui: &mut egui::Ui,
     texture: &Option<egui::TextureHandle>,
     error: &Option<String>,
-) {
+) -> Option<egui::Rect> {
     if let Some(err) = error {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
@@ -615,25 +633,26 @@ fn render_desktop_content(
                     .color(egui::Color32::from_rgb(180, 180, 200)),
             );
         });
-        return;
+        return None;
     }
 
     match texture {
         Some(handle) => {
             let available = ui.available_size();
             let tex_size = handle.size_vec2();
-            // Fit the image to available space, maintaining aspect ratio
             let scale = (available.x / tex_size.x).min(available.y / tex_size.y);
             let display_size = egui::vec2(tex_size.x * scale, tex_size.y * scale);
 
+            let mut image_rect = None;
             ui.vertical_centered(|ui| {
-                // Center vertically
                 let vertical_pad = (available.y - display_size.y) * 0.5;
                 if vertical_pad > 0.0 {
                     ui.add_space(vertical_pad);
                 }
-                ui.image(egui::load::SizedTexture::new(handle.id(), display_size));
+                let response = ui.image(egui::load::SizedTexture::new(handle.id(), display_size));
+                image_rect = Some(response.rect);
             });
+            image_rect
         }
         None => {
             ui.vertical_centered(|ui| {
@@ -645,6 +664,7 @@ fn render_desktop_content(
                 );
                 ui.spinner();
             });
+            None
         }
     }
 }
