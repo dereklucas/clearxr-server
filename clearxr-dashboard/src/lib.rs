@@ -133,6 +133,7 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
     let mut trigger = false;
     let mut secondary = false;
     let mut scroll_delta = 0.0f32;
+    let mut raw_thumbstick_y = 0.0f32;
     let mut prev_trigger = false;
     let mut prev_secondary = false;
 
@@ -154,8 +155,9 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
             }
             trigger = pkt.trigger > 0.5;
             secondary = pkt.grip > 0.5;
-            scroll_delta = if pkt.thumbstick_y.abs() > 0.2 {
-                pkt.thumbstick_y * 20.0
+            raw_thumbstick_y = pkt.thumbstick_y;
+            scroll_delta = if raw_thumbstick_y.abs() > 0.2 {
+                raw_thumbstick_y * 20.0
             } else {
                 0.0
             };
@@ -226,6 +228,10 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
                             sc.inject_right_mouse_down(screen_u, screen_v);
                         } else if !secondary && prev_secondary {
                             sc.inject_right_mouse_up();
+                        }
+                        // Thumbstick → scroll
+                        if raw_thumbstick_y.abs() > 0.2 {
+                            sc.inject_scroll(-(raw_thumbstick_y * 3.0) as i32);
                         }
                     }
                 } else {
