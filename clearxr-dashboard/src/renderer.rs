@@ -851,3 +851,46 @@ fn find_memory_type(
                 .contains(properties)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wide_string_image_handle_name() {
+        let name: String = IMAGE_HANDLE_NAME.iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from_u32(c as u32).unwrap())
+            .collect();
+        assert_eq!(name, "ClearXR_DashboardImage");
+        assert_eq!(*IMAGE_HANDLE_NAME.last().unwrap(), 0u16, "must be null-terminated");
+    }
+
+    #[test]
+    fn test_wide_string_semaphore_handle_name() {
+        let name: String = SEMAPHORE_HANDLE_NAME.iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from_u32(c as u32).unwrap())
+            .collect();
+        assert_eq!(name, "ClearXR_DashboardSemaphore");
+        assert_eq!(*SEMAPHORE_HANDLE_NAME.last().unwrap(), 0u16, "must be null-terminated");
+    }
+
+    #[test]
+    fn test_handle_names_match_shm_constants() {
+        // The names in renderer.rs must match what the layer expects to import.
+        // shm.rs defines the string versions; renderer.rs uses wide strings.
+        use crate::shm;
+        let image_name: String = IMAGE_HANDLE_NAME.iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from_u32(c as u32).unwrap())
+            .collect();
+        assert_eq!(image_name, shm::IMAGE_HANDLE_NAME);
+
+        let sem_name: String = SEMAPHORE_HANDLE_NAME.iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from_u32(c as u32).unwrap())
+            .collect();
+        assert_eq!(sem_name, shm::SEMAPHORE_HANDLE_NAME);
+    }
+}

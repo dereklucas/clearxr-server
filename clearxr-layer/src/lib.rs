@@ -1162,6 +1162,24 @@ const REQUIRED_VK_DEVICE_EXTENSIONS: &[&[u8]] = &[
     b"VK_KHR_timeline_semaphore\0",
 ];
 
+/// Build an extended extension list by appending our required extensions,
+/// skipping any already present. Returns the new list of pointers.
+///
+/// Safety: `existing` must be valid C string pointers for the duration of the call.
+unsafe fn inject_extensions(existing: &[*const c_char]) -> Vec<*const c_char> {
+    let mut result = existing.to_vec();
+    for &required in REQUIRED_VK_DEVICE_EXTENSIONS {
+        let required_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(required);
+        let already_present = result.iter().any(|&name| {
+            std::ffi::CStr::from_ptr(name) == required_cstr
+        });
+        if !already_present {
+            result.push(required.as_ptr() as *const c_char);
+        }
+    }
+    result
+}
+
 /// Hook xrCreateVulkanDeviceKHR to inject external memory/semaphore extensions.
 /// This allows the layer to import shared Vulkan images from the dashboard process.
 unsafe extern "system" fn hook_create_vulkan_device_khr(
@@ -1187,24 +1205,14 @@ unsafe extern "system" fn hook_create_vulkan_device_khr(
 
     let orig_ci = &*vk_ci;
 
-    // Collect existing extension names
+    // Collect existing extension names and inject our required ones
     let existing_count = orig_ci.enabled_extension_count as usize;
-    let mut ext_names: Vec<*const c_char> = if existing_count > 0 && !orig_ci.pp_enabled_extension_names.is_null() {
+    let existing: Vec<*const c_char> = if existing_count > 0 && !orig_ci.pp_enabled_extension_names.is_null() {
         std::slice::from_raw_parts(orig_ci.pp_enabled_extension_names, existing_count).to_vec()
     } else {
         Vec::new()
     };
-
-    // Append our required extensions (skip duplicates)
-    for &required in REQUIRED_VK_DEVICE_EXTENSIONS {
-        let required_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(required);
-        let already_present = ext_names.iter().any(|&name| {
-            std::ffi::CStr::from_ptr(name) == required_cstr
-        });
-        if !already_present {
-            ext_names.push(required.as_ptr() as *const c_char);
-        }
-    }
+    let ext_names = inject_extensions(&existing);
 
     layer_log!(info,
         "[ClearXR Layer] Injecting {} Vulkan device extensions ({} total) for shared image support.",
@@ -1983,4 +1991,77 @@ unsafe extern "system" fn hook_get_action_state_boolean(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extension_injection_from_empty() {
+        unsafe {
+            let existing: Vec<*const c_char> = vec![];
+            let result = inject_extensions(&existing);
+            assert_eq!(result.len(), REQUIRED_VK_DEVICE_EXTENSIONS.len());
+            for &required in REQUIRED_VK_DEVICE_EXTENSIONS {
+                let required_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(required);
+                let found = result.iter().any(|&name| {
+                    std::ffi::CStr::from_ptr(name) == required_cstr
+                });
+                assert!(found, "Missing extension: {:?}", required_cstr);
+            }
+        }
+    }
+
+    #[test]
+    fn test_extension_injection_dedup() {
+        unsafe {
+            let existing_ext = b"VK_KHR_timeline_semaphore\0";
+            let existing: Vec<*const c_char> = vec![existing_ext.as_ptr() as *const c_char];
+            let result = inject_extensions(&existing);
+            assert_eq!(result.len(), REQUIRED_VK_DEVICE_EXTENSIONS.len());
+            let timeline_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(b"VK_KHR_timeline_semaphore\0");
+            let count = result.iter().filter(|&&name| {
+                std::ffi::CStr::from_ptr(name) == timeline_cstr
+            }).count();
+            assert_eq!(count, 1, "VK_KHR_timeline_semaphore should appear exactly once");
+        }
+    }
+
+    #[test]
+    fn test_extension_injection_preserves_existing() {
+        unsafe {
+            let app_ext = b"VK_KHR_swapchain\0";
+            let existing: Vec<*const c_char> = vec![app_ext.as_ptr() as *const c_char];
+            let result = inject_extensions(&existing);
+            assert_eq!(result.len(), 1 + REQUIRED_VK_DEVICE_EXTENSIONS.len());
+            let app_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(app_ext);
+            assert!(result.iter().any(|&name| {
+                std::ffi::CStr::from_ptr(name) == app_cstr
+            }));
+        }
+    }
+
+    #[test]
+    fn test_wide_string_names_decode() {
+        use crate::overlay::{IMAGE_HANDLE_NAME, SEMAPHORE_HANDLE_NAME};
+        let image_name: String = IMAGE_HANDLE_NAME.iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from_u32(c as u32).unwrap())
+            .collect();
+        assert_eq!(image_name, "ClearXR_DashboardImage");
+
+        let sem_name: String = SEMAPHORE_HANDLE_NAME.iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from_u32(c as u32).unwrap())
+            .collect();
+        assert_eq!(sem_name, "ClearXR_DashboardSemaphore");
+    }
+
+    #[test]
+    fn test_wide_string_null_terminated() {
+        use crate::overlay::{IMAGE_HANDLE_NAME, SEMAPHORE_HANDLE_NAME};
+        assert_eq!(*IMAGE_HANDLE_NAME.last().unwrap(), 0u16);
+        assert_eq!(*SEMAPHORE_HANDLE_NAME.last().unwrap(), 0u16);
+    }
 }

@@ -15,14 +15,14 @@ const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
 
 // Named Win32 handles for cross-process sharing (UTF-16 with null terminator).
 // Must match clearxr-dashboard/src/renderer.rs constants.
-const IMAGE_HANDLE_NAME: &[u16] = &[
+pub(crate) const IMAGE_HANDLE_NAME: &[u16] = &[
     b'C' as u16, b'l' as u16, b'e' as u16, b'a' as u16, b'r' as u16,
     b'X' as u16, b'R' as u16, b'_' as u16, b'D' as u16, b'a' as u16,
     b's' as u16, b'h' as u16, b'b' as u16, b'o' as u16, b'a' as u16,
     b'r' as u16, b'd' as u16, b'I' as u16, b'm' as u16, b'a' as u16,
     b'g' as u16, b'e' as u16, 0,
 ];
-const SEMAPHORE_HANDLE_NAME: &[u16] = &[
+pub(crate) const SEMAPHORE_HANDLE_NAME: &[u16] = &[
     b'C' as u16, b'l' as u16, b'e' as u16, b'a' as u16, b'r' as u16,
     b'X' as u16, b'R' as u16, b'_' as u16, b'D' as u16, b'a' as u16,
     b's' as u16, b'h' as u16, b'b' as u16, b'o' as u16, b'a' as u16,
@@ -34,7 +34,7 @@ const SEMAPHORE_HANDLE_NAME: &[u16] = &[
 /// Minimal SHM header v2 (must match clearxr-dashboard/src/shm.rs).
 /// Metadata only — no pixel data. Pixels shared via VK_KHR_external_memory_win32.
 #[repr(C)]
-struct ShmHeader {
+pub(crate) struct ShmHeader {
     frame_counter: AtomicU32,     // 0
     width: u32,                   // 4
     height: u32,                  // 8
