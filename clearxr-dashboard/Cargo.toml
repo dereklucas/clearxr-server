@@ -7,7 +7,16 @@ description = "Headless dashboard renderer for ClearXR — runs in the streamer 
 [lib]
 name = "clearxr_dashboard"
 
+[[bin]]
+name = "clearxr-dashboard-desktop"
+path = "src/bin/desktop.rs"
+required-features = ["desktop"]
+
+[features]
+desktop = ["dep:eframe"]
+
 [dependencies]
+eframe = { version = "0.31", optional = true }
 ash = "0.38"
 egui = "0.31"
 egui-ash-renderer = "0.8"

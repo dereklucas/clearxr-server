@@ -1,12 +1,30 @@
-//! Headless GPU egui renderer.
+//! Headless GPU egui renderer with shared Vulkan image output.
 //!
 //! Creates its own Vulkan instance + device (independent of any app),
-//! renders egui into an offscreen image, and reads back RGBA pixels.
+//! renders egui into an offscreen image exported via named Win32 handles
+//! so the OpenXR layer can import it without GPU readback.
 
 use anyhow::Result;
 use ash::vk;
 use egui::{Context, Event, Pos2, PointerButton, RawInput, Rect, Vec2};
 use std::mem::ManuallyDrop;
+
+// Named Win32 handles for cross-process sharing (UTF-16 with null terminator).
+const IMAGE_HANDLE_NAME: &[u16] = &[
+    b'C' as u16, b'l' as u16, b'e' as u16, b'a' as u16, b'r' as u16,
+    b'X' as u16, b'R' as u16, b'_' as u16, b'D' as u16, b'a' as u16,
+    b's' as u16, b'h' as u16, b'b' as u16, b'o' as u16, b'a' as u16,
+    b'r' as u16, b'd' as u16, b'I' as u16, b'm' as u16, b'a' as u16,
+    b'g' as u16, b'e' as u16, 0,
+];
+const SEMAPHORE_HANDLE_NAME: &[u16] = &[
+    b'C' as u16, b'l' as u16, b'e' as u16, b'a' as u16, b'r' as u16,
+    b'X' as u16, b'R' as u16, b'_' as u16, b'D' as u16, b'a' as u16,
+    b's' as u16, b'h' as u16, b'b' as u16, b'o' as u16, b'a' as u16,
+    b'r' as u16, b'd' as u16, b'S' as u16, b'e' as u16, b'm' as u16,
+    b'a' as u16, b'p' as u16, b'h' as u16, b'o' as u16, b'r' as u16,
+    b'e' as u16, 0,
+];
 
 /// User-managed Vulkan texture for the desktop capture image.
 /// Bypasses egui-ash-renderer's set_textures (which does vkQueueWaitIdle)
@@ -33,9 +51,6 @@ struct DesktopTexture {
 struct FlightFrame {
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
-    staging_buffer: vk::Buffer,
-    staging_memory: vk::DeviceMemory,
-    staging_ptr: *mut u8,
     /// Textures to free after this flight's fence is waited on.
     /// Deferred because free_textures destroys GPU resources that the
     /// in-flight command buffer may still reference.
@@ -53,18 +68,20 @@ pub struct HeadlessRenderer {
     // Double-buffered flight frames (eliminates GPU/CPU serialization)
     flights: [FlightFrame; 2],
     current_flight: usize,
-    pending_readback: bool,
 
-    // Offscreen render target
+    // Offscreen render target (exported via named Win32 handle)
     render_image: vk::Image,
     render_image_memory: vk::DeviceMemory,
     render_image_view: vk::ImageView,
     render_pass: vk::RenderPass,
     framebuffer: vk::Framebuffer,
 
+    // Shared timeline semaphore for cross-process synchronization
+    timeline_semaphore: vk::Semaphore,
+    semaphore_counter: u64,
+
     width: u32,
     height: u32,
-    pixel_size: usize,
 
     // egui
     ctx: Context,
@@ -84,11 +101,17 @@ impl HeadlessRenderer {
     pub fn new(width: u32, height: u32) -> Result<Self> {
         let entry = unsafe { ash::Entry::load()? };
 
-        // Create minimal Vulkan instance (no extensions needed for offscreen).
+        // ── Instance (with external memory/semaphore capability extensions) ──
         let app_info = vk::ApplicationInfo::default()
-            .api_version(vk::make_api_version(0, 1, 0, 0));
+            .api_version(vk::make_api_version(0, 1, 2, 0));
+        let instance_extensions: [*const std::ffi::c_char; 3] = [
+            vk::KHR_EXTERNAL_MEMORY_CAPABILITIES_NAME.as_ptr(),
+            vk::KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_NAME.as_ptr(),
+            vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME.as_ptr(),
+        ];
         let instance_ci = vk::InstanceCreateInfo::default()
-            .application_info(&app_info);
+            .application_info(&app_info)
+            .enabled_extension_names(&instance_extensions);
         let instance = unsafe { entry.create_instance(&instance_ci, None)? };
 
         // Pick first physical device.
@@ -107,12 +130,26 @@ impl HeadlessRenderer {
         .map(|(i, _)| i as u32)
         .ok_or_else(|| anyhow::anyhow!("No graphics queue family found"))?;
 
+        // ── Device (with external memory/semaphore + timeline semaphore extensions) ──
+        let device_extensions: [*const std::ffi::c_char; 5] = [
+            vk::KHR_EXTERNAL_MEMORY_NAME.as_ptr(),
+            vk::KHR_EXTERNAL_MEMORY_WIN32_NAME.as_ptr(),
+            vk::KHR_EXTERNAL_SEMAPHORE_NAME.as_ptr(),
+            vk::KHR_EXTERNAL_SEMAPHORE_WIN32_NAME.as_ptr(),
+            vk::KHR_TIMELINE_SEMAPHORE_NAME.as_ptr(),
+        ];
+
+        let mut timeline_features = vk::PhysicalDeviceTimelineSemaphoreFeatures::default()
+            .timeline_semaphore(true);
+
         let queue_priorities = [1.0f32];
         let queue_ci = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
             .queue_priorities(&queue_priorities);
         let device_ci = vk::DeviceCreateInfo::default()
-            .queue_create_infos(std::slice::from_ref(&queue_ci));
+            .queue_create_infos(std::slice::from_ref(&queue_ci))
+            .enabled_extension_names(&device_extensions)
+            .push_next(&mut timeline_features);
         let device = unsafe { instance.create_device(physical_device, &device_ci, None)? };
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
 
@@ -141,8 +178,11 @@ impl HeadlessRenderer {
             )?
         };
 
-        // Offscreen render image (R8G8B8A8_UNORM for readback compatibility)
+        // ── Offscreen render image (exported via named Win32 handle) ──
         let format = vk::Format::R8G8B8A8_UNORM;
+
+        let mut external_image_info = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
         let image_ci = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -151,7 +191,8 @@ impl HeadlessRenderer {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+            .push_next(&mut external_image_info);
         let render_image = unsafe { device.create_image(&image_ci, None)? };
 
         let mem_reqs = unsafe { device.get_image_memory_requirements(render_image) };
@@ -163,9 +204,19 @@ impl HeadlessRenderer {
         )
         .ok_or_else(|| anyhow::anyhow!("No suitable memory type for render image"))?;
 
+        // Export memory with a named Win32 handle + dedicated allocation (required for external memory).
+        let mut export_win32_info = vk::ExportMemoryWin32HandleInfoKHR::default()
+            .name(IMAGE_HANDLE_NAME.as_ptr());
+        let mut export_mem_info = vk::ExportMemoryAllocateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
+        let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
+            .image(render_image);
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_reqs.size)
-            .memory_type_index(mem_type);
+            .memory_type_index(mem_type)
+            .push_next(&mut dedicated_info)
+            .push_next(&mut export_mem_info)
+            .push_next(&mut export_win32_info);
         let render_image_memory = unsafe { device.allocate_memory(&alloc_info, None)? };
         unsafe { device.bind_image_memory(render_image, render_image_memory, 0)? };
 
@@ -180,6 +231,20 @@ impl HeadlessRenderer {
                     .layer_count(1),
             );
         let render_image_view = unsafe { device.create_image_view(&view_ci, None)? };
+
+        // ── Timeline semaphore (exported via named Win32 handle) ──
+        let mut sem_type_info = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let mut export_sem_info = vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32);
+        let mut export_sem_win32_info = vk::ExportSemaphoreWin32HandleInfoKHR::default()
+            .name(SEMAPHORE_HANDLE_NAME.as_ptr());
+        let sem_ci = vk::SemaphoreCreateInfo::default()
+            .push_next(&mut sem_type_info)
+            .push_next(&mut export_sem_info)
+            .push_next(&mut export_sem_win32_info);
+        let timeline_semaphore = unsafe { device.create_semaphore(&sem_ci, None)? };
 
         // Render pass
         let attachment = vk::AttachmentDescription::default()
@@ -208,51 +273,15 @@ impl HeadlessRenderer {
             .layers(1);
         let framebuffer = unsafe { device.create_framebuffer(&fb_ci, None)? };
 
-        // Two staging buffers for double-buffered readback
-        let pixel_size = (width * height * 4) as usize;
-        let buf_ci = vk::BufferCreateInfo::default()
-            .size(pixel_size as u64)
-            .usage(vk::BufferUsageFlags::TRANSFER_DST);
-
-        let create_staging = |device: &ash::Device| -> Result<(vk::Buffer, vk::DeviceMemory, *mut u8)> {
-            let buffer = unsafe { device.create_buffer(&buf_ci, None)? };
-            let reqs = unsafe { device.get_buffer_memory_requirements(buffer) };
-            let mem_type = find_memory_type(
-                &mem_props,
-                reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
-            .ok_or_else(|| anyhow::anyhow!("No suitable memory type for staging buffer"))?;
-            let alloc = vk::MemoryAllocateInfo::default()
-                .allocation_size(reqs.size)
-                .memory_type_index(mem_type);
-            let memory = unsafe { device.allocate_memory(&alloc, None)? };
-            unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
-            let ptr = unsafe {
-                device.map_memory(memory, 0, pixel_size as u64, vk::MemoryMapFlags::empty())?
-                    as *mut u8
-            };
-            Ok((buffer, memory, ptr))
-        };
-
-        let (staging_buf0, staging_mem0, staging_ptr0) = create_staging(&device)?;
-        let (staging_buf1, staging_mem1, staging_ptr1) = create_staging(&device)?;
-
         let flights = [
             FlightFrame {
                 command_buffer: command_buffers[0],
                 fence: fence0,
-                staging_buffer: staging_buf0,
-                staging_memory: staging_mem0,
-                staging_ptr: staging_ptr0,
                 pending_free: Vec::new(),
             },
             FlightFrame {
                 command_buffer: command_buffers[1],
                 fence: fence1,
-                staging_buffer: staging_buf1,
-                staging_memory: staging_mem1,
-                staging_ptr: staging_ptr1,
                 pending_free: Vec::new(),
             },
         ];
@@ -277,7 +306,7 @@ impl HeadlessRenderer {
         .map_err(|e| anyhow::anyhow!("egui-ash-renderer init failed: {e}"))?;
 
         log::info!(
-            "[ClearXR Dashboard] Headless renderer initialized: {}x{}, Vulkan device ready",
+            "[ClearXR Dashboard] Headless renderer initialized: {}x{}, Vulkan 1.2, shared image + timeline semaphore",
             width, height
         );
 
@@ -290,15 +319,15 @@ impl HeadlessRenderer {
             command_pool,
             flights,
             current_flight: 0,
-            pending_readback: false,
             render_image,
             render_image_memory,
             render_image_view,
             render_pass,
             framebuffer,
+            timeline_semaphore,
+            semaphore_counter: 0,
             width,
             height,
-            pixel_size,
             ctx,
             egui_renderer: ManuallyDrop::new(egui_renderer),
             pointer_pos: None,
@@ -309,10 +338,11 @@ impl HeadlessRenderer {
         })
     }
 
-    /// Run one egui frame. Returns the RGBA pixel data if a repaint happened.
+    /// Run one egui frame. Returns `Ok(true)` if a new frame was rendered and
+    /// the timeline semaphore was signaled, `Ok(false)` if no repaint was needed.
     ///
-    /// Uses double-buffered flight frames: submits GPU work without waiting,
-    /// reads back the PREVIOUS frame's pixels (1 frame latency, overlaps CPU/GPU).
+    /// The layer imports the shared image + timeline semaphore by name and waits
+    /// on `semaphore_counter()` before sampling.
     pub fn render_frame(
         &mut self,
         pointer_uv: Option<(f32, f32)>,
@@ -320,27 +350,8 @@ impl HeadlessRenderer {
         secondary: bool,
         scroll_delta: f32,
         build_ui: impl FnMut(&Context),
-    ) -> Result<Option<&[u8]>> {
-        // 1. Collect readback from previous submission (if any).
-        let readback_info: Option<(*const u8, usize)> = if self.pending_readback {
-            let prev = 1 - self.current_flight;
-            unsafe {
-                self.device.wait_for_fences(&[self.flights[prev].fence], true, u64::MAX)?;
-            }
-            // Free textures deferred from the previous flight (now safe — fence waited)
-            if !self.flights[prev].pending_free.is_empty() {
-                let to_free: Vec<_> = std::mem::take(&mut self.flights[prev].pending_free);
-                self.egui_renderer
-                    .free_textures(&to_free)
-                    .map_err(|e| anyhow::anyhow!("free_textures failed: {e}"))?;
-            }
-            self.pending_readback = false;
-            Some((self.flights[prev].staging_ptr as *const u8, self.pixel_size))
-        } else {
-            None
-        };
-
-        // 2. Build egui input
+    ) -> Result<bool> {
+        // 1. Build egui input
         let mut raw_input = RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
@@ -386,7 +397,7 @@ impl HeadlessRenderer {
             });
         }
 
-        // 3. Run egui
+        // 2. Run egui
         let dot_pos = self.pointer_pos;
         let mut build_ui = build_ui;
         let full_output = self.ctx.run(raw_input, |ctx| {
@@ -408,7 +419,7 @@ impl HeadlessRenderer {
             .values()
             .any(|vo| vo.repaint_delay == std::time::Duration::ZERO);
 
-        // 4. Texture uploads — only font atlas now (desktop texture bypasses this)
+        // 3. Texture uploads — only font atlas now (desktop texture bypasses this)
         let textures_delta = full_output.textures_delta;
         if !textures_delta.set.is_empty() {
             let t0 = std::time::Instant::now();
@@ -425,7 +436,7 @@ impl HeadlessRenderer {
             }
         }
 
-        // 5. Skip GPU work if no repaint needed (but still return pending readback)
+        // 4. Skip GPU work if no repaint needed
         if !needs_repaint && self.has_rendered {
             // No GPU work submitted this frame, so free_textures is safe immediately.
             if !textures_delta.free.is_empty() {
@@ -433,22 +444,29 @@ impl HeadlessRenderer {
                     .free_textures(&textures_delta.free)
                     .map_err(|e| anyhow::anyhow!("free_textures failed: {e}"))?;
             }
-            return Ok(readback_info.map(|(ptr, len)| unsafe {
-                std::slice::from_raw_parts(ptr, len)
-            }));
+            return Ok(false);
         }
 
-        // 6. Tessellate
+        // 5. Tessellate
         let clipped_primitives = self
             .ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-        // 7. GPU render into current flight frame (no blocking wait after submit!)
+        // 6. GPU render into current flight frame
         let slot = self.current_flight;
         let device = &self.device;
 
         unsafe {
             device.wait_for_fences(&[self.flights[slot].fence], true, u64::MAX)?;
+
+            // Free textures deferred from the previous use of this flight slot
+            if !self.flights[slot].pending_free.is_empty() {
+                let to_free: Vec<_> = std::mem::take(&mut self.flights[slot].pending_free);
+                self.egui_renderer
+                    .free_textures(&to_free)
+                    .map_err(|e| anyhow::anyhow!("free_textures failed: {e}"))?;
+            }
+
             device.reset_fences(&[self.flights[slot].fence])?;
 
             let cmd = self.flights[slot].command_buffer;
@@ -464,9 +482,10 @@ impl HeadlessRenderer {
                 Self::record_desktop_upload(device, dt, cmd);
             }
 
+            // Transition render image to COLOR_ATTACHMENT_OPTIMAL
             let barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(if self.has_rendered {
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+                    vk::ImageLayout::GENERAL
                 } else {
                     vk::ImageLayout::UNDEFINED
                 })
@@ -511,9 +530,10 @@ impl HeadlessRenderer {
 
             device.cmd_end_render_pass(cmd);
 
+            // Transition render image to GENERAL for cross-process sampling
             let barrier2 = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::GENERAL)
                 .image(self.render_image)
                 .subresource_range(
                     vk::ImageSubresourceRange::default()
@@ -522,48 +542,44 @@ impl HeadlessRenderer {
                         .layer_count(1),
                 )
                 .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ);
             device.cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 vk::DependencyFlags::empty(),
                 &[], &[], &[barrier2],
             );
 
-            let region = vk::BufferImageCopy::default()
-                .image_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .layer_count(1),
-                )
-                .image_extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 });
-            device.cmd_copy_image_to_buffer(
-                cmd,
-                self.render_image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                self.flights[slot].staging_buffer,
-                &[region],
-            );
-
             device.end_command_buffer(cmd)?;
 
+            // Signal the timeline semaphore with incremented counter
+            self.semaphore_counter += 1;
+            let signal_values = [self.semaphore_counter];
+            let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
+                .signal_semaphore_values(&signal_values);
+            let signal_semaphores = [self.timeline_semaphore];
             let submit = vk::SubmitInfo::default()
-                .command_buffers(std::slice::from_ref(&cmd));
+                .command_buffers(std::slice::from_ref(&cmd))
+                .signal_semaphores(&signal_semaphores)
+                .push_next(&mut timeline_info);
             device.queue_submit(self.queue, &[submit], self.flights[slot].fence)?;
         }
 
-        // Defer texture frees until this flight's fence is waited on (next frame's readback).
+        // Defer texture frees until this flight's fence is waited on (next use of this slot).
         // The GPU may still be referencing these textures in the just-submitted command buffer.
         self.flights[slot].pending_free = textures_delta.free;
 
         self.has_rendered = true;
         self.current_flight = 1 - self.current_flight;
-        self.pending_readback = true;
 
-        Ok(readback_info.map(|(ptr, len)| unsafe {
-            std::slice::from_raw_parts(ptr, len)
-        }))
+        Ok(true)
+    }
+
+    /// Current timeline semaphore value. The layer waits for this value before
+    /// sampling the shared image.
+    pub fn semaphore_counter(&self) -> u64 {
+        self.semaphore_counter
     }
 
     /// Upload desktop capture pixels to a user-managed Vulkan texture.
@@ -641,7 +657,7 @@ impl HeadlessRenderer {
             &[], &[], &[barrier],
         );
 
-        // Copy staging buffer → image
+        // Copy staging buffer -> image
         let region = vk::BufferImageCopy::default()
             .image_subresource(
                 vk::ImageSubresourceLayers::default()
@@ -802,11 +818,11 @@ impl Drop for HeadlessRenderer {
             // CRITICAL: Drop the egui renderer FIRST — it uses the device internally.
             ManuallyDrop::drop(&mut self.egui_renderer);
 
-            // Destroy both flight frames
+            // Destroy timeline semaphore (named Win32 handle is reference-counted by the OS)
+            self.device.destroy_semaphore(self.timeline_semaphore, None);
+
+            // Destroy both flight frames (no staging buffers — only fences)
             for flight in &self.flights {
-                self.device.unmap_memory(flight.staging_memory);
-                self.device.destroy_buffer(flight.staging_buffer, None);
-                self.device.free_memory(flight.staging_memory, None);
                 self.device.destroy_fence(flight.fence, None);
             }
 

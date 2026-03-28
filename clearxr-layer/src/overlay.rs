@@ -1,5 +1,5 @@
-//! Thin dashboard overlay — reads pre-rendered frames from shared memory,
-//! uploads to a swapchain image, and appends a quad composition layer.
+//! Thin dashboard overlay — imports shared Vulkan image from the dashboard
+//! process, copies to a swapchain image, and appends a quad composition layer.
 //! No egui, no rendering, no background threads.
 
 use crate::{opaque::SpatialControllerPacket, vk_backend::VkBackend, NextDispatch};
@@ -8,28 +8,57 @@ use openxr_sys as xr;
 use shared_memory::{Shmem, ShmemConf};
 use std::mem::MaybeUninit;
 use std::ptr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-const SHM_NAME: &str = "ClearXR_Dashboard_Frame";
-const HEADER_SIZE: usize = 64;
+const SHM_NAME: &str = "ClearXR_Dashboard_Meta";
 const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
 
-/// Minimal SHM header (must match clearxr-dashboard/src/shm.rs).
+// Named Win32 handles for cross-process sharing (UTF-16 with null terminator).
+// Must match clearxr-dashboard/src/renderer.rs constants.
+const IMAGE_HANDLE_NAME: &[u16] = &[
+    b'C' as u16, b'l' as u16, b'e' as u16, b'a' as u16, b'r' as u16,
+    b'X' as u16, b'R' as u16, b'_' as u16, b'D' as u16, b'a' as u16,
+    b's' as u16, b'h' as u16, b'b' as u16, b'o' as u16, b'a' as u16,
+    b'r' as u16, b'd' as u16, b'I' as u16, b'm' as u16, b'a' as u16,
+    b'g' as u16, b'e' as u16, 0,
+];
+const SEMAPHORE_HANDLE_NAME: &[u16] = &[
+    b'C' as u16, b'l' as u16, b'e' as u16, b'a' as u16, b'r' as u16,
+    b'X' as u16, b'R' as u16, b'_' as u16, b'D' as u16, b'a' as u16,
+    b's' as u16, b'h' as u16, b'b' as u16, b'o' as u16, b'a' as u16,
+    b'r' as u16, b'd' as u16, b'S' as u16, b'e' as u16, b'm' as u16,
+    b'a' as u16, b'p' as u16, b'h' as u16, b'o' as u16, b'r' as u16,
+    b'e' as u16, 0,
+];
+
+/// Minimal SHM header v2 (must match clearxr-dashboard/src/shm.rs).
+/// Metadata only — no pixel data. Pixels shared via VK_KHR_external_memory_win32.
 #[repr(C)]
 struct ShmHeader {
-    frame_counter: AtomicU32,
-    width: u32,
-    height: u32,
-    flags: u32,
-    panel_pos: [f32; 3],
-    panel_orient: [f32; 4],
-    panel_size: [f32; 2],
-    _reserved: [u8; 12],
+    frame_counter: AtomicU32,     // 0
+    width: u32,                   // 4
+    height: u32,                  // 8
+    flags: u32,                   // 12
+    panel_pos: [f32; 3],          // 16
+    panel_orient: [f32; 4],       // 28
+    panel_size: [f32; 2],         // 44
+    // 4 bytes padding (AtomicU64 alignment)
+    semaphore_counter: AtomicU64, // 56
+    gpu_luid: [u8; 8],           // 64
+    _reserved: [u8; 4],          // 72 -> total 80 with tail padding
 }
 
 // Safety: DashboardOverlay is only accessed from the thread that calls xrEndFrame.
-// The raw pointers (staging_ptr, pipe handle) are not shared.
+// The raw pointers (pipe handle) are not shared.
 unsafe impl Send for DashboardOverlay {}
+
+/// Raw Vulkan function pointer for vkImportSemaphoreWin32HandleKHR.
+/// Loaded via vkGetDeviceProcAddr since we can't construct ash extension loaders
+/// without a full ash::Instance (the layer wraps the host app's Vulkan handles).
+type PfnImportSemaphoreWin32HandleKHR = unsafe extern "system" fn(
+    device: vk::Device,
+    p_import_semaphore_win32_handle_info: *const vk::ImportSemaphoreWin32HandleInfoKHR,
+) -> vk::Result;
 
 pub struct DashboardOverlay {
     session: xr::Session,
@@ -39,17 +68,19 @@ pub struct DashboardOverlay {
     height: u32,
     images: Vec<vk::Image>,
     image_layouts: Vec<vk::ImageLayout>,
-    // Staging buffer for pixel upload (persistently mapped)
-    staging_buffer: vk::Buffer,
-    staging_memory: vk::DeviceMemory,
-    staging_ptr: *mut u8,
-    pixel_size: usize,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
     vk: VkBackend,
+    // Shared Vulkan resources (imported from dashboard process)
+    shared_image: vk::Image,
+    shared_image_memory: vk::DeviceMemory,
+    shared_semaphore: vk::Semaphore,
+    last_semaphore_value: u64,
+    shared_resources_imported: bool,
+    // Extension function pointer
+    import_semaphore_win32: Option<PfnImportSemaphoreWin32HandleKHR>,
     // SHM reader
     shmem: Option<Shmem>,
-    last_frame_counter: u32,
     // Pipe client for controller input
     #[cfg(target_os = "windows")]
     pipe: Option<windows_sys::Win32::Foundation::HANDLE>,
@@ -98,11 +129,6 @@ impl DashboardOverlay {
             .collect::<Vec<_>>();
         let space = create_stage_space(next, session)?;
 
-        // Create staging buffer for pixel upload
-        let pixel_size = (width * height * 4) as usize;
-        let (staging_buffer, staging_memory, staging_ptr) =
-            create_staging_buffer(&vk, pixel_size)?;
-
         // Command buffer + fence
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(vk.command_pool)
@@ -114,6 +140,22 @@ impl DashboardOverlay {
             &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
             None,
         ).map_err(|e| format!("create fence: {e}"))?;
+
+        // Load vkImportSemaphoreWin32HandleKHR extension function via instance's
+        // vkGetDeviceProcAddr (ash exposes it on InstanceFnV1_0, not DeviceFnV1_0).
+        let import_semaphore_win32 = {
+            let name = b"vkImportSemaphoreWin32HandleKHR\0";
+            let fp = (vk.instance_ref().fp_v1_0().get_device_proc_addr)(
+                vk.device().handle(),
+                name.as_ptr() as *const std::ffi::c_char,
+            );
+            if let Some(fp) = fp {
+                Some(std::mem::transmute::<_, PfnImportSemaphoreWin32HandleKHR>(fp))
+            } else {
+                log::warn!("[ClearXR Layer] vkImportSemaphoreWin32HandleKHR not available");
+                None
+            }
+        };
 
         // Try to connect pipe
         #[cfg(target_os = "windows")]
@@ -128,15 +170,16 @@ impl DashboardOverlay {
             height,
             images,
             image_layouts: vec![vk::ImageLayout::UNDEFINED; image_count],
-            staging_buffer,
-            staging_memory,
-            staging_ptr,
-            pixel_size,
             command_buffer,
             fence,
             vk,
+            shared_image: vk::Image::null(),
+            shared_image_memory: vk::DeviceMemory::null(),
+            shared_semaphore: vk::Semaphore::null(),
+            last_semaphore_value: 0,
+            shared_resources_imported: false,
+            import_semaphore_win32,
             shmem,
-            last_frame_counter: 0,
             #[cfg(target_os = "windows")]
             pipe,
             visible: true,
@@ -148,6 +191,85 @@ impl DashboardOverlay {
             },
             size: xr::Extent2Df { width: 1.6, height: 1.0 },
         })
+    }
+
+    /// Import the dashboard's shared Vulkan image and timeline semaphore
+    /// via named Win32 handles. Called once when SHM is first connected.
+    unsafe fn import_shared_resources(&mut self) -> Result<(), String> {
+        let device = self.vk.device();
+
+        // ── Import shared image ──
+        // Create VkImage with ExternalMemoryImageCreateInfo (must match dashboard's creation params)
+        let mut external_image_info = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
+        let image_ci = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_SRC)
+            .push_next(&mut external_image_info);
+        self.shared_image = device.create_image(&image_ci, None)
+            .map_err(|e| format!("create shared image: {e}"))?;
+
+        // Query memory requirements for the imported image
+        let mem_reqs = device.get_image_memory_requirements(self.shared_image);
+        let mem_type = self.vk.find_memory_type(
+            mem_reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ).ok_or("No DEVICE_LOCAL memory type for shared image")?;
+
+        // Import memory via named Win32 handle (null handle + name = name-based import)
+        let mut import_win32_info = vk::ImportMemoryWin32HandleInfoKHR::default()
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32)
+            .handle(vk::HANDLE::default())
+            .name(IMAGE_HANDLE_NAME.as_ptr());
+        let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
+            .image(self.shared_image);
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(mem_reqs.size)
+            .memory_type_index(mem_type)
+            .push_next(&mut dedicated_info)
+            .push_next(&mut import_win32_info);
+        self.shared_image_memory = device.allocate_memory(&alloc_info, None)
+            .map_err(|e| format!("import shared image memory: {e}"))?;
+        device.bind_image_memory(self.shared_image, self.shared_image_memory, 0)
+            .map_err(|e| format!("bind shared image memory: {e}"))?;
+
+        log::info!(
+            "[ClearXR Layer] Shared image imported: {}x{}, mem_type={}",
+            self.width, self.height, mem_type
+        );
+
+        // ── Import timeline semaphore ──
+        // Create a timeline semaphore locally
+        let mut sem_type_info = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let sem_ci = vk::SemaphoreCreateInfo::default()
+            .push_next(&mut sem_type_info);
+        self.shared_semaphore = device.create_semaphore(&sem_ci, None)
+            .map_err(|e| format!("create timeline semaphore: {e}"))?;
+
+        // Import the dashboard's semaphore via named Win32 handle
+        let import_sem_fn = self.import_semaphore_win32
+            .ok_or("vkImportSemaphoreWin32HandleKHR not loaded")?;
+        let import_sem_info = vk::ImportSemaphoreWin32HandleInfoKHR::default()
+            .semaphore(self.shared_semaphore)
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32)
+            .handle(vk::HANDLE::default())
+            .name(SEMAPHORE_HANDLE_NAME.as_ptr());
+        let result = (import_sem_fn)(device.handle(), &import_sem_info);
+        if result != vk::Result::SUCCESS {
+            return Err(format!("vkImportSemaphoreWin32HandleKHR: {:?}", result));
+        }
+
+        log::info!("[ClearXR Layer] Shared timeline semaphore imported.");
+        self.shared_resources_imported = true;
+        Ok(())
     }
 
     pub fn is_for_session(&self, session: xr::Session) -> bool {
@@ -330,16 +452,19 @@ impl DashboardOverlay {
             return Ok(());
         }
 
-        // Check for new frame — only skip the pixel copy, not the header read
-        let counter = header.frame_counter.load(Ordering::Acquire);
-        if counter == self.last_frame_counter {
-            return Ok(()); // No new pixels
+        // Import shared Vulkan resources on first connected frame
+        if !self.shared_resources_imported {
+            if let Err(e) = self.import_shared_resources() {
+                log::error!("[ClearXR Layer] Failed to import shared resources: {e}");
+                return Ok(()); // Don't render until import succeeds
+            }
         }
-        self.last_frame_counter = counter;
 
-        // Copy pixels from SHM → staging buffer
-        let src = shmem.as_ptr().add(HEADER_SIZE);
-        ptr::copy_nonoverlapping(src, self.staging_ptr, self.pixel_size);
+        // Check timeline semaphore counter for new frames
+        let sem_counter = header.semaphore_counter.load(Ordering::Acquire);
+        if sem_counter == self.last_semaphore_value {
+            return Ok(()); // No new frame from dashboard
+        }
 
         // Acquire swapchain image
         let mut image_index = 0;
@@ -360,10 +485,10 @@ impl DashboardOverlay {
         }
 
         let idx = image_index as usize;
-        let image = self.images[idx];
+        let swapchain_image = self.images[idx];
         let old_layout = self.image_layouts[idx];
 
-        // Record: transition → copy buffer to image → done
+        // Record command buffer: copy shared image → swapchain image
         let device = self.vk.device();
         device.wait_for_fences(&[self.fence], true, u64::MAX)
             .map_err(|e| format!("wait fence: {e}"))?;
@@ -375,34 +500,54 @@ impl DashboardOverlay {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
             .map_err(|e| format!("begin cmd: {e}"))?;
 
-        // Transition image to TRANSFER_DST
-        let barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(old_layout)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .image(image)
+        // Barrier: shared image ownership acquire (GENERAL → TRANSFER_SRC)
+        // The dashboard leaves the image in GENERAL layout after rendering.
+        let shared_barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(self.shared_image)
             .subresource_range(vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .level_count(1).layer_count(1))
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+
+        // Barrier: swapchain image → TRANSFER_DST
+        let swapchain_barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(old_layout)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(swapchain_image)
+            .subresource_range(vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1).layer_count(1))
+            .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+
         device.cmd_pipeline_barrier(cmd,
             vk::PipelineStageFlags::TOP_OF_PIPE,
             vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(), &[], &[], &[barrier]);
+            vk::DependencyFlags::empty(), &[], &[],
+            &[shared_barrier, swapchain_barrier]);
 
-        // Copy staging buffer → image
-        let region = vk::BufferImageCopy::default()
-            .image_subresource(vk::ImageSubresourceLayers::default()
+        // Copy shared image → swapchain image
+        let region = vk::ImageCopy::default()
+            .src_subresource(vk::ImageSubresourceLayers::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .layer_count(1))
-            .image_extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 });
-        device.cmd_copy_buffer_to_image(cmd, self.staging_buffer, image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
+            .dst_subresource(vk::ImageSubresourceLayers::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .layer_count(1))
+            .extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 });
+        device.cmd_copy_image(cmd,
+            self.shared_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            swapchain_image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region]);
 
-        // Transition to COLOR_ATTACHMENT (compositor expects this)
-        let barrier2 = vk::ImageMemoryBarrier::default()
+        // Barrier: swapchain image → COLOR_ATTACHMENT_OPTIMAL (compositor expects this)
+        let final_barrier = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .image(image)
+            .image(swapchain_image)
             .subresource_range(vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .level_count(1).layer_count(1))
@@ -411,16 +556,27 @@ impl DashboardOverlay {
         device.cmd_pipeline_barrier(cmd,
             vk::PipelineStageFlags::TRANSFER,
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::DependencyFlags::empty(), &[], &[], &[barrier2]);
+            vk::DependencyFlags::empty(), &[], &[], &[final_barrier]);
 
         device.end_command_buffer(cmd)
             .map_err(|e| format!("end cmd: {e}"))?;
 
+        // Submit with timeline semaphore wait — ensures dashboard GPU work is
+        // complete before we read the shared image.
+        let wait_semaphores = [self.shared_semaphore];
+        let wait_stages = [vk::PipelineStageFlags::TRANSFER];
+        let wait_values = [sem_counter];
+        let mut timeline_submit = vk::TimelineSemaphoreSubmitInfo::default()
+            .wait_semaphore_values(&wait_values);
         let submit = vk::SubmitInfo::default()
-            .command_buffers(std::slice::from_ref(&cmd));
+            .command_buffers(std::slice::from_ref(&cmd))
+            .wait_semaphores(&wait_semaphores)
+            .wait_dst_stage_mask(&wait_stages)
+            .push_next(&mut timeline_submit);
         device.queue_submit(self.vk.queue(), &[submit], self.fence)
             .map_err(|e| format!("queue submit: {e}"))?;
 
+        self.last_semaphore_value = sem_counter;
         self.image_layouts[idx] = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
 
         // Release swapchain image
@@ -443,10 +599,18 @@ impl Drop for DashboardOverlay {
             let device = self.vk.device();
             device.device_wait_idle().ok();
 
+            // Shared Vulkan resources
+            if self.shared_semaphore != vk::Semaphore::null() {
+                device.destroy_semaphore(self.shared_semaphore, None);
+            }
+            if self.shared_image != vk::Image::null() {
+                device.destroy_image(self.shared_image, None);
+            }
+            if self.shared_image_memory != vk::DeviceMemory::null() {
+                device.free_memory(self.shared_image_memory, None);
+            }
+
             // Vulkan resources
-            device.unmap_memory(self.staging_memory);
-            device.destroy_buffer(self.staging_buffer, None);
-            device.free_memory(self.staging_memory, None);
             device.destroy_fence(self.fence, None);
             self.vk.destroy_command_pool();
 
@@ -473,37 +637,6 @@ impl Drop for DashboardOverlay {
 // ============================================================
 // Helpers
 // ============================================================
-
-unsafe fn create_staging_buffer(
-    vk: &VkBackend,
-    size: usize,
-) -> Result<(vk::Buffer, vk::DeviceMemory, *mut u8), String> {
-    let device = vk.device();
-    let buf_ci = vk::BufferCreateInfo::default()
-        .size(size as u64)
-        .usage(vk::BufferUsageFlags::TRANSFER_SRC);
-    let buffer = device.create_buffer(&buf_ci, None)
-        .map_err(|e| format!("create staging buffer: {e}"))?;
-
-    let mem_reqs = device.get_buffer_memory_requirements(buffer);
-    let mem_type = vk.find_memory_type(
-        mem_reqs.memory_type_bits,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    ).ok_or("No HOST_VISIBLE memory type")?;
-
-    let alloc = vk::MemoryAllocateInfo::default()
-        .allocation_size(mem_reqs.size)
-        .memory_type_index(mem_type);
-    let memory = device.allocate_memory(&alloc, None)
-        .map_err(|e| format!("alloc staging memory: {e}"))?;
-    device.bind_buffer_memory(buffer, memory, 0)
-        .map_err(|e| format!("bind staging memory: {e}"))?;
-
-    let ptr = device.map_memory(memory, 0, size as u64, vk::MemoryMapFlags::empty())
-        .map_err(|e| format!("map staging memory: {e}"))? as *mut u8;
-
-    Ok((buffer, memory, ptr))
-}
 
 unsafe fn pick_swapchain_format(next: &NextDispatch, session: xr::Session) -> Result<vk::Format, String> {
     let mut count = 0;

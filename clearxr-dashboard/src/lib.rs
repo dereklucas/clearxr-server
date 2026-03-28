@@ -193,12 +193,12 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
         scroll_delta = 0.0; // consumed
 
         match result {
-            Ok(Some(_pixels)) => {
-                // TODO: Once shared Vulkan image is wired up, this path goes away.
-                // For now, bump the frame counter to signal the layer.
+            Ok(true) => {
+                // New frame rendered — the timeline semaphore was signaled.
+                // Bump the SHM frame counter so the layer knows to re-sample.
                 shm.bump_frame_counter();
             }
-            Ok(None) => {}
+            Ok(false) => {}
             Err(e) => log::warn!("[ClearXR Dashboard] Render failed: {}", e),
         }
 
