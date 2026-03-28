@@ -349,19 +349,15 @@ impl DashboardOverlay {
                     head[2] - new_dist * new_pitch.cos() * new_yaw.cos(),
                 ];
 
-                // Update panel pose (always face user)
+                // Update panel position
                 self.pose.position.x = new_center[0];
                 self.pose.position.y = new_center[1];
                 self.pose.position.z = new_center[2];
 
-                let fwd = normalize(sub(new_center, head));
-                // Orientation: face toward head (yaw from forward vector, no roll)
-                let yaw_angle = fwd[0].atan2(fwd[2]);
-                let (sy, cy) = yaw_angle.sin_cos();
-                self.pose.orientation = xr::Quaternionf { x: 0.0, y: sy * 0.5f32.sqrt(), z: 0.0, w: cy * 0.5f32.sqrt() };
-                // Simplified: just use yaw rotation around Y axis
-                let half_yaw = yaw_angle / 2.0;
-                self.pose.orientation = xr::Quaternionf { x: 0.0, y: half_yaw.sin(), z: 0.0, w: half_yaw.cos() };
+                // Keep orientation unchanged — identity faces -Z which is correct
+                // for panels positioned in front of the user. Computing yaw from
+                // the head-to-panel vector has sign convention issues that cause
+                // the panel to flip 180° and become invisible.
 
                 // Scale size proportionally with distance
                 let dist_scale = new_dist / self.grab_initial_distance.max(0.1);

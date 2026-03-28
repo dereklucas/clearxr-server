@@ -218,7 +218,12 @@ impl LayerDashboard {
                     rect.center(),
                     egui::vec2(rect.width() * 0.12, 5.0 * s),
                 );
-                let is_hovered = ui.rect_contains_pointer(pill_rect);
+                // Hit area is the full panel height, wider than the visual pill
+                let hit_rect = egui::Rect::from_center_size(
+                    rect.center(),
+                    egui::vec2(rect.width() * 0.4, rect.height()),
+                );
+                let is_hovered = ui.rect_contains_pointer(hit_rect);
                 let color = if is_hovered {
                     egui::Color32::from_rgba_premultiplied(74, 158, 255, 220)
                 } else {
