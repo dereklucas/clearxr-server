@@ -34,3 +34,20 @@ clearxr-dashboard = { path = "../clearxr-dashboard" }
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+# Optimize rendering/egui dependencies even in dev builds.
+# Without this, per-pixel loops in egui-ash-renderer take 260ms+ in debug mode.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package.egui-ash-renderer]
+opt-level = 3
+
+[profile.dev.package.egui]
+opt-level = 3
+
+[profile.dev.package.epaint]
+opt-level = 3
+
+[profile.dev.package.ash]
+opt-level = 2

@@ -7,12 +7,16 @@ use log::{info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// A captured frame: raw BGRA pixels, tightly packed (4 bytes per pixel).
+/// A captured frame: RGBA pixels, already downscaled to max_side, tightly packed.
 pub struct CaptureFrame {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
 }
+
+/// Maximum texture dimension for egui. Frames larger than this are downscaled
+/// on the capture thread to avoid stalling the render thread.
+const MAX_SIDE: u32 = 2048;
 
 pub struct ScreenCapture {
     receiver: std::sync::mpsc::Receiver<CaptureFrame>,
@@ -65,6 +69,11 @@ impl ScreenCapture {
     pub fn latest_frame(&self) -> Option<&CaptureFrame> {
         self.latest_frame.as_ref()
     }
+
+    /// Take ownership of the latest frame (avoids cloning the pixel buffer).
+    pub fn take_latest_frame(&mut self) -> Option<CaptureFrame> {
+        self.latest_frame.take()
+    }
 }
 
 impl Drop for ScreenCapture {
@@ -103,21 +112,70 @@ fn capture_thread(
     };
 
     let frame_interval = std::time::Duration::from_millis(33); // ~30fps
-    let mut buffer = Vec::new(); // reusable buffer -- stays allocated across frames
+    let mut capture_buf = Vec::new(); // reusable BGRA capture buffer
+    // Double-buffer for processed RGBA output (avoids alloc per frame)
+    let mut rgba_bufs = [Vec::new(), Vec::new()];
+    let mut buf_idx: usize = 0;
 
     while keep_running.load(Ordering::Relaxed) {
         let frame_start = std::time::Instant::now();
 
-        match dxgi.capture_bgra_frame_into(&mut buffer) {
+        match dxgi.capture_bgra_frame_into(&mut capture_buf) {
             Ok(Some((w, h))) => {
-                // Clone the buffer for the channel (buffer stays allocated for next frame)
-                let frame = CaptureFrame {
-                    data: buffer.clone(),
-                    width: w,
-                    height: h,
+                // Downscale + BGRA→RGBA on the capture thread (not the render thread).
+                // This is the hot pixel loop — runs here so it doesn't block egui.
+                let (dst_w, dst_h) = if w > MAX_SIDE || h > MAX_SIDE {
+                    let scale = MAX_SIDE as f32 / w.max(h) as f32;
+                    ((w as f32 * scale) as u32, (h as f32 * scale) as u32)
+                } else {
+                    (w, h)
                 };
-                // try_send: drop the frame if the channel is full (main thread hasn't consumed yet)
-                let _ = sender.try_send(frame);
+
+                let rgba = &mut rgba_bufs[buf_idx];
+                let dst_pixels = (dst_w * dst_h * 4) as usize;
+                rgba.resize(dst_pixels, 0);
+
+                if dst_w == w && dst_h == h {
+                    // Same size: just BGRA→RGBA swap
+                    rgba.copy_from_slice(&capture_buf[..dst_pixels]);
+                    for pixel in rgba.chunks_exact_mut(4) {
+                        pixel.swap(0, 2);
+                    }
+                } else {
+                    // Nearest-neighbor downscale + BGRA→RGBA in one pass
+                    let src_w = w as usize;
+                    let src_h = h as usize;
+                    let dw = dst_w as usize;
+                    let dh = dst_h as usize;
+                    for dy in 0..dh {
+                        let sy = dy * src_h / dh;
+                        for dx in 0..dw {
+                            let sx = dx * src_w / dw;
+                            let si = (sy * src_w + sx) * 4;
+                            let di = (dy * dw + dx) * 4;
+                            rgba[di] = capture_buf[si + 2];     // R ← B
+                            rgba[di + 1] = capture_buf[si + 1]; // G
+                            rgba[di + 2] = capture_buf[si];     // B ← R
+                            rgba[di + 3] = capture_buf[si + 3]; // A
+                        }
+                    }
+                }
+
+                // Send processed RGBA frame (move the buffer, reclaim on reuse)
+                let frame = CaptureFrame {
+                    data: std::mem::take(rgba),
+                    width: dst_w,
+                    height: dst_h,
+                };
+                match sender.try_send(frame) {
+                    Ok(()) => {
+                        buf_idx = 1 - buf_idx;
+                    }
+                    Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                        rgba_bufs[buf_idx] = returned.data;
+                    }
+                    Err(_) => break,
+                }
             }
             Ok(None) => {
                 // No new frame available, sleep briefly and retry

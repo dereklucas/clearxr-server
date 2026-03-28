@@ -280,6 +280,8 @@ struct LayerState {
     trigger_actions: HashMap<(u64, Hand), ()>,
     /// Action handles that are squeeze float actions (path contains "/squeeze/value")
     squeeze_actions: HashMap<(u64, Hand), ()>,
+    /// Action handles that are menu boolean actions (path contains "/menu/click")
+    menu_actions: HashMap<(u64, Hand), ()>,
     /// Space handle → (hand) for aim spaces created via xrCreateActionSpace
     aim_spaces: HashMap<u64, Hand>,
     /// Per-hand controller state captured from xrLocateSpace / xrGetActionStateFloat
@@ -610,6 +612,7 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                 aim_actions: HashSet::new(),
                 trigger_actions: HashMap::new(),
                 squeeze_actions: HashMap::new(),
+                menu_actions: HashMap::new(),
                 aim_spaces: HashMap::new(),
                 controller_state: Default::default(),
                 left_hand_path: string_to_path(&dispatch, instance, b"/user/hand/left\0").unwrap_or(xr::Path::NULL),
@@ -933,19 +936,38 @@ unsafe fn query_float(next: &NextDispatch, session: xr::Session, action_raw: u64
     }
 }
 
+/// Actively query a boolean action value for a specific hand.
+unsafe fn query_boolean(next: &NextDispatch, session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<bool> {
+    let get_info = xr::ActionStateGetInfo {
+        ty: xr::ActionStateGetInfo::TYPE,
+        next: std::ptr::null(),
+        action: xr::Action::from_raw(action_raw),
+        subaction_path: subaction,
+    };
+    let mut state_out = xr::ActionStateBoolean {
+        ty: xr::ActionStateBoolean::TYPE,
+        next: std::ptr::null_mut(),
+        current_state: xr::FALSE,
+        changed_since_last_sync: xr::FALSE,
+        last_change_time: xr::Time::from_nanos(0),
+        is_active: xr::FALSE,
+    };
+    let r = (next.get_action_state_boolean)(session, &get_info, &mut state_out);
+    if r == xr::Result::SUCCESS && state_out.is_active.into() {
+        Some(state_out.current_state.into())
+    } else {
+        None
+    }
+}
+
 unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     static DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let diag = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    // Poll opaque channel for button overrides (menu button for visibility toggle)
-    let mut menu_down = false;
+    // Poll opaque channel (deprecated — only kept for button overrides that
+    // haven't been migrated to OpenXR actions yet)
     if let Some(ref mut ch) = state.opaque {
         ch.poll();
-        if let Some(pkt) = ch.latest {
-            let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
-            let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
-            menu_down = left_menu || right_menu;
-        }
     }
 
     // Read aim poses captured by hook_locate_space
@@ -983,6 +1005,17 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
             if val.is_some() {
                 hand_state.squeeze = val.unwrap_or(0.0);
                 break;
+            }
+        }
+    }
+
+    // Query menu button via OpenXR actions (reliable held-state, not opaque channel pulses)
+    let mut menu_down = false;
+    for &(action_raw, _hand) in state.menu_actions.keys() {
+        for &hand_path in &[state.left_hand_path, state.right_hand_path] {
+            if hand_path == xr::Path::NULL { continue; }
+            if let Some(pressed) = query_boolean(&next, session, action_raw, hand_path) {
+                if pressed { menu_down = true; }
             }
         }
     }
@@ -1031,9 +1064,9 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         if overlay.update_menu_button(menu_down) {
             layer_log!(info, "[ClearXR Layer] Dashboard overlay visibility toggled -> {}.", overlay.visible());
         }
-        if active_hands != 0 {
-            overlay.send_controller_input(&pkt);
-        }
+        // Always send — even when no controllers are active, the dashboard
+        // needs a "nothing happening" packet to clear stale pointer/trigger state.
+        overlay.send_controller_input(&pkt);
         if diag < 5 || diag % 360 == 0 {
             layer_log!(info,
                 "[ClearXR Layer] Controller state: active=0x{:02x} L=[{:.2},{:.2},{:.2}] R=[{:.2},{:.2},{:.2}] L_trig={:.2} R_trig={:.2}",
@@ -1298,6 +1331,10 @@ unsafe extern "system" fn hook_suggest_bindings(
                 state.squeeze_actions.insert((action_raw, hand), ());
                 if let Some(lock) = SQUEEZE_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert((action_raw, hand), ()); } }
                 layer_log!(info, "[ClearXR Layer] Tracked squeeze action: 0x{:x} {:?}", action_raw, hand);
+            }
+            if component == "/input/menu/click" {
+                state.menu_actions.insert((action_raw, hand), ());
+                layer_log!(info, "[ClearXR Layer] Tracked menu action: 0x{:x} {:?}", action_raw, hand);
             }
             if component == "/input/thumbstick" {
                 if let Some(lock) = THUMBSTICK_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert(action_raw, ()); } }

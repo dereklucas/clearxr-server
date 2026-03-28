@@ -8,7 +8,18 @@ use ash::vk;
 use egui::{Context, Event, Pos2, PointerButton, RawInput, Rect, Vec2};
 use std::mem::ManuallyDrop;
 
-const MAX_TEXTURE_SIDE: usize = 2048;
+/// Per-flight-frame GPU resources for double-buffering.
+struct FlightFrame {
+    command_buffer: vk::CommandBuffer,
+    fence: vk::Fence,
+    staging_buffer: vk::Buffer,
+    staging_memory: vk::DeviceMemory,
+    staging_ptr: *mut u8,
+    /// Textures to free after this flight's fence is waited on.
+    /// Deferred because free_textures destroys GPU resources that the
+    /// in-flight command buffer may still reference.
+    pending_free: Vec<egui::TextureId>,
+}
 
 pub struct HeadlessRenderer {
     _entry: ash::Entry,
@@ -17,8 +28,11 @@ pub struct HeadlessRenderer {
     device: ash::Device,
     queue: vk::Queue,
     command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-    fence: vk::Fence,
+
+    // Double-buffered flight frames (eliminates GPU/CPU serialization)
+    flights: [FlightFrame; 2],
+    current_flight: usize,
+    pending_readback: bool,
 
     // Offscreen render target
     render_image: vk::Image,
@@ -26,11 +40,6 @@ pub struct HeadlessRenderer {
     render_image_view: vk::ImageView,
     render_pass: vk::RenderPass,
     framebuffer: vk::Framebuffer,
-
-    // Readback staging buffer
-    staging_buffer: vk::Buffer,
-    staging_memory: vk::DeviceMemory,
-    staging_ptr: *mut u8,
 
     width: u32,
     height: u32,
@@ -83,7 +92,7 @@ impl HeadlessRenderer {
         let device = unsafe { instance.create_device(physical_device, &device_ci, None)? };
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
 
-        // Command pool + buffer + fence
+        // Command pool + double-buffered flight frames
         let pool_ci = vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
@@ -92,10 +101,16 @@ impl HeadlessRenderer {
         let alloc_ci = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        let command_buffer = unsafe { device.allocate_command_buffers(&alloc_ci)? }[0];
+            .command_buffer_count(2);
+        let command_buffers = unsafe { device.allocate_command_buffers(&alloc_ci)? };
 
-        let fence = unsafe {
+        let fence0 = unsafe {
+            device.create_fence(
+                &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                None,
+            )?
+        };
+        let fence1 = unsafe {
             device.create_fence(
                 &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
                 None,
@@ -169,31 +184,54 @@ impl HeadlessRenderer {
             .layers(1);
         let framebuffer = unsafe { device.create_framebuffer(&fb_ci, None)? };
 
-        // Staging buffer for readback
+        // Two staging buffers for double-buffered readback
         let pixel_size = (width * height * 4) as usize;
         let buf_ci = vk::BufferCreateInfo::default()
             .size(pixel_size as u64)
             .usage(vk::BufferUsageFlags::TRANSFER_DST);
-        let staging_buffer = unsafe { device.create_buffer(&buf_ci, None)? };
 
-        let buf_reqs = unsafe { device.get_buffer_memory_requirements(staging_buffer) };
-        let buf_mem_type = find_memory_type(
-            &mem_props,
-            buf_reqs.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )
-        .ok_or_else(|| anyhow::anyhow!("No suitable memory type for staging buffer"))?;
-
-        let buf_alloc = vk::MemoryAllocateInfo::default()
-            .allocation_size(buf_reqs.size)
-            .memory_type_index(buf_mem_type);
-        let staging_memory = unsafe { device.allocate_memory(&buf_alloc, None)? };
-        unsafe { device.bind_buffer_memory(staging_buffer, staging_memory, 0)? };
-
-        let staging_ptr = unsafe {
-            device.map_memory(staging_memory, 0, pixel_size as u64, vk::MemoryMapFlags::empty())?
-                as *mut u8
+        let create_staging = |device: &ash::Device| -> Result<(vk::Buffer, vk::DeviceMemory, *mut u8)> {
+            let buffer = unsafe { device.create_buffer(&buf_ci, None)? };
+            let reqs = unsafe { device.get_buffer_memory_requirements(buffer) };
+            let mem_type = find_memory_type(
+                &mem_props,
+                reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .ok_or_else(|| anyhow::anyhow!("No suitable memory type for staging buffer"))?;
+            let alloc = vk::MemoryAllocateInfo::default()
+                .allocation_size(reqs.size)
+                .memory_type_index(mem_type);
+            let memory = unsafe { device.allocate_memory(&alloc, None)? };
+            unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
+            let ptr = unsafe {
+                device.map_memory(memory, 0, pixel_size as u64, vk::MemoryMapFlags::empty())?
+                    as *mut u8
+            };
+            Ok((buffer, memory, ptr))
         };
+
+        let (staging_buf0, staging_mem0, staging_ptr0) = create_staging(&device)?;
+        let (staging_buf1, staging_mem1, staging_ptr1) = create_staging(&device)?;
+
+        let flights = [
+            FlightFrame {
+                command_buffer: command_buffers[0],
+                fence: fence0,
+                staging_buffer: staging_buf0,
+                staging_memory: staging_mem0,
+                staging_ptr: staging_ptr0,
+                pending_free: Vec::new(),
+            },
+            FlightFrame {
+                command_buffer: command_buffers[1],
+                fence: fence1,
+                staging_buffer: staging_buf1,
+                staging_memory: staging_mem1,
+                staging_ptr: staging_ptr1,
+                pending_free: Vec::new(),
+            },
+        ];
 
         // egui
         let ctx = Context::default();
@@ -206,7 +244,9 @@ impl HeadlessRenderer {
             device.clone(),
             render_pass,
             egui_ash_renderer::Options {
-                srgb_framebuffer: false, // UNORM, not SRGB
+                // true: shader skips manual LINEARtoSRGB, so sRGB desktop pixels
+                // pass through without double-encoding (fixes gamma crush).
+                srgb_framebuffer: true,
                 ..Default::default()
             },
         )
@@ -224,16 +264,14 @@ impl HeadlessRenderer {
             device,
             queue,
             command_pool,
-            command_buffer,
-            fence,
+            flights,
+            current_flight: 0,
+            pending_readback: false,
             render_image,
             render_image_memory,
             render_image_view,
             render_pass,
             framebuffer,
-            staging_buffer,
-            staging_memory,
-            staging_ptr,
             width,
             height,
             pixel_size,
@@ -247,6 +285,9 @@ impl HeadlessRenderer {
     }
 
     /// Run one egui frame. Returns the RGBA pixel data if a repaint happened.
+    ///
+    /// Uses double-buffered flight frames: submits GPU work without waiting,
+    /// reads back the PREVIOUS frame's pixels (1 frame latency, overlaps CPU/GPU).
     pub fn render_frame(
         &mut self,
         pointer_uv: Option<(f32, f32)>,
@@ -255,7 +296,26 @@ impl HeadlessRenderer {
         scroll_delta: f32,
         build_ui: impl FnMut(&Context),
     ) -> Result<Option<&[u8]>> {
-        // Build input
+        // 1. Collect readback from previous submission (if any).
+        let readback_info: Option<(*const u8, usize)> = if self.pending_readback {
+            let prev = 1 - self.current_flight;
+            unsafe {
+                self.device.wait_for_fences(&[self.flights[prev].fence], true, u64::MAX)?;
+            }
+            // Free textures deferred from the previous flight (now safe — fence waited)
+            if !self.flights[prev].pending_free.is_empty() {
+                let to_free: Vec<_> = std::mem::take(&mut self.flights[prev].pending_free);
+                self.egui_renderer
+                    .free_textures(&to_free)
+                    .map_err(|e| anyhow::anyhow!("free_textures failed: {e}"))?;
+            }
+            self.pending_readback = false;
+            Some((self.flights[prev].staging_ptr as *const u8, self.pixel_size))
+        } else {
+            None
+        };
+
+        // 2. Build egui input
         let mut raw_input = RawInput {
             screen_rect: Some(Rect::from_min_size(
                 Pos2::ZERO,
@@ -301,14 +361,14 @@ impl HeadlessRenderer {
             });
         }
 
-        // Run egui
-        let pointer_for_dot = self.pointer_pos;
+        // 3. Run egui
+        let dot_pos = self.pointer_pos;
         let mut build_ui = build_ui;
         let full_output = self.ctx.run(raw_input, |ctx| {
             build_ui(ctx);
 
             // Draw pointer dot overlay
-            if let Some(pos) = pointer_for_dot {
+            if let Some(pos) = dot_pos {
                 let painter = ctx.layer_painter(egui::LayerId::new(
                     egui::Order::Tooltip,
                     egui::Id::new("pointer_dot"),
@@ -323,7 +383,7 @@ impl HeadlessRenderer {
             .values()
             .any(|vo| vo.repaint_delay == std::time::Duration::ZERO);
 
-        // Texture uploads
+        // 4. Texture uploads (opt-level=3 for egui-ash-renderer makes this fast)
         let textures_delta = full_output.textures_delta;
         if !textures_delta.set.is_empty() {
             self.egui_renderer
@@ -331,27 +391,33 @@ impl HeadlessRenderer {
                 .map_err(|e| anyhow::anyhow!("set_textures failed: {e}"))?;
         }
 
+        // 5. Skip GPU work if no repaint needed (but still return pending readback)
         if !needs_repaint && self.has_rendered {
+            // No GPU work submitted this frame, so free_textures is safe immediately.
             if !textures_delta.free.is_empty() {
                 self.egui_renderer
                     .free_textures(&textures_delta.free)
                     .map_err(|e| anyhow::anyhow!("free_textures failed: {e}"))?;
             }
-            return Ok(None);
+            return Ok(readback_info.map(|(ptr, len)| unsafe {
+                std::slice::from_raw_parts(ptr, len)
+            }));
         }
 
-        // Tessellate
+        // 6. Tessellate
         let clipped_primitives = self
             .ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
 
-        // GPU render
+        // 7. GPU render into current flight frame (no blocking wait after submit!)
+        let slot = self.current_flight;
         let device = &self.device;
-        let cmd = self.command_buffer;
 
         unsafe {
-            device.wait_for_fences(&[self.fence], true, u64::MAX)?;
-            device.reset_fences(&[self.fence])?;
+            device.wait_for_fences(&[self.flights[slot].fence], true, u64::MAX)?;
+            device.reset_fences(&[self.flights[slot].fence])?;
+
+            let cmd = self.flights[slot].command_buffer;
 
             device.begin_command_buffer(
                 cmd,
@@ -359,7 +425,6 @@ impl HeadlessRenderer {
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
 
-            // Transition to COLOR_ATTACHMENT
             let barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(if self.has_rendered {
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL
@@ -383,7 +448,6 @@ impl HeadlessRenderer {
                 &[], &[], &[barrier],
             );
 
-            // Render pass
             let clear = vk::ClearValue {
                 color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] },
             };
@@ -408,7 +472,6 @@ impl HeadlessRenderer {
 
             device.cmd_end_render_pass(cmd);
 
-            // Transition to TRANSFER_SRC for readback
             let barrier2 = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
@@ -429,7 +492,6 @@ impl HeadlessRenderer {
                 &[], &[], &[barrier2],
             );
 
-            // Copy image to staging buffer
             let region = vk::BufferImageCopy::default()
                 .image_subresource(
                     vk::ImageSubresourceLayers::default()
@@ -441,7 +503,7 @@ impl HeadlessRenderer {
                 cmd,
                 self.render_image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                self.staging_buffer,
+                self.flights[slot].staging_buffer,
                 &[region],
             );
 
@@ -449,22 +511,20 @@ impl HeadlessRenderer {
 
             let submit = vk::SubmitInfo::default()
                 .command_buffers(std::slice::from_ref(&cmd));
-            device.queue_submit(self.queue, &[submit], self.fence)?;
-            device.wait_for_fences(&[self.fence], true, u64::MAX)?;
+            device.queue_submit(self.queue, &[submit], self.flights[slot].fence)?;
         }
 
-        // Free textures after render
-        if !textures_delta.free.is_empty() {
-            self.egui_renderer
-                .free_textures(&textures_delta.free)
-                .map_err(|e| anyhow::anyhow!("free_textures failed: {e}"))?;
-        }
+        // Defer texture frees until this flight's fence is waited on (next frame's readback).
+        // The GPU may still be referencing these textures in the just-submitted command buffer.
+        self.flights[slot].pending_free = textures_delta.free;
 
         self.has_rendered = true;
+        self.current_flight = 1 - self.current_flight;
+        self.pending_readback = true;
 
-        // Return pointer to the mapped staging buffer
-        let pixels = unsafe { std::slice::from_raw_parts(self.staging_ptr, self.pixel_size) };
-        Ok(Some(pixels))
+        Ok(readback_info.map(|(ptr, len)| unsafe {
+            std::slice::from_raw_parts(ptr, len)
+        }))
     }
 
     pub fn width(&self) -> u32 {
@@ -483,18 +543,21 @@ impl Drop for HeadlessRenderer {
             self.device.device_wait_idle().ok();
 
             // CRITICAL: Drop the egui renderer FIRST — it uses the device internally.
-            // If we destroy the device before the egui renderer drops, it's use-after-free.
             ManuallyDrop::drop(&mut self.egui_renderer);
 
-            self.device.unmap_memory(self.staging_memory);
-            self.device.destroy_buffer(self.staging_buffer, None);
-            self.device.free_memory(self.staging_memory, None);
+            // Destroy both flight frames
+            for flight in &self.flights {
+                self.device.unmap_memory(flight.staging_memory);
+                self.device.destroy_buffer(flight.staging_buffer, None);
+                self.device.free_memory(flight.staging_memory, None);
+                self.device.destroy_fence(flight.fence, None);
+            }
+
             self.device.destroy_framebuffer(self.framebuffer, None);
             self.device.destroy_render_pass(self.render_pass, None);
             self.device.destroy_image_view(self.render_image_view, None);
             self.device.destroy_image(self.render_image, None);
             self.device.free_memory(self.render_image_memory, None);
-            self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);

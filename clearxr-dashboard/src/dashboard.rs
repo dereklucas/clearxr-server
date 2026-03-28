@@ -33,6 +33,7 @@ pub struct LayerDashboard {
     keyboard_visible: bool,
     keyboard_shift: bool,
     pending_keys: Vec<String>,
+    visuals_set: bool,
     fps_timer: std::time::Instant,
     fps_frame_count: u32,
     fps_current: f32,
@@ -67,6 +68,7 @@ impl LayerDashboard {
             desktop_texture: None,
             desktop_error: None,
             pending_desktop_frame: None,
+            visuals_set: false,
         }
     }
 
@@ -83,56 +85,33 @@ impl LayerDashboard {
     /// Upload the pending desktop frame to egui. Call this inside ctx.run().
     pub fn apply_pending_desktop_frame(&mut self, ctx: &egui::Context) {
         if let Some(frame) = self.pending_desktop_frame.take() {
-            self.update_desktop_frame(ctx, &frame);
+            self.update_desktop_frame(ctx, frame);
+            // Force repaint so the desktop tab refreshes even when
+            // the pointer isn't aimed at the panel (no input events).
+            ctx.request_repaint();
         }
     }
 
-    /// Upload a new desktop capture frame as an egui texture.
-    /// Downscales if the frame exceeds egui's max texture size (2048).
-    pub fn update_desktop_frame(&mut self, ctx: &egui::Context, frame: &CaptureFrame) {
-        const MAX_SIDE: usize = 2048;
+    /// Upload a pre-processed RGBA desktop frame as an egui texture.
+    /// The capture thread already handles BGRA→RGBA conversion and downscaling.
+    pub fn update_desktop_frame(&mut self, ctx: &egui::Context, frame: CaptureFrame) {
+        let w = frame.width as usize;
+        let h = frame.height as usize;
+        let pixel_count = w * h;
 
-        let src_w = frame.width as usize;
-        let src_h = frame.height as usize;
-
-        // Determine if we need to downscale
-        let (dst_w, dst_h, needs_scale) = if src_w > MAX_SIDE || src_h > MAX_SIDE {
-            let scale = MAX_SIDE as f32 / src_w.max(src_h) as f32;
-            (
-                (src_w as f32 * scale) as usize,
-                (src_h as f32 * scale) as usize,
-                true,
-            )
-        } else {
-            (src_w, src_h, false)
+        // Zero-copy reinterpret Vec<u8> as Vec<Color32>.
+        // Desktop capture is always opaque (a=255), so RGBA bytes are already
+        // premultiplied and match Color32's in-memory layout exactly.
+        // This avoids the 60ms+ per-pixel loop of from_rgba_unmultiplied in debug builds.
+        let pixels: Vec<egui::Color32> = unsafe {
+            let mut data = frame.data;
+            assert_eq!(data.len(), pixel_count * 4, "desktop frame size mismatch");
+            let ptr = data.as_mut_ptr() as *mut egui::Color32;
+            let cap = data.capacity() / 4;
+            std::mem::forget(data);
+            Vec::from_raw_parts(ptr, pixel_count, cap)
         };
-
-        let rgba = if needs_scale {
-            // Nearest-neighbor downscale + BGRA→RGBA in one pass
-            let mut out = vec![0u8; dst_w * dst_h * 4];
-            for dy in 0..dst_h {
-                let sy = dy * src_h / dst_h;
-                for dx in 0..dst_w {
-                    let sx = dx * src_w / dst_w;
-                    let si = (sy * src_w + sx) * 4;
-                    let di = (dy * dst_w + dx) * 4;
-                    out[di] = frame.data[si + 2];     // R ← B
-                    out[di + 1] = frame.data[si + 1]; // G
-                    out[di + 2] = frame.data[si];     // B ← R
-                    out[di + 3] = frame.data[si + 3]; // A
-                }
-            }
-            out
-        } else {
-            // Just BGRA→RGBA
-            let mut out = frame.data.clone();
-            for pixel in out.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            out
-        };
-
-        let image = egui::ColorImage::from_rgba_unmultiplied([dst_w, dst_h], &rgba);
+        let image = egui::ColorImage { size: [w, h], pixels };
 
         match &mut self.desktop_texture {
             Some(handle) => {
@@ -178,12 +157,15 @@ impl LayerDashboard {
         let mut kb_shift = self.keyboard_shift;
         let mut kb_keys: Vec<String> = Vec::new();
 
-        // Set dark background
-        ctx.set_visuals(egui::Visuals {
-            panel_fill: egui::Color32::from_rgba_premultiplied(10, 10, 20, 250),
-            window_fill: egui::Color32::from_rgba_premultiplied(10, 10, 20, 250),
-            ..egui::Visuals::dark()
-        });
+        // Set dark background (once — calling every frame defeats repaint skipping)
+        if !self.visuals_set {
+            ctx.set_visuals(egui::Visuals {
+                panel_fill: egui::Color32::from_rgba_premultiplied(10, 10, 20, 250),
+                window_fill: egui::Color32::from_rgba_premultiplied(10, 10, 20, 250),
+                ..egui::Visuals::dark()
+            });
+            self.visuals_set = true;
+        }
 
         // ---- Grab bar at very bottom ----
         egui::TopBottomPanel::bottom("grab_bar")

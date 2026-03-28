@@ -56,6 +56,7 @@ pub struct DashboardOverlay {
     // State
     visible: bool,
     menu_was_down: bool,
+    last_menu_toggle: std::time::Instant,
     pose: xr::Posef,
     size: xr::Extent2Df,
 }
@@ -140,6 +141,7 @@ impl DashboardOverlay {
             pipe,
             visible: true,
             menu_was_down: false,
+            last_menu_toggle: std::time::Instant::now(),
             pose: xr::Posef {
                 orientation: xr::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
                 position: xr::Vector3f { x: 0.0, y: 1.5, z: -2.5 },
@@ -158,6 +160,14 @@ impl DashboardOverlay {
 
     pub fn update_menu_button(&mut self, menu_down: bool) -> bool {
         if menu_down && !self.menu_was_down {
+            // Debounce: the opaque channel delivers menu as momentary pulses,
+            // causing rapid re-triggers. Ignore toggles within 300ms.
+            let now = std::time::Instant::now();
+            if now.duration_since(self.last_menu_toggle).as_millis() < 300 {
+                self.menu_was_down = menu_down;
+                return false;
+            }
+            self.last_menu_toggle = now;
             self.menu_was_down = menu_down;
             self.visible = !self.visible;
             // Write visibility to SHM so dashboard can also read it
@@ -173,10 +183,59 @@ impl DashboardOverlay {
         false
     }
 
-    /// Forward controller data to the dashboard process via named pipe.
+    /// Compute ray-quad intersection and send pre-computed UV + buttons to the dashboard.
+    ///
+    /// The layer does all spatial math here so the dashboard is a pure
+    /// "mouse events in, pixels out" module with no 3D math.
     pub fn send_controller_input(&mut self, pkt: &SpatialControllerPacket) {
         static PIPE_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let pipe_count = PIPE_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Compute ray-quad intersection against the dashboard panel
+        let panel_center = [self.pose.position.x, self.pose.position.y, self.pose.position.z];
+        let q = [self.pose.orientation.x, self.pose.orientation.y, self.pose.orientation.z, self.pose.orientation.w];
+        let panel_right = quat_rotate(&q, [1.0, 0.0, 0.0]);
+        let panel_up = quat_rotate(&q, [0.0, 1.0, 0.0]);
+        let panel_normal = cross(panel_right, panel_up);
+        let half_w = self.size.width / 2.0;
+        let half_h = self.size.height / 2.0;
+
+        let mut best_hit: Option<(f32, f32, f32)> = None;
+        let mut best_trigger = 0.0f32;
+        let mut best_grip = 0.0f32;
+        let mut best_thumbstick_y = 0.0f32;
+
+        for (mask, hand) in [(0x01u8, pkt.left), (0x02u8, pkt.right)] {
+            if pkt.active_hands & mask == 0 {
+                continue;
+            }
+            let aim_pos = [hand.pos_x, hand.pos_y, hand.pos_z];
+            let aim_rot = [hand.rot_x, hand.rot_y, hand.rot_z, hand.rot_w];
+            let aim_dir = quat_rotate(&aim_rot, [0.0, 0.0, -1.0]);
+
+            if let Some((u, v, t)) = ray_quad_hit(
+                aim_pos, aim_dir, panel_center, panel_normal, panel_right, panel_up, half_w, half_h,
+            ) {
+                if best_hit.map_or(true, |(_, _, prev_t)| t < prev_t) {
+                    best_hit = Some((u, v, t));
+                    best_trigger = hand.trigger;
+                    best_grip = hand.grip;
+                    best_thumbstick_y = hand.thumbstick_y;
+                }
+            }
+        }
+
+        // Build simplified packet for the dashboard
+        let input_pkt = DashboardInputPacket {
+            magic: 0x4449,
+            flags: if best_hit.is_some() { 0x01 } else { 0x00 },
+            _pad: 0,
+            pointer_u: best_hit.map_or(0.0, |(u, _, _)| u),
+            pointer_v: best_hit.map_or(0.0, |(_, v, _)| v),
+            trigger: best_trigger,
+            grip: best_grip,
+            thumbstick_y: best_thumbstick_y,
+        };
 
         #[cfg(target_os = "windows")]
         {
@@ -186,8 +245,8 @@ impl DashboardOverlay {
             if let Some(handle) = self.pipe {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(
-                        pkt as *const SpatialControllerPacket as *const u8,
-                        std::mem::size_of::<SpatialControllerPacket>(),
+                        &input_pkt as *const DashboardInputPacket as *const u8,
+                        std::mem::size_of::<DashboardInputPacket>(),
                     )
                 };
                 let mut written = 0u32;
@@ -201,10 +260,10 @@ impl DashboardOverlay {
                     )
                 };
                 if pipe_count < 5 || pipe_count % 360 == 0 {
-                    let active = pkt.active_hands;
                     layer_log!(info,
-                        "[ClearXR Layer] Pipe write: ok={} written={}/{} active=0x{:02x}",
-                        ok, written, bytes.len(), active
+                        "[ClearXR Layer] Pipe write: ok={} written={}/{} uv={:?}",
+                        ok, written, bytes.len(),
+                        best_hit.map(|(u, v, _)| (u, v))
                     );
                 }
                 if ok == 0 {
@@ -212,8 +271,6 @@ impl DashboardOverlay {
                     unsafe { windows_sys::Win32::Foundation::CloseHandle(handle); }
                     self.pipe = None;
                 }
-            } else if pipe_count < 5 || pipe_count % 360 == 0 {
-                layer_log!(info, "[ClearXR Layer] send_controller_input: no pipe");
             }
         }
     }
@@ -255,8 +312,10 @@ impl DashboardOverlay {
         let shmem = self.shmem.as_ref().unwrap();
         let header = &*(shmem.as_ptr() as *const ShmHeader);
 
-        // Always read header (pose, visibility can change without a new frame)
-        self.visible = header.flags & 1 != 0;
+        // Read panel pose from SHM header (dashboard writes these).
+        // NOTE: visibility is NOT read from SHM — the layer is sole authority
+        // via update_menu_button(). Reading it back caused a fight where the
+        // dashboard's flag overwrite defeated the layer's toggle.
         self.pose.position.x = header.panel_pos[0];
         self.pose.position.y = header.panel_pos[1];
         self.pose.position.z = header.panel_pos[2];
@@ -530,6 +589,79 @@ unsafe fn create_stage_space(next: &NextDispatch, session: xr::Session) -> Resul
     }
     Ok(space)
 }
+
+// ============================================================
+// DashboardInputPacket — simplified packet sent to the dashboard
+// ============================================================
+
+/// Pre-computed input packet. Must match clearxr-dashboard/src/input_pipe.rs.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct DashboardInputPacket {
+    magic: u16,        // 0x4449 ("DI")
+    flags: u8,         // bit 0: has_pointer
+    _pad: u8,
+    pointer_u: f32,
+    pointer_v: f32,
+    trigger: f32,
+    grip: f32,
+    thumbstick_y: f32,
+}
+
+// ============================================================
+// Vector math for ray-quad intersection
+// ============================================================
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+fn quat_rotate(q: &[f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let qv = [q[0], q[1], q[2]];
+    let w = q[3];
+    let t = scale(cross(qv, v), 2.0);
+    add(add(v, scale(t, w)), cross(qv, t))
+}
+
+fn ray_quad_hit(
+    ray_origin: [f32; 3], ray_dir: [f32; 3],
+    center: [f32; 3], normal: [f32; 3], right: [f32; 3], up: [f32; 3],
+    half_w: f32, half_h: f32,
+) -> Option<(f32, f32, f32)> {
+    let denom = dot(ray_dir, normal);
+    if denom.abs() < 1e-6 { return None; }
+    let t = dot(sub(center, ray_origin), normal) / denom;
+    if t < 0.0 { return None; }
+    let hit = add(ray_origin, scale(ray_dir, t));
+    let local = sub(hit, center);
+    let u = dot(local, right) / (half_w * 2.0) + 0.5;
+    let v = 0.5 - dot(local, up) / (half_h * 2.0);
+    if u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 {
+        Some((u, v, t))
+    } else {
+        None
+    }
+}
+
+// ============================================================
+// Pipe connection
+// ============================================================
 
 #[cfg(target_os = "windows")]
 fn connect_pipe() -> Option<windows_sys::Win32::Foundation::HANDLE> {

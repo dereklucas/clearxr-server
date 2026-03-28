@@ -1,51 +1,37 @@
-//! Named pipe server for receiving controller input from the layer.
+//! Named pipe for receiving pre-computed dashboard input from the layer.
 //!
-//! The layer writes raw `SpatialControllerPacket` bytes to the pipe.
-//! The dashboard reads them to perform ray-quad intersection and egui input.
-
-use std::io::Read;
+//! The layer computes ray-quad intersection against the dashboard panel,
+//! then sends UV hit + button state through this pipe. The dashboard just
+//! feeds it to egui — no spatial math needed here.
 
 /// Name of the named pipe.
 pub const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
 
-/// Controller hand data (matches the layer's opaque.rs exactly).
-#[repr(C, packed)]
+/// Pre-computed input packet from the layer. The layer does all spatial math
+/// (ray-quad intersection) and sends just the UI-relevant result.
+///
+/// 24 bytes, matches the layer's definition exactly.
+#[repr(C)]
 #[derive(Copy, Clone, Default)]
-pub struct SpatialControllerHand {
-    pub buttons: u16,
-    pub _reserved: u16,
-    pub thumbstick_x: f32,
-    pub thumbstick_y: f32,
-    pub trigger: f32,
-    pub grip: f32,
-    pub pos_x: f32,
-    pub pos_y: f32,
-    pub pos_z: f32,
-    pub rot_x: f32,
-    pub rot_y: f32,
-    pub rot_z: f32,
-    pub rot_w: f32,
+pub struct DashboardInputPacket {
+    pub magic: u16,        // 0x4449 ("DI")
+    pub flags: u8,         // bit 0: has_pointer
+    pub _pad: u8,
+    pub pointer_u: f32,    // UV coords (valid if has_pointer)
+    pub pointer_v: f32,
+    pub trigger: f32,      // 0.0-1.0 raw value
+    pub grip: f32,         // 0.0-1.0 raw value
+    pub thumbstick_y: f32, // -1.0 to 1.0 raw value
 }
 
-/// Controller packet (matches the layer's opaque.rs exactly).
-#[repr(C, packed)]
-#[derive(Copy, Clone, Default)]
-pub struct SpatialControllerPacket {
-    pub magic: u16,
-    pub version: u8,
-    pub active_hands: u8,
-    pub left: SpatialControllerHand,
-    pub right: SpatialControllerHand,
-}
-
-pub const SC_BTN_MENU: u16 = 1 << 5;
-
-const PACKET_SIZE: usize = std::mem::size_of::<SpatialControllerPacket>();
+const PACKET_SIZE: usize = std::mem::size_of::<DashboardInputPacket>();
 
 /// Server side (dashboard process): creates pipe and reads controller packets.
 pub struct InputPipeServer {
     #[cfg(target_os = "windows")]
     pipe: Option<windows::Win32::Foundation::HANDLE>,
+    #[cfg(target_os = "windows")]
+    connected: bool,
     buffer: [u8; PACKET_SIZE],
 }
 
@@ -77,6 +63,7 @@ impl InputPipeServer {
                     log::info!("[ClearXR Dashboard] Named pipe created: {}", PIPE_NAME);
                     Ok(Self {
                         pipe: Some(h),
+                        connected: false,
                         buffer: [0u8; PACKET_SIZE],
                     })
                 }
@@ -97,19 +84,32 @@ impl InputPipeServer {
     /// Returns None if no data available or client not connected.
     /// Drain all pending packets from the pipe and return the latest one.
     /// With PIPE_TYPE_MESSAGE, each ReadFile returns exactly one complete packet.
-    pub fn try_read(&mut self) -> Option<SpatialControllerPacket> {
+    pub fn try_read(&mut self) -> Option<DashboardInputPacket> {
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Pipes::ConnectNamedPipe;
-
             let handle = self.pipe?;
 
-            // Try to accept a client connection (non-blocking due to PIPE_NOWAIT).
-            unsafe { ConnectNamedPipe(handle, None).ok() };
+            // Only call ConnectNamedPipe when not yet connected (avoids kernel syscall per frame).
+            if !self.connected {
+                use windows::Win32::System::Pipes::ConnectNamedPipe;
+                let result = unsafe { ConnectNamedPipe(handle, None) };
+                // ERROR_PIPE_CONNECTED (0x217) means client already connected — that's fine.
+                if result.is_ok() {
+                    self.connected = true;
+                } else if let Err(ref e) = result {
+                    if e.code().0 as u32 == 0x80070217 {
+                        self.connected = true;
+                    }
+                }
+                if !self.connected {
+                    return None;
+                }
+            }
 
-            // Drain all pending messages, keep only the latest
-            let mut latest: Option<SpatialControllerPacket> = None;
-            loop {
+            // Drain pending messages, keep only the latest. Cap at 16 to prevent
+            // stall-burst if the dashboard was blocked and packets accumulated.
+            let mut latest: Option<DashboardInputPacket> = None;
+            for _ in 0..16 {
                 let mut bytes_read = 0u32;
                 let ok = unsafe {
                     windows::Win32::Storage::FileSystem::ReadFile(
@@ -120,13 +120,24 @@ impl InputPipeServer {
                     )
                 };
                 if ok.is_ok() && bytes_read as usize == PACKET_SIZE {
-                    let pkt: SpatialControllerPacket =
-                        unsafe { std::ptr::read(self.buffer.as_ptr() as *const SpatialControllerPacket) };
-                    if pkt.magic == 0x5343 {
+                    let pkt: DashboardInputPacket =
+                        unsafe { std::ptr::read_unaligned(self.buffer.as_ptr() as *const DashboardInputPacket) };
+                    if pkt.magic == 0x4449 {
                         latest = Some(pkt);
                     }
                 } else {
-                    break; // No more data
+                    // No more data, or read error (client disconnected)
+                    if latest.is_none() {
+                        // If we got nothing, client may have disconnected
+                        if let Err(ref e) = ok {
+                            let code = e.code().0 as u32;
+                            // ERROR_BROKEN_PIPE or ERROR_NO_DATA → mark disconnected
+                            if code == 0x8007006D || code == 0x800700E8 {
+                                self.connected = false;
+                            }
+                        }
+                    }
+                    break;
                 }
             }
             latest
@@ -192,13 +203,13 @@ impl InputPipeClient {
     }
 
     /// Write a controller packet to the pipe.
-    pub fn write_packet(&self, pkt: &SpatialControllerPacket) -> bool {
+    pub fn write_packet(&self, pkt: &DashboardInputPacket) -> bool {
         #[cfg(target_os = "windows")]
         {
             let Some(handle) = self.handle else { return false };
             let bytes = unsafe {
                 std::slice::from_raw_parts(
-                    pkt as *const SpatialControllerPacket as *const u8,
+                    pkt as *const DashboardInputPacket as *const u8,
                     PACKET_SIZE,
                 )
             };

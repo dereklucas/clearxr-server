@@ -35,3 +35,21 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_Foundation",
 ] }
+
+# Optimize rendering/egui dependencies even in dev builds.
+# Without this, per-pixel loops in egui-ash-renderer take 260ms+ in debug mode.
+# Our own code stays debuggable at opt-level 1.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package.egui-ash-renderer]
+opt-level = 3
+
+[profile.dev.package.egui]
+opt-level = 3
+
+[profile.dev.package.epaint]
+opt-level = 3
+
+[profile.dev.package.ash]
+opt-level = 2

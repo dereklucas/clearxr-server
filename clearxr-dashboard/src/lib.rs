@@ -19,9 +19,9 @@ use std::thread::JoinHandle;
 
 use crate::config::Config;
 use crate::dashboard::LayerDashboard;
-use crate::input_pipe::{InputPipeServer, SpatialControllerPacket, SC_BTN_MENU};
+use crate::input_pipe::InputPipeServer;
 use crate::renderer::HeadlessRenderer;
-use crate::screen_capture::{CaptureFrame, ScreenCapture};
+use crate::screen_capture::ScreenCapture;
 use crate::shm::ShmWriter;
 
 const DASHBOARD_WIDTH: u32 = 2048;
@@ -87,6 +87,16 @@ impl Drop for DashboardService {
 
 /// Main render loop — runs on the dashboard thread.
 fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
+    // Set Windows timer resolution to 1ms (default is ~15.6ms, ruins sleep accuracy)
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "winmm")]
+        extern "system" {
+            fn timeBeginPeriod(uPeriod: u32) -> u32;
+        }
+        unsafe { timeBeginPeriod(1); }
+    }
+
     // Initialize GPU renderer
     let mut renderer = HeadlessRenderer::new(DASHBOARD_WIDTH, DASHBOARD_HEIGHT)
         .map_err(|e| format!("Renderer init failed: {e}"))?;
@@ -117,12 +127,12 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
         }
     };
 
-    // Input state
+    // Input state — the layer computes UV hit via ray-quad intersection
+    // and sends pre-computed results. Dashboard just feeds them to egui.
     let mut pointer_uv: Option<(f32, f32)> = None;
     let mut trigger = false;
     let mut secondary = false;
     let mut scroll_delta = 0.0f32;
-    let mut menu_was_down = false;
 
     let target_interval = std::time::Duration::from_micros(13_889); // ~72fps
 
@@ -130,59 +140,30 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
         if screen_capture.is_some() { "ok" } else { "failed" }
     );
 
-    let mut diag_counter = 0u32;
-
     while keep_running.load(Ordering::Relaxed) {
         let frame_start = std::time::Instant::now();
-        diag_counter += 1;
 
-        // Read controller input from pipe
-        let mut got_packet = false;
+        // Read pre-computed input from the layer (UV + buttons, no spatial math needed)
         if let Some(pkt) = pipe.try_read() {
-            got_packet = true;
-            if diag_counter <= 5 || diag_counter % 360 == 0 {
-                let active = pkt.active_hands;
-                let lx = pkt.left.pos_x; let ly = pkt.left.pos_y; let lz = pkt.left.pos_z;
-                let rx = pkt.right.pos_x; let ry = pkt.right.pos_y; let rz = pkt.right.pos_z;
-                log::info!(
-                    "[ClearXR Dashboard] Pipe packet: active=0x{:02x} L_pos=[{:.2},{:.2},{:.2}] R_pos=[{:.2},{:.2},{:.2}]",
-                    active, lx, ly, lz, rx, ry, rz,
-                );
+            if pkt.flags & 0x01 != 0 {
+                pointer_uv = Some((pkt.pointer_u, pkt.pointer_v));
+            } else {
+                pointer_uv = None;
             }
-            // Visibility is controlled by the layer (opaque channel menu button → SHM flags).
-            // Dashboard just reads it — no toggle here.
-
-            // Ray-quad intersection for pointer input
-            let result = ray_quad_from_packet(&pkt, &shm);
-            pointer_uv = result.hit_uv;
-            trigger = result.trigger;
-            secondary = result.secondary;
-            scroll_delta = result.scroll;
-
-            if diag_counter <= 5 || diag_counter % 360 == 0 {
-                let header = shm.header_ref();
-                log::info!(
-                    "[ClearXR Dashboard] Ray result: uv={:?} panel_pos=[{:.2},{:.2},{:.2}] panel_size=[{:.2},{:.2}]",
-                    pointer_uv,
-                    header.panel_pos[0], header.panel_pos[1], header.panel_pos[2],
-                    header.panel_size[0], header.panel_size[1],
-                );
-            }
-        }
-        if !got_packet && diag_counter % 360 == 0 {
-            log::info!("[ClearXR Dashboard] No pipe data this frame");
+            trigger = pkt.trigger > 0.5;
+            secondary = pkt.grip > 0.5;
+            scroll_delta = if pkt.thumbstick_y.abs() > 0.2 {
+                pkt.thumbstick_y * 20.0
+            } else {
+                0.0
+            };
         }
 
         // Poll screen capture
         if let Some(ref mut sc) = screen_capture {
             if sc.poll() {
-                if let Some(frame) = sc.latest_frame() {
-                    let owned = CaptureFrame {
-                        data: frame.data.clone(),
-                        width: frame.width,
-                        height: frame.height,
-                    };
-                    dashboard.update_desktop_frame_data(owned);
+                if let Some(frame) = sc.take_latest_frame() {
+                    dashboard.update_desktop_frame_data(frame);
                 }
             }
         }
@@ -202,16 +183,9 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
         scroll_delta = 0.0; // consumed
 
         match result {
-            Ok(Some(pixels)) => {
-                // New frame rendered — write to SHM
-                shm.write_frame(pixels);
-            }
-            Ok(None) => {
-                // No repaint needed, SHM content is still valid
-            }
-            Err(e) => {
-                log::warn!("[ClearXR Dashboard] Render failed: {}", e);
-            }
+            Ok(Some(pixels)) => shm.write_frame(pixels),
+            Ok(None) => {}
+            Err(e) => log::warn!("[ClearXR Dashboard] Render failed: {}", e),
         }
 
         // Handle actions
@@ -219,7 +193,6 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
             match action {
                 dashboard::DashboardAction::LaunchGame(app_id) => {
                     log::info!("[ClearXR Dashboard] LaunchGame({})", app_id);
-                    // TODO: signal streamer to launch via steam://rungameid/
                 }
                 dashboard::DashboardAction::SaveConfig => {
                     log::info!("[ClearXR Dashboard] Config saved.");
@@ -235,131 +208,15 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
     }
 
     log::info!("[ClearXR Dashboard] Render loop exiting.");
+
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "winmm")]
+        extern "system" {
+            fn timeEndPeriod(uPeriod: u32) -> u32;
+        }
+        unsafe { timeEndPeriod(1); }
+    }
+
     Ok(())
-}
-
-/// Result of ray-quad intersection against the dashboard panel.
-struct RayResult {
-    hit_uv: Option<(f32, f32)>,
-    trigger: bool,
-    secondary: bool,
-    scroll: f32,
-}
-
-/// Perform ray-quad intersection using controller data from the opaque channel.
-fn ray_quad_from_packet(pkt: &SpatialControllerPacket, shm: &ShmWriter) -> RayResult {
-    let header = shm.header_ref();
-    let panel_center = header.panel_pos;
-    let q = header.panel_orient;
-    let panel_size = header.panel_size;
-
-    let panel_right = quat_rotate(&q, [1.0, 0.0, 0.0]);
-    let panel_up = quat_rotate(&q, [0.0, 1.0, 0.0]);
-    let panel_normal = cross(panel_right, panel_up);
-    let half_w = panel_size[0] / 2.0;
-    let half_h = panel_size[1] / 2.0;
-
-    let mut best_hit: Option<(f32, f32, f32)> = None;
-    let mut best_trigger = 0.0f32;
-    let mut best_grip = 0.0f32;
-    let mut best_thumbstick_y = 0.0f32;
-
-    for (mask, hand) in [(0x01u8, pkt.left), (0x02u8, pkt.right)] {
-        if pkt.active_hands & mask == 0 {
-            continue;
-        }
-        let aim_pos = [hand.pos_x, hand.pos_y, hand.pos_z];
-        let aim_rot = [hand.rot_x, hand.rot_y, hand.rot_z, hand.rot_w];
-        let aim_dir = quat_rotate(&aim_rot, [0.0, 0.0, -1.0]);
-
-        if let Some((u, v, t)) = ray_quad_hit(
-            aim_pos, aim_dir, panel_center, panel_normal, panel_right, panel_up, half_w, half_h,
-        ) {
-            let is_closer = best_hit.map_or(true, |(_, _, prev_t)| t < prev_t);
-            if is_closer {
-                best_hit = Some((u, v, t));
-                best_trigger = hand.trigger;
-                best_grip = hand.grip;
-                best_thumbstick_y = hand.thumbstick_y;
-            }
-        }
-    }
-
-    if let Some((u, v, _)) = best_hit {
-        RayResult {
-            hit_uv: Some((u, v)),
-            trigger: best_trigger > 0.5,
-            secondary: best_grip > 0.5,
-            scroll: if best_thumbstick_y.abs() > 0.2 {
-                best_thumbstick_y * 20.0
-            } else {
-                0.0
-            },
-        }
-    } else {
-        RayResult {
-            hit_uv: None,
-            trigger: false,
-            secondary: false,
-            scroll: 0.0,
-        }
-    }
-}
-
-// Add a helper to ShmWriter for reading the header back
-impl ShmWriter {
-    pub fn header_ref(&self) -> &shm::ShmHeader {
-        unsafe { &*(self.ptr() as *const shm::ShmHeader) }
-    }
-}
-
-// ============================================================
-// Inline vector math (same as was in overlay.rs)
-// ============================================================
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-
-fn quat_rotate(q: &[f32; 4], v: [f32; 3]) -> [f32; 3] {
-    let qv = [q[0], q[1], q[2]];
-    let w = q[3];
-    let t = scale(cross(qv, v), 2.0);
-    add(add(v, scale(t, w)), cross(qv, t))
-}
-
-fn ray_quad_hit(
-    ray_origin: [f32; 3], ray_dir: [f32; 3],
-    center: [f32; 3], normal: [f32; 3], right: [f32; 3], up: [f32; 3],
-    half_w: f32, half_h: f32,
-) -> Option<(f32, f32, f32)> {
-    let denom = dot(ray_dir, normal);
-    if denom.abs() < 1e-6 { return None; }
-    let t = dot(sub(center, ray_origin), normal) / denom;
-    if t < 0.0 { return None; }
-    let hit = add(ray_origin, scale(ray_dir, t));
-    let local = sub(hit, center);
-    let u = dot(local, right) / (half_w * 2.0) + 0.5;
-    let v = 0.5 - dot(local, up) / (half_h * 2.0);
-    if u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0 {
-        Some((u, v, t))
-    } else {
-        None
-    }
 }
