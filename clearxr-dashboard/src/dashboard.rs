@@ -9,6 +9,12 @@ use crate::config::Config;
 use crate::game_scanner::Game;
 use crate::notifications::{Notification, NotificationQueue};
 
+fn debug_rect(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32, enabled: bool) {
+    if enabled {
+        ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(1.0, color), epaint::StrokeKind::Inside);
+    }
+}
+
 
 /// Active tab in the dashboard.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -187,6 +193,10 @@ impl LayerDashboard {
         let mut kb_shift = self.keyboard_shift;
         let mut kb_keys: Vec<String> = Vec::new();
         let mut desktop_image_rect_out: Option<egui::Rect> = None;
+        let dbg = config.display.debug_borders;
+
+        // Responsive scale: 1.0 at 1024px wide, scales linearly with window width.
+        let s = (ctx.screen_rect().width() / 1024.0).clamp(0.7, 2.5);
 
         // Set dark background (once — calling every frame defeats repaint skipping)
         if !self.visuals_set {
@@ -200,13 +210,13 @@ impl LayerDashboard {
 
         // ---- Grab bar at very bottom ----
         egui::TopBottomPanel::bottom("grab_bar")
-            .exact_height(24.0)
+            .exact_height(24.0 * s)
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
                 let rect = ui.available_rect_before_wrap();
                 let pill_rect = egui::Rect::from_center_size(
                     rect.center(),
-                    egui::vec2(rect.width() * 0.25, 14.0),
+                    egui::vec2(rect.width() * 0.25, 14.0 * s),
                 );
                 let is_hovered = ui.rect_contains_pointer(pill_rect);
                 let color = if is_hovered {
@@ -220,11 +230,11 @@ impl LayerDashboard {
 
         // ---- Tab bar above grab bar ----
         egui::TopBottomPanel::bottom("tabs")
-            .exact_height(40.0)
+            .exact_height(40.0 * s)
             .frame(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgba_premultiplied(18, 18, 36, 230))
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
+                    .inner_margin(egui::Margin::symmetric((12.0 * s) as i8, (4.0 * s) as i8)),
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -244,15 +254,27 @@ impl LayerDashboard {
                         } else {
                             egui::Color32::from_rgb(128, 128, 144)
                         };
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(label).size(14.0).color(color),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
+                        let btn = egui::Button::new(
+                            egui::RichText::new(label).size(15.0 * s).color(color),
+                        )
+                        .frame(false)
+                        .min_size(egui::vec2(80.0 * s, 36.0 * s));
+                        let btn_response = ui.add(btn);
+                        // Active tab indicator
+                        if active_tab == *tab {
+                            let r = btn_response.rect;
+                            let indicator = egui::Rect::from_min_size(
+                                egui::pos2(r.left() + 8.0 * s, r.bottom() - 3.0 * s),
+                                egui::vec2(r.width() - 16.0 * s, 3.0 * s),
+                            );
+                            ui.painter().rect_filled(
+                                indicator,
+                                1.5,
+                                egui::Color32::from_rgb(74, 158, 255),
+                            );
+                        }
+                        debug_rect(ui, btn_response.rect, egui::Color32::from_rgb(255, 128, 0), dbg);
+                        if btn_response.clicked() {
                             new_tab = *tab;
                         }
                     }
@@ -263,7 +285,7 @@ impl LayerDashboard {
                         |ui| {
                             ui.label(
                                 egui::RichText::new(format!("{:.0} fps", fps))
-                                    .size(11.0)
+                                    .size(11.0 * s)
                                     .color(egui::Color32::from_rgb(0, 255, 96))
                                     .monospace(),
                             );
@@ -396,20 +418,20 @@ impl LayerDashboard {
             .frame(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgba_premultiplied(10, 10, 20, 250))
-                    .inner_margin(egui::Margin::symmetric(24, 16)),
+                    .inner_margin(egui::Margin::symmetric((24.0 * s) as i8, (16.0 * s) as i8)),
             )
             .show(ctx, |ui| match active_tab {
                 DashboardTab::CurrentApp => {
-                    render_current_app_content(ui, current_app, &mut resume_clicked, &mut quit_clicked);
+                    render_current_app_content(ui, current_app, &mut resume_clicked, &mut quit_clicked, s);
                 }
                 DashboardTab::Launcher => {
-                    render_launcher_content(ui, games, &mut search, &mut launch_id, game_textures);
+                    render_launcher_content(ui, games, &mut search, &mut launch_id, game_textures, dbg, s);
                 }
                 DashboardTab::Desktop => {
-                    desktop_image_rect_out = render_desktop_content(ui, desktop_texture_id, desktop_error);
+                    desktop_image_rect_out = render_desktop_content(ui, desktop_texture_id, desktop_error, s);
                 }
                 DashboardTab::Settings => {
-                    render_settings_content(ui, config, &mut save_clicked);
+                    render_settings_content(ui, config, &mut save_clicked, s);
                 }
             });
 
@@ -475,38 +497,37 @@ fn render_launcher_content(
     search_buf: &mut String,
     launch_app_id: &mut Option<u32>,
     game_textures: &HashMap<u32, egui::TextureHandle>,
+    dbg: bool,
+    s: f32,
 ) {
     // Header
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
+    ui.add_space(4.0 * s);
+    let header_response = ui.horizontal(|ui| {
+        debug_rect(ui, ui.available_rect_before_wrap(), egui::Color32::from_rgb(0, 255, 255), dbg);
         ui.heading(
             egui::RichText::new("ClearXR")
-                .size(22.0)
+                .size(22.0 * s)
                 .color(egui::Color32::from_rgb(74, 158, 255)),
         );
-        // Search bar
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new("Search:")
-                .size(14.0)
-                .color(egui::Color32::from_rgb(160, 160, 176)),
-        );
-        ui.add_sized(
-            egui::vec2(ui.available_width(), 32.0),
+        ui.add_space(8.0 * s);
+        let search_response = ui.add_sized(
+            egui::vec2(ui.available_width(), 32.0 * s),
             egui::TextEdit::singleline(search_buf).hint_text("Search games..."),
         );
+        debug_rect(ui, search_response.rect, egui::Color32::from_rgb(255, 0, 255), dbg);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{} games", games.len()))
-                    .size(13.0)
+                    .size(13.0 * s)
                     .color(egui::Color32::from_rgb(106, 112, 136)),
             );
         });
     });
+    debug_rect(ui, header_response.response.rect, egui::Color32::from_rgb(0, 255, 255), dbg);
 
-    ui.add_space(8.0);
+    ui.add_space(8.0 * s);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(8.0 * s);
 
     // Filter
     let search_lower = search_buf.to_lowercase();
@@ -517,35 +538,35 @@ fn render_launcher_content(
 
     if filtered.is_empty() {
         ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
+            ui.add_space(60.0 * s);
             if games.is_empty() {
                 ui.label(
                     egui::RichText::new("No Steam games found")
-                        .size(18.0)
+                        .size(18.0 * s)
                         .color(egui::Color32::from_rgb(106, 112, 136)),
                 );
                 ui.label(
                     egui::RichText::new("Install games via Steam to see them here.")
-                        .size(14.0)
+                        .size(14.0 * s)
                         .color(egui::Color32::from_rgb(80, 80, 100)),
                 );
             } else {
                 ui.label(
                     egui::RichText::new("No matches")
-                        .size(18.0)
+                        .size(18.0 * s)
                         .color(egui::Color32::from_rgb(106, 112, 136)),
                 );
             }
         });
     } else {
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            let spacing = 8.0_f32;
+            let spacing = 8.0 * s;
             let available_width = ui.available_width();
-            let min_card_width = 180.0_f32;
+            let min_card_width = 180.0 * s;
             let cols = ((available_width + spacing) / (min_card_width + spacing)).max(1.0) as usize;
             let card_width = (available_width - spacing * (cols as f32 - 1.0)) / cols as f32;
-            let art_height = 85.0_f32;
-            let card_height = 130.0_f32;
+            let art_height = 85.0 * s;
+            let card_height = 130.0 * s;
 
             egui::Grid::new("game_grid")
                 .min_col_width(card_width)
@@ -563,26 +584,40 @@ fn render_launcher_content(
                             |ui| {
                                 let rect = ui.available_rect_before_wrap();
                                 let is_hovered = ui.rect_contains_pointer(rect);
+
+                                // Card background
                                 let bg = if is_hovered {
-                                    egui::Color32::from_rgb(30, 30, 56)
+                                    egui::Color32::from_rgb(35, 35, 70)
                                 } else {
                                     egui::Color32::from_rgb(19, 19, 42)
                                 };
-                                ui.painter().rect_filled(rect, 8.0, bg);
+                                let cr = 12.0 * s;
+                                ui.painter().rect_filled(rect, cr, bg);
+
+                                // Card border
+                                let stroke_color = if is_hovered {
+                                    egui::Color32::from_rgba_premultiplied(74, 158, 255, 100)
+                                } else {
+                                    egui::Color32::from_white_alpha(18)
+                                };
+                                ui.painter().rect_stroke(rect, cr, egui::Stroke::new(1.0, stroke_color), epaint::StrokeKind::Inside);
+
+                                // Debug: card allocation rect (red)
+                                debug_rect(ui, rect, egui::Color32::RED, dbg);
 
                                 let art_rect = egui::Rect::from_min_size(
                                     rect.min,
                                     egui::vec2(rect.width(), art_height),
                                 );
+                                let cri = cr as u8;
                                 let top_rounding = egui::CornerRadius {
-                                    nw: 8,
-                                    ne: 8,
+                                    nw: cri,
+                                    ne: cri,
                                     sw: 0,
                                     se: 0,
                                 };
 
                                 if let Some(tex) = game_textures.get(&game.app_id) {
-                                    // Clip to rounded top corners
                                     ui.painter().rect_filled(art_rect, top_rounding, egui::Color32::BLACK);
                                     ui.painter().with_clip_rect(art_rect).image(
                                         tex.id(),
@@ -619,32 +654,50 @@ fn render_launcher_content(
                                         art_rect.center(),
                                         egui::Align2::CENTER_CENTER,
                                         &initials,
-                                        egui::FontId::proportional(24.0),
+                                        egui::FontId::proportional(24.0 * s),
                                         egui::Color32::from_white_alpha(60),
                                     );
                                 }
 
-                                // Title with padding
-                                ui.add_space(art_height + 6.0);
+                                // Debug: art rect (green)
+                                debug_rect(ui, art_rect, egui::Color32::GREEN, dbg);
+
+                                // Hover overlay on art (play icon)
+                                if is_hovered {
+                                    ui.painter().rect_filled(
+                                        art_rect,
+                                        top_rounding,
+                                        egui::Color32::from_black_alpha(120),
+                                    );
+                                    let center = art_rect.center();
+                                    let size = 20.0 * s;
+                                    let points = vec![
+                                        egui::pos2(center.x - size * 0.4, center.y - size * 0.5),
+                                        egui::pos2(center.x - size * 0.4, center.y + size * 0.5),
+                                        egui::pos2(center.x + size * 0.5, center.y),
+                                    ];
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        points,
+                                        egui::Color32::WHITE,
+                                        egui::Stroke::NONE,
+                                    ));
+                                }
+
+                                // Title
+                                ui.add_space(art_height + 8.0 * s);
+                                let title_rect = ui.available_rect_before_wrap();
+                                debug_rect(ui, title_rect, egui::Color32::YELLOW, dbg);
                                 ui.horizontal(|ui| {
-                                    ui.add_space(8.0);
-                                    ui.set_max_width(rect.width() - 32.0);
+                                    ui.add_space(8.0 * s);
+                                    ui.set_max_width(rect.width() - 16.0 * s);
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(&game.name)
-                                                .size(13.0)
+                                                .size(14.0 * s)
                                                 .color(egui::Color32::WHITE),
                                         )
                                         .truncate(),
                                     );
-
-                                                                    // Play button on hover
-                                                                    if is_hovered {
-                                                                            ui.add_space(8.0);
-                                                                            if ui.button("Play").clicked() {
-                                                                                // Click handled by card response below
-                                                                            }
-                                                                    }
                                 });
                             },
                         );
@@ -667,15 +720,16 @@ fn render_current_app_content(
     current_app: &Option<String>,
     resume_clicked: &mut bool,
     quit_clicked: &mut bool,
+    s: f32,
 ) {
     let name = match current_app {
         Some(name) => name.as_str(),
         None => {
             ui.vertical_centered(|ui| {
-                ui.add_space(60.0);
+                ui.add_space(60.0 * s);
                 ui.label(
                     egui::RichText::new("No app running")
-                        .size(18.0)
+                        .size(18.0 * s)
                         .color(egui::Color32::from_rgb(106, 112, 136)),
                 );
             });
@@ -684,30 +738,30 @@ fn render_current_app_content(
     };
 
     ui.vertical_centered(|ui| {
-        ui.add_space(60.0);
+        ui.add_space(60.0 * s);
         ui.label(
             egui::RichText::new(name)
-                .size(24.0)
+                .size(24.0 * s)
                 .color(egui::Color32::WHITE)
                 .strong(),
         );
-        ui.add_space(32.0);
+        ui.add_space(32.0 * s);
         if ui
             .add_sized(
-                egui::vec2(200.0, 40.0),
-                egui::Button::new(egui::RichText::new("Resume").size(16.0)),
+                egui::vec2(200.0 * s, 40.0 * s),
+                egui::Button::new(egui::RichText::new("Resume").size(16.0 * s)),
             )
             .clicked()
         {
             *resume_clicked = true;
         }
-        ui.add_space(12.0);
+        ui.add_space(12.0 * s);
         if ui
             .add_sized(
-                egui::vec2(200.0, 40.0),
+                egui::vec2(200.0 * s, 40.0 * s),
                 egui::Button::new(
                     egui::RichText::new("Quit")
-                        .size(16.0)
+                        .size(16.0 * s)
                         .color(egui::Color32::from_rgb(255, 100, 100)),
                 ),
             )
@@ -726,19 +780,20 @@ fn render_desktop_content(
     ui: &mut egui::Ui,
     texture_id: Option<(egui::TextureId, u32, u32)>,
     error: &Option<String>,
+    s: f32,
 ) -> Option<egui::Rect> {
     if let Some(err) = error {
         ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
+            ui.add_space(60.0 * s);
             ui.label(
                 egui::RichText::new("Desktop capture unavailable")
-                    .size(18.0)
+                    .size(18.0 * s)
                     .color(egui::Color32::from_rgb(255, 100, 100)),
             );
-            ui.add_space(8.0);
+            ui.add_space(8.0 * s);
             ui.label(
                 egui::RichText::new(err)
-                    .size(13.0)
+                    .size(13.0 * s)
                     .color(egui::Color32::from_rgb(180, 180, 200)),
             );
         });
@@ -765,10 +820,10 @@ fn render_desktop_content(
         }
         None => {
             ui.vertical_centered(|ui| {
-                ui.add_space(60.0);
+                ui.add_space(60.0 * s);
                 ui.label(
                     egui::RichText::new("Connecting to desktop...")
-                        .size(18.0)
+                        .size(18.0 * s)
                         .color(egui::Color32::from_rgb(106, 112, 136)),
                 );
                 ui.spinner();
@@ -782,16 +837,16 @@ fn render_desktop_content(
 // Settings tab
 // ============================================================
 
-fn render_settings_content(ui: &mut egui::Ui, config: &mut Config, save_clicked: &mut bool) {
-    ui.add_space(4.0);
-    ui.heading("Settings");
-    ui.add_space(4.0);
+fn render_settings_content(ui: &mut egui::Ui, config: &mut Config, save_clicked: &mut bool, s: f32) {
+    ui.add_space(4.0 * s);
+    ui.heading(egui::RichText::new("Settings").size(20.0 * s));
+    ui.add_space(4.0 * s);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(8.0 * s);
 
     egui::Grid::new("settings_grid")
         .num_columns(2)
-        .spacing([20.0, 12.0])
+        .spacing([20.0 * s, 12.0 * s])
         .show(ui, |ui| {
             ui.label("Default View");
             egui::ComboBox::from_id_salt("view")
@@ -827,6 +882,10 @@ fn render_settings_content(ui: &mut egui::Ui, config: &mut Config, save_clicked:
 
             ui.label("Haptic Feedback");
             ui.checkbox(&mut config.shell.haptics_enabled, "");
+            ui.end_row();
+
+            ui.label("Debug Borders");
+            ui.checkbox(&mut config.display.debug_borders, "");
             ui.end_row();
         });
 

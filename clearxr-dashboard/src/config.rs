@@ -50,6 +50,7 @@ pub struct AudioConfig {
 pub struct DisplayConfig {
     pub show_fps: bool,
     pub show_boundary: bool,
+    pub debug_borders: bool,
     pub theme: String,
 }
 
@@ -100,6 +101,7 @@ impl Default for DisplayConfig {
         Self {
             show_fps: true,
             show_boundary: true,
+            debug_borders: false,
             theme: "default".into(),
         }
     }

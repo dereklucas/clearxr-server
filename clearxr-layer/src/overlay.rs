@@ -69,6 +69,17 @@ pub struct DashboardOverlay {
     last_menu_toggle: std::time::Instant,
     pose: xr::Posef,
     size: xr::Extent2Df,
+    // Grab/drag state
+    grab_hand: Option<usize>,  // 0=left, 1=right; None=not grabbing
+    prev_grip: [bool; 2],
+    grab_initial_yaw: f32,
+    grab_initial_pitch: f32,
+    grab_initial_distance: f32,
+    grab_controller_start_yaw: f32,
+    grab_controller_start_pitch: f32,
+    grab_controller_start_distance: f32,
+    grab_base_width: f32,
+    grab_base_height: f32,
 }
 
 impl DashboardOverlay {
@@ -151,6 +162,16 @@ impl DashboardOverlay {
                 position: xr::Vector3f { x: 0.0, y: 1.5, z: -2.5 },
             },
             size: xr::Extent2Df { width: 1.6, height: 1.0 },
+            grab_hand: None,
+            prev_grip: [false; 2],
+            grab_initial_yaw: 0.0,
+            grab_initial_pitch: 0.0,
+            grab_initial_distance: 0.0,
+            grab_controller_start_yaw: 0.0,
+            grab_controller_start_pitch: 0.0,
+            grab_controller_start_distance: 0.0,
+            grab_base_width: 1.6,
+            grab_base_height: 1.0,
         })
     }
 
@@ -250,6 +271,10 @@ impl DashboardOverlay {
         static PIPE_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let pipe_count = PIPE_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        const GRIP_THRESHOLD: f32 = 0.7;
+        const GRAB_MARGIN: f32 = 0.15;
+        let head = [0.0f32, 1.6, 0.0]; // fixed head position (orbit center)
+
         // Compute ray-quad intersection against the dashboard panel
         let panel_center = [self.pose.position.x, self.pose.position.y, self.pose.position.z];
         let q = [self.pose.orientation.x, self.pose.orientation.y, self.pose.orientation.z, self.pose.orientation.w];
@@ -259,12 +284,15 @@ impl DashboardOverlay {
         let half_w = self.size.width / 2.0;
         let half_h = self.size.height / 2.0;
 
+        // Find best hit across both hands, track per-hand data for grab
         let mut best_hit: Option<(f32, f32, f32)> = None;
         let mut best_trigger = 0.0f32;
         let mut best_grip = 0.0f32;
         let mut best_thumbstick_y = 0.0f32;
+        let mut best_hand_idx: usize = 0;
 
-        for (mask, hand) in [(0x01u8, pkt.left), (0x02u8, pkt.right)] {
+        let hands = [(0x01u8, 0usize, pkt.left), (0x02u8, 1usize, pkt.right)];
+        for &(mask, hand_idx, hand) in &hands {
             if pkt.active_hands & mask == 0 {
                 continue;
             }
@@ -280,19 +308,118 @@ impl DashboardOverlay {
                     best_trigger = hand.trigger;
                     best_grip = hand.grip;
                     best_thumbstick_y = hand.thumbstick_y;
+                    best_hand_idx = hand_idx;
                 }
             }
         }
 
-        // Build simplified packet for the dashboard
+        // ── Grab detection and orbital drag ──
+        let grip_states = [pkt.left.grip >= GRIP_THRESHOLD, pkt.right.grip >= GRIP_THRESHOLD];
+
+        if let Some(grab_idx) = self.grab_hand {
+            // Currently grabbing — update or release
+            let hand = if grab_idx == 0 { pkt.left } else { pkt.right };
+            let still_holding = hand.grip > 0.3 || hand.trigger > 0.3;
+            let active = if grab_idx == 0 { pkt.active_hands & 0x01 != 0 } else { pkt.active_hands & 0x02 != 0 };
+
+            if still_holding && active {
+                // Orbital drag: compute new panel position from controller aim direction
+                let aim_rot = [hand.rot_x, hand.rot_y, hand.rot_z, hand.rot_w];
+                let aim_dir = quat_rotate(&aim_rot, [0.0, 0.0, -1.0]);
+                let grip_yaw = aim_dir[0].atan2(-aim_dir[2]);
+                let grip_pitch = aim_dir[1].asin();
+
+                let dyaw = grip_yaw - self.grab_controller_start_yaw;
+                let dpitch = grip_pitch - self.grab_controller_start_pitch;
+
+                // Distance scaling (8x sensitivity, clamped)
+                let grip_pos = [hand.pos_x, hand.pos_y, hand.pos_z];
+                let grip_dist = length(sub(grip_pos, head)).max(0.1);
+                let raw_ratio = grip_dist / self.grab_controller_start_distance.max(0.1);
+                let amplified = 1.0 + (raw_ratio - 1.0) * 8.0;
+                let new_dist = (self.grab_initial_distance * amplified).clamp(0.8, 10.0);
+
+                let new_yaw = self.grab_initial_yaw + dyaw;
+                let new_pitch = self.grab_initial_pitch + dpitch;
+
+                // Spherical → Cartesian
+                let new_center = [
+                    head[0] + new_dist * new_pitch.cos() * new_yaw.sin(),
+                    head[1] + new_dist * new_pitch.sin(),
+                    head[2] - new_dist * new_pitch.cos() * new_yaw.cos(),
+                ];
+
+                // Update panel pose (always face user)
+                self.pose.position.x = new_center[0];
+                self.pose.position.y = new_center[1];
+                self.pose.position.z = new_center[2];
+
+                let fwd = normalize(sub(new_center, head));
+                // Orientation: face toward head (yaw from forward vector, no roll)
+                let yaw_angle = fwd[0].atan2(fwd[2]);
+                let (sy, cy) = yaw_angle.sin_cos();
+                self.pose.orientation = xr::Quaternionf { x: 0.0, y: sy * 0.5f32.sqrt(), z: 0.0, w: cy * 0.5f32.sqrt() };
+                // Simplified: just use yaw rotation around Y axis
+                let half_yaw = yaw_angle / 2.0;
+                self.pose.orientation = xr::Quaternionf { x: 0.0, y: half_yaw.sin(), z: 0.0, w: half_yaw.cos() };
+
+                // Scale size proportionally with distance
+                let dist_scale = new_dist / self.grab_initial_distance.max(0.1);
+                self.size.width = self.grab_base_width * dist_scale;
+                self.size.height = self.grab_base_height * dist_scale;
+
+                // Write updated pose to SHM
+                if let Some(ref shmem) = self.shmem {
+                    unsafe {
+                        let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
+                        header.panel_pos = [self.pose.position.x, self.pose.position.y, self.pose.position.z];
+                        header.panel_orient = [self.pose.orientation.x, self.pose.orientation.y, self.pose.orientation.z, self.pose.orientation.w];
+                        header.panel_size = [self.size.width, self.size.height];
+                    }
+                }
+            } else {
+                // Release grab
+                self.grab_hand = None;
+            }
+        } else if let Some((u, v, _)) = best_hit {
+            // Not grabbing — check for grab start
+            let grip_now = grip_states[best_hand_idx];
+            let grip_prev = self.prev_grip[best_hand_idx];
+            let in_margin = u < GRAB_MARGIN || u > (1.0 - GRAB_MARGIN) || v < GRAB_MARGIN || v > (1.0 - GRAB_MARGIN);
+
+            if grip_now && !grip_prev && in_margin {
+                // Start grab — record initial state
+                self.grab_hand = Some(best_hand_idx);
+                let to_panel = sub(panel_center, head);
+                let dist = length(to_panel).max(0.5);
+                self.grab_initial_distance = dist;
+                self.grab_initial_yaw = to_panel[0].atan2(-to_panel[2]);
+                self.grab_initial_pitch = (to_panel[1] / dist).asin();
+
+                let hand = if best_hand_idx == 0 { pkt.left } else { pkt.right };
+                let aim_rot = [hand.rot_x, hand.rot_y, hand.rot_z, hand.rot_w];
+                let aim_dir = quat_rotate(&aim_rot, [0.0, 0.0, -1.0]);
+                self.grab_controller_start_yaw = aim_dir[0].atan2(-aim_dir[2]);
+                self.grab_controller_start_pitch = aim_dir[1].asin();
+                let grip_pos = [hand.pos_x, hand.pos_y, hand.pos_z];
+                self.grab_controller_start_distance = length(sub(grip_pos, head)).max(0.1);
+                self.grab_base_width = self.size.width;
+                self.grab_base_height = self.size.height;
+            }
+        }
+
+        self.prev_grip = grip_states;
+
+        // Build packet for dashboard — don't send pointer during grab (prevents phantom clicks)
+        let is_grabbing = self.grab_hand.is_some();
         let input_pkt = DashboardInputPacket {
             magic: 0x4449,
-            flags: if best_hit.is_some() { 0x01 } else { 0x00 },
+            flags: if best_hit.is_some() && !is_grabbing { 0x01 } else { 0x00 },
             _pad: 0,
             pointer_u: best_hit.map_or(0.0, |(u, _, _)| u),
             pointer_v: best_hit.map_or(0.0, |(_, v, _)| v),
-            trigger: best_trigger,
-            grip: best_grip,
+            trigger: if is_grabbing { 0.0 } else { best_trigger },
+            grip: if is_grabbing { 0.0 } else { best_grip },
             thumbstick_y: best_thumbstick_y,
         };
 
@@ -320,9 +447,10 @@ impl DashboardOverlay {
                 };
                 if pipe_count < 5 || pipe_count % 360 == 0 {
                     layer_log!(info,
-                        "[ClearXR Layer] Pipe write: ok={} written={}/{} uv={:?}",
+                        "[ClearXR Layer] Pipe write: ok={} written={}/{} uv={:?} grab={}",
                         ok, written, bytes.len(),
-                        best_hit.map(|(u, v, _)| (u, v))
+                        best_hit.map(|(u, v, _)| (u, v)),
+                        is_grabbing,
                     );
                 }
                 if ok == 0 {
@@ -698,6 +826,15 @@ fn quat_rotate(q: &[f32; 4], v: [f32; 3]) -> [f32; 3] {
     let w = q[3];
     let t = scale(cross(qv, v), 2.0);
     add(add(v, scale(t, w)), cross(qv, t))
+}
+
+fn length(a: [f32; 3]) -> f32 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+fn normalize(a: [f32; 3]) -> [f32; 3] {
+    let l = length(a).max(1e-10);
+    [a[0] / l, a[1] / l, a[2] / l]
 }
 
 fn ray_quad_hit(
