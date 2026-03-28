@@ -382,12 +382,12 @@ impl DashboardOverlay {
                 self.grab_hand = None;
             }
         } else if let Some((u, v, _)) = best_hit {
-            // Not grabbing — check for grab start
+            // Not grabbing — check for grab start (grab bar at bottom of panel only)
             let grip_now = grip_states[best_hand_idx];
             let grip_prev = self.prev_grip[best_hand_idx];
-            let in_margin = u < GRAB_MARGIN || u > (1.0 - GRAB_MARGIN) || v < GRAB_MARGIN || v > (1.0 - GRAB_MARGIN);
+            let in_grab_bar = v > 0.92; // bottom ~8% of panel = visual grab bar
 
-            if grip_now && !grip_prev && in_margin {
+            if grip_now && !grip_prev && in_grab_bar {
                 // Start grab — record initial state
                 self.grab_hand = Some(best_hand_idx);
                 let to_panel = sub(panel_center, head);
