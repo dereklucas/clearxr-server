@@ -571,12 +571,13 @@ unsafe fn pick_swapchain_format(next: &NextDispatch, session: xr::Session) -> Re
     let mut formats = vec![0i64; count as usize];
     (next.enumerate_swapchain_formats)(session, count, &mut count, formats.as_mut_ptr());
 
-    // Prefer UNORM since dashboard renders in UNORM
+    // Prefer SRGB so the XR compositor doesn't double-encode sRGB content.
+    // The dashboard renders with srgb_framebuffer:true — output bytes are sRGB-encoded.
     let preferred = [
-        vk::Format::R8G8B8A8_UNORM,
-        vk::Format::B8G8R8A8_UNORM,
         vk::Format::R8G8B8A8_SRGB,
         vk::Format::B8G8R8A8_SRGB,
+        vk::Format::R8G8B8A8_UNORM,
+        vk::Format::B8G8R8A8_UNORM,
     ];
     Ok(preferred.iter().copied()
         .find(|f| formats.iter().any(|c| *c == f.as_raw() as i64))

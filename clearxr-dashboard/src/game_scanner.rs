@@ -65,7 +65,7 @@ fn scan_steam() -> Vec<Game> {
                 .clone()
                 .unwrap_or_else(|| format!("App {}", app.app_id));
             let app_cache = cache_dir.join(format!("{}", app.app_id));
-            let art_path = ["header.jpg", "library_header.jpg", "library_600x900.jpg"]
+            let art_path = ["header.jpg", "library_header.jpg"]
                 .iter()
                 .map(|name| app_cache.join(name))
                 .find(|p| p.exists());

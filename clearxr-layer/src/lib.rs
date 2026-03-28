@@ -1025,14 +1025,16 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         }
     }
 
-    // Query menu button via OpenXR actions (reliable held-state, not opaque channel pulses)
+    // Query menu button via OpenXR actions — only query the hand it was bound to
     let mut menu_down = false;
-    for &(action_raw, _hand) in state.menu_actions.keys() {
-        for &hand_path in &[state.left_hand_path, state.right_hand_path] {
-            if hand_path == xr::Path::NULL { continue; }
-            if let Some(pressed) = query_boolean(&next, session, action_raw, hand_path) {
-                if pressed { menu_down = true; }
-            }
+    for &(action_raw, hand) in state.menu_actions.keys() {
+        let hand_path = match hand {
+            Hand::Left => state.left_hand_path,
+            Hand::Right => state.right_hand_path,
+        };
+        if hand_path == xr::Path::NULL { continue; }
+        if let Some(pressed) = query_boolean(&next, session, action_raw, hand_path) {
+            if pressed { menu_down = true; }
         }
     }
 

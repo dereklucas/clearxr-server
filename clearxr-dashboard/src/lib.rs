@@ -137,7 +137,7 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
     let mut prev_trigger = false;
     let mut prev_secondary = false;
 
-    let target_interval = std::time::Duration::from_micros(13_889); // ~72fps
+    let target_interval = std::time::Duration::from_micros(11_111); // ~90fps
 
     log::info!("[ClearXR Dashboard] Render loop starting. screen_capture={}",
         if screen_capture.is_some() { "ok" } else { "failed" }
@@ -260,6 +260,12 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
                 }
                 dashboard::DashboardAction::SaveConfig => {
                     log::info!("[ClearXR Dashboard] Config saved.");
+                }
+                dashboard::DashboardAction::Resume => {
+                    log::info!("[ClearXR Dashboard] Resume.");
+                }
+                dashboard::DashboardAction::QuitApp => {
+                    log::info!("[ClearXR Dashboard] QuitApp.");
                 }
             }
         }

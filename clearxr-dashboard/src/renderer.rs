@@ -329,20 +329,32 @@ impl HeadlessRenderer {
             let pos = Pos2::new(u * self.width as f32, v * self.height as f32);
             self.pointer_pos = Some(pos);
             raw_input.events.push(Event::PointerMoved(pos));
-            if trigger != self.prev_button {
+
+            // Instant click (press+release in one frame) on trigger rising edge.
+            // Matches Space's click model — egui sees the full click cycle at the
+            // current pointer position, immune to hand jitter between frames.
+            if trigger && !self.prev_button {
                 raw_input.events.push(Event::PointerButton {
-                    pos,
-                    button: PointerButton::Primary,
-                    pressed: trigger,
-                    modifiers: Default::default(),
+                    pos, button: PointerButton::Primary, pressed: true, modifiers: Default::default(),
+                });
+                raw_input.events.push(Event::PointerButton {
+                    pos, button: PointerButton::Primary, pressed: false, modifiers: Default::default(),
                 });
             }
-            if secondary != self.prev_secondary {
+            // Continuous hold (for drag/select) — edge-detected like Space
+            if trigger != self.prev_button && !(trigger && !self.prev_button) {
+                // This only fires on release (trigger going false)
                 raw_input.events.push(Event::PointerButton {
-                    pos,
-                    button: PointerButton::Secondary,
-                    pressed: secondary,
-                    modifiers: Default::default(),
+                    pos, button: PointerButton::Primary, pressed: trigger, modifiers: Default::default(),
+                });
+            }
+
+            if secondary && !self.prev_secondary {
+                raw_input.events.push(Event::PointerButton {
+                    pos, button: PointerButton::Secondary, pressed: true, modifiers: Default::default(),
+                });
+                raw_input.events.push(Event::PointerButton {
+                    pos, button: PointerButton::Secondary, pressed: false, modifiers: Default::default(),
                 });
             }
         } else {

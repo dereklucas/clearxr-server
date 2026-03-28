@@ -101,6 +101,12 @@ impl eframe::App for DashboardApp {
                 DashboardAction::SaveConfig => {
                     log::info!("[Desktop] Config saved.");
                 }
+                DashboardAction::Resume => {
+                    log::info!("[Desktop] Resume (no-op in desktop mode).");
+                }
+                DashboardAction::QuitApp => {
+                    log::info!("[Desktop] QuitApp (no-op in desktop mode).");
+                }
             }
         }
     }

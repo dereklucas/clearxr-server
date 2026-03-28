@@ -13,6 +13,7 @@ use crate::notifications::{Notification, NotificationQueue};
 /// Active tab in the dashboard.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DashboardTab {
+    CurrentApp,
     Launcher,
     Desktop,
     Settings,
@@ -23,6 +24,8 @@ pub enum DashboardTab {
 pub enum DashboardAction {
     LaunchGame(u32),
     SaveConfig,
+    Resume,
+    QuitApp,
 }
 
 /// Layer-hosted dashboard state and rendering.
@@ -50,6 +53,8 @@ pub struct LayerDashboard {
     /// Cached game art textures, keyed by app_id.
     game_textures: HashMap<u32, egui::TextureHandle>,
     game_textures_loaded: bool,
+    /// Name of the currently running app (shown as a tab). None = no app running.
+    current_app: Option<String>,
 }
 
 impl LayerDashboard {
@@ -77,6 +82,7 @@ impl LayerDashboard {
             visuals_set: false,
             game_textures: HashMap::new(),
             game_textures_loaded: false,
+            current_app: None,
         }
     }
 
@@ -98,6 +104,17 @@ impl LayerDashboard {
     /// Set the desktop texture ID (managed by HeadlessRenderer, not egui).
     pub fn set_desktop_texture_id(&mut self, id: egui::TextureId, width: u32, height: u32) {
         self.desktop_texture_id = Some((id, width, height));
+    }
+
+    /// Set the currently running app name. Pass None to clear.
+    pub fn set_current_app(&mut self, name: Option<String>) {
+        if name.is_some() && self.current_app.is_none() {
+            self.active_tab = DashboardTab::CurrentApp;
+        }
+        self.current_app = name;
+        if self.current_app.is_none() && self.active_tab == DashboardTab::CurrentApp {
+            self.active_tab = DashboardTab::Launcher;
+        }
     }
 
     /// Load game art textures from disk (called once on first render).
@@ -211,13 +228,18 @@ impl LayerDashboard {
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let tabs = [
-                        (DashboardTab::Launcher, "LAUNCHER"),
-                        (DashboardTab::Desktop, "DESKTOP"),
-                        (DashboardTab::Settings, "SETTINGS"),
-                    ];
-                    for (tab, label) in tabs {
-                        let color = if active_tab == tab {
+                    // Build tab list — CurrentApp only shown when an app is running
+                    let current_app_name = self.current_app.clone();
+                    let mut tabs: Vec<(DashboardTab, String)> = Vec::new();
+                    if let Some(ref name) = current_app_name {
+                        tabs.push((DashboardTab::CurrentApp, name.to_uppercase()));
+                    }
+                    tabs.push((DashboardTab::Launcher, "LAUNCHER".into()));
+                    tabs.push((DashboardTab::Desktop, "DESKTOP".into()));
+                    tabs.push((DashboardTab::Settings, "SETTINGS".into()));
+
+                    for (tab, label) in &tabs {
+                        let color = if active_tab == *tab {
                             egui::Color32::WHITE
                         } else {
                             egui::Color32::from_rgb(128, 128, 144)
@@ -231,7 +253,7 @@ impl LayerDashboard {
                             )
                             .clicked()
                         {
-                            new_tab = tab;
+                            new_tab = *tab;
                         }
                     }
 
@@ -245,23 +267,6 @@ impl LayerDashboard {
                                     .color(egui::Color32::from_rgb(0, 255, 96))
                                     .monospace(),
                             );
-                            ui.add_space(8.0);
-                            // Layer badge — identifies this as layer-hosted
-                            egui::Frame::new()
-                                .fill(egui::Color32::from_rgba_premultiplied(255, 122, 48, 36))
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    egui::Color32::from_rgb(255, 156, 88),
-                                ))
-                                .corner_radius(999.0)
-                                .inner_margin(egui::Margin::symmetric(8, 3))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new("LAYER")
-                                            .size(10.0)
-                                            .color(egui::Color32::from_rgb(255, 240, 226)),
-                                    );
-                                });
                         },
                     );
                 });
@@ -383,6 +388,9 @@ impl LayerDashboard {
         let desktop_error = &self.desktop_error;
 
         let game_textures = &self.game_textures;
+        let current_app = &self.current_app;
+        let mut resume_clicked = false;
+        let mut quit_clicked = false;
 
         egui::CentralPanel::default()
             .frame(
@@ -391,6 +399,9 @@ impl LayerDashboard {
                     .inner_margin(egui::Margin::symmetric(24, 16)),
             )
             .show(ctx, |ui| match active_tab {
+                DashboardTab::CurrentApp => {
+                    render_current_app_content(ui, current_app, &mut resume_clicked, &mut quit_clicked);
+                }
                 DashboardTab::Launcher => {
                     render_launcher_content(ui, games, &mut search, &mut launch_id, game_textures);
                 }
@@ -442,6 +453,14 @@ impl LayerDashboard {
             actions.push(DashboardAction::LaunchGame(app_id));
         }
 
+        // Handle current app actions
+        if resume_clicked {
+            actions.push(DashboardAction::Resume);
+        }
+        if quit_clicked {
+            actions.push(DashboardAction::QuitApp);
+        }
+
         actions
     }
 }
@@ -465,18 +484,8 @@ fn render_launcher_content(
                 .size(22.0)
                 .color(egui::Color32::from_rgb(74, 158, 255)),
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(format!("{} games", games.len()))
-                    .size(13.0)
-                    .color(egui::Color32::from_rgb(106, 112, 136)),
-            );
-        });
-    });
-
-    // Search bar
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
+        // Search bar
+        ui.add_space(8.0);
         ui.label(
             egui::RichText::new("Search:")
                 .size(14.0)
@@ -486,6 +495,13 @@ fn render_launcher_content(
             egui::vec2(ui.available_width(), 32.0),
             egui::TextEdit::singleline(search_buf).hint_text("Search games..."),
         );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!("{} games", games.len()))
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(106, 112, 136)),
+            );
+        });
     });
 
     ui.add_space(8.0);
@@ -522,16 +538,19 @@ fn render_launcher_content(
             }
         });
     } else {
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let spacing = 8.0_f32;
             let available_width = ui.available_width();
-            let card_width = 200.0_f32;
-            let cols = ((available_width / card_width) as usize).max(1);
+            let min_card_width = 180.0_f32;
+            let cols = ((available_width + spacing) / (min_card_width + spacing)).max(1.0) as usize;
+            let card_width = (available_width - spacing * (cols as f32 - 1.0)) / cols as f32;
             let art_height = 85.0_f32;
             let card_height = 130.0_f32;
 
             egui::Grid::new("game_grid")
-                .num_columns(cols)
-                .spacing([12.0, 12.0])
+                .min_col_width(card_width)
+                .min_row_height(card_height)
+                .spacing([spacing, spacing])
                 .show(ui, |ui| {
                     for (i, game) in filtered.iter().enumerate() {
                         if i > 0 && i % cols == 0 {
@@ -539,7 +558,7 @@ fn render_launcher_content(
                         }
 
                         let response = ui.allocate_ui_with_layout(
-                            egui::vec2(card_width - 12.0, card_height),
+                            egui::vec2(card_width, card_height),
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
                                 let rect = ui.available_rect_before_wrap();
@@ -609,7 +628,7 @@ fn render_launcher_content(
                                 ui.add_space(art_height + 6.0);
                                 ui.horizontal(|ui| {
                                     ui.add_space(8.0);
-                                    ui.set_max_width(rect.width() - 16.0);
+                                    ui.set_max_width(rect.width() - 32.0);
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(&game.name)
@@ -618,17 +637,15 @@ fn render_launcher_content(
                                         )
                                         .truncate(),
                                     );
-                                });
 
-                                // Play button on hover
-                                if is_hovered {
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(8.0);
-                                        if ui.button("Play").clicked() {
-                                            // Click handled by card response below
-                                        }
-                                    });
-                                }
+                                                                    // Play button on hover
+                                                                    if is_hovered {
+                                                                            ui.add_space(8.0);
+                                                                            if ui.button("Play").clicked() {
+                                                                                // Click handled by card response below
+                                                                            }
+                                                                    }
+                                });
                             },
                         );
 
@@ -639,6 +656,66 @@ fn render_launcher_content(
                 });
         });
     }
+}
+
+// ============================================================
+// Current App tab
+// ============================================================
+
+fn render_current_app_content(
+    ui: &mut egui::Ui,
+    current_app: &Option<String>,
+    resume_clicked: &mut bool,
+    quit_clicked: &mut bool,
+) {
+    let name = match current_app {
+        Some(name) => name.as_str(),
+        None => {
+            ui.vertical_centered(|ui| {
+                ui.add_space(60.0);
+                ui.label(
+                    egui::RichText::new("No app running")
+                        .size(18.0)
+                        .color(egui::Color32::from_rgb(106, 112, 136)),
+                );
+            });
+            return;
+        }
+    };
+
+    ui.vertical_centered(|ui| {
+        ui.add_space(60.0);
+        ui.label(
+            egui::RichText::new(name)
+                .size(24.0)
+                .color(egui::Color32::WHITE)
+                .strong(),
+        );
+        ui.add_space(32.0);
+        if ui
+            .add_sized(
+                egui::vec2(200.0, 40.0),
+                egui::Button::new(egui::RichText::new("Resume").size(16.0)),
+            )
+            .clicked()
+        {
+            *resume_clicked = true;
+        }
+        ui.add_space(12.0);
+        if ui
+            .add_sized(
+                egui::vec2(200.0, 40.0),
+                egui::Button::new(
+                    egui::RichText::new("Quit")
+                        .size(16.0)
+                        .color(egui::Color32::from_rgb(255, 100, 100)),
+                ),
+            )
+            .clicked()
+        {
+            *quit_clicked = true;
+        }
+    });
 }
 
 // ============================================================
