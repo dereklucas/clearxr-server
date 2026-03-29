@@ -268,29 +268,25 @@ impl DashboardOverlay {
         //
         // This fires exactly once per press-release cycle, even with flickering pulses.
 
-        // Time-based cooldown: ignore all input for 500ms after firing.
-        // The opaque channel sends pulses ~200ms apart while held — frame-based
-        // cooldown (10 frames = 110ms) expires between pulses and re-triggers.
+        // Fire on FIRST press, then 2-second cooldown.
+        // The opaque channel sends pulses every ~500-700ms while held — no shorter
+        // cooldown can distinguish held-button pulses from separate taps. So we fire
+        // instantly on the first true and suppress everything for 2 seconds.
         let now = std::time::Instant::now();
         if self.menu_fired {
-            if now.duration_since(self.last_menu_toggle).as_millis() >= 500 {
-                log::info!("[ClearXR Layer] Menu: COOLDOWN → IDLE (500ms elapsed)");
+            // Cooldown: ignore all input for 2 seconds
+            if now.duration_since(self.last_menu_toggle).as_millis() >= 2000 {
+                log::info!("[ClearXR Layer] Menu: COOLDOWN → IDLE (2s elapsed)");
                 self.menu_fired = false;
                 self.menu_seen_press = false;
             }
-            // Ignore everything during cooldown
-        } else if menu_down {
-            if !self.menu_seen_press {
-                log::info!("[ClearXR Layer] Menu: IDLE → PRESSED (saw first true)");
-            }
-            self.menu_seen_press = true;
-        } else if self.menu_seen_press {
-            // First false after seeing press — fire!
+        } else if menu_down && !self.menu_seen_press {
+            // Fire immediately on first true
             self.menu_fired = true;
-            self.menu_seen_press = false;
+            self.menu_seen_press = true;
             self.last_menu_toggle = now;
             self.visible = !self.visible;
-            log::info!("[ClearXR Layer] Menu: PRESSED → FIRE → COOLDOWN (visible={})", self.visible);
+            log::info!("[ClearXR Layer] Menu: FIRE on press (visible={})", self.visible);
             if let Some(ref shmem) = self.shmem {
                 unsafe {
                     let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
