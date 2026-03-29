@@ -343,8 +343,8 @@ impl DashboardOverlay {
                 let grip_yaw = aim_dir[0].atan2(-aim_dir[2]);
                 let grip_pitch = aim_dir[1].asin();
 
-                // Yaw: controller rotating right → panel moves right (same sign)
-                let dyaw = grip_yaw - self.grab_controller_start_yaw;
+                // Yaw: negate so controller rotating right → panel moves right
+                let dyaw = -(grip_yaw - self.grab_controller_start_yaw);
                 // Pitch: controller tilting up → panel moves up
                 let dpitch = grip_pitch - self.grab_controller_start_pitch;
 
