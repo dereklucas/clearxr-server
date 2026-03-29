@@ -242,12 +242,6 @@ impl LayerDashboard {
                     .inner_margin(egui::Margin::symmetric((16.0 * s) as i8, (6.0 * s) as i8)),
             )
             .show(ctx, |ui| {
-                // Top edge highlight for visual separation from content
-                let bar_rect = ui.max_rect();
-                ui.painter().line_segment(
-                    [bar_rect.left_top(), bar_rect.right_top()],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(120, 90, 160, 40)),
-                );
                 ui.horizontal_centered(|ui| {
                     // Build tab list — CurrentApp only shown when an app is running
                     let current_app_name = self.current_app.clone();
@@ -454,26 +448,7 @@ impl LayerDashboard {
                     .fill(egui::Color32::from_rgba_premultiplied(16, 16, 22, 250))
                     .inner_margin(egui::Margin::symmetric((24.0 * s) as i8, (16.0 * s) as i8)),
             )
-            .show(ctx, |ui| {
-                // Specular highlight borders — bright top edge (light catches), dark bottom
-                let panel_rect = ui.max_rect();
-                // Top edge: subtle purple-blue specular highlight
-                ui.painter().line_segment(
-                    [panel_rect.left_top(), panel_rect.right_top()],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(140, 110, 180, 35)),
-                );
-                // Left edge: subtle gradient feel (lighter at top, fading)
-                ui.painter().line_segment(
-                    [panel_rect.left_top(), egui::pos2(panel_rect.left(), panel_rect.center().y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 80, 150, 20)),
-                );
-                // Right edge: subtle pink tint
-                ui.painter().line_segment(
-                    [panel_rect.right_top(), egui::pos2(panel_rect.right(), panel_rect.center().y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(150, 80, 120, 20)),
-                );
-
-                match active_tab {
+            .show(ctx, |ui| match active_tab {
                 DashboardTab::CurrentApp => {
                     render_current_app_content(ui, current_app, &mut resume_clicked, &mut quit_clicked, s);
                 }
@@ -486,7 +461,7 @@ impl LayerDashboard {
                 DashboardTab::Settings => {
                     render_settings_content(ui, config, &mut save_clicked, s);
                 }
-            }});
+            });
 
         // Store desktop image rect for mouse injection coordinate mapping
         self.desktop_image_rect = desktop_image_rect_out;

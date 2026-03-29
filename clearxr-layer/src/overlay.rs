@@ -273,6 +273,9 @@ impl DashboardOverlay {
         if menu_down {
             self.menu_false_count = 0;
             if !self.menu_fired {
+                if !self.menu_seen_press {
+                    log::info!("[ClearXR Layer] Menu: IDLE → PRESSED (saw first true)");
+                }
                 self.menu_seen_press = true;
             }
         } else {
@@ -284,6 +287,10 @@ impl DashboardOverlay {
                 self.menu_seen_press = false;
                 self.last_menu_toggle = std::time::Instant::now();
                 self.visible = !self.visible;
+                log::info!(
+                    "[ClearXR Layer] Menu: PRESSED → FIRE → COOLDOWN (visible={})",
+                    self.visible
+                );
                 if let Some(ref shmem) = self.shmem {
                     unsafe {
                         let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
@@ -294,7 +301,8 @@ impl DashboardOverlay {
             }
 
             // Reset after enough consecutive false frames (button truly released)
-            if self.menu_false_count > 10 {
+            if self.menu_false_count > 10 && self.menu_fired {
+                log::info!("[ClearXR Layer] Menu: COOLDOWN → IDLE (10+ false frames)");
                 self.menu_seen_press = false;
                 self.menu_fired = false;
             }
