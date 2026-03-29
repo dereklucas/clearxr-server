@@ -50,6 +50,10 @@ pub struct DashboardOverlay {
     height: u32,
     images: Vec<vk::Image>,
     image_layouts: Vec<vk::ImageLayout>,
+    // Backface: 1x1 grey swapchain
+    backface_swapchain: xr::Swapchain,
+    backface_image: vk::Image,
+    backface_initialized: bool,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
     vk: VkBackend,
@@ -120,6 +124,11 @@ impl DashboardOverlay {
             .collect::<Vec<_>>();
         let space = create_stage_space(next, session)?;
 
+        // Backface: 1x1 grey swapchain (so the back of the panel is visible)
+        let backface_swapchain = create_swapchain(next, session, format, 1, 1)?;
+        let backface_images = enumerate_swapchain_images(next, backface_swapchain)?;
+        let backface_image = vk::Image::from_raw(backface_images[0].image as usize as u64);
+
         // Command buffer + fence
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(vk.command_pool)
@@ -145,6 +154,9 @@ impl DashboardOverlay {
             height,
             images,
             image_layouts: vec![vk::ImageLayout::UNDEFINED; image_count],
+            backface_swapchain,
+            backface_image,
+            backface_initialized: false,
             command_buffer,
             fence,
             vk,
@@ -325,24 +337,26 @@ impl DashboardOverlay {
             let active = if grab_idx == 0 { pkt.active_hands & 0x01 != 0 } else { pkt.active_hands & 0x02 != 0 };
 
             if still_holding && active {
-                // Orbital drag: compute new panel position from controller aim direction
+                // Orbital drag: track controller aim direction changes
                 let aim_rot = [hand.rot_x, hand.rot_y, hand.rot_z, hand.rot_w];
                 let aim_dir = quat_rotate(&aim_rot, [0.0, 0.0, -1.0]);
                 let grip_yaw = aim_dir[0].atan2(-aim_dir[2]);
                 let grip_pitch = aim_dir[1].asin();
 
+                // Yaw: controller rotating right → panel moves right (same sign)
                 let dyaw = grip_yaw - self.grab_controller_start_yaw;
+                // Pitch: controller tilting up → panel moves up
                 let dpitch = grip_pitch - self.grab_controller_start_pitch;
 
-                // Distance scaling (8x sensitivity, clamped)
+                // Distance: hand distance from head
                 let grip_pos = [hand.pos_x, hand.pos_y, hand.pos_z];
                 let grip_dist = length(sub(grip_pos, head)).max(0.1);
                 let raw_ratio = grip_dist / self.grab_controller_start_distance.max(0.1);
-                let amplified = 1.0 + (raw_ratio - 1.0) * 8.0;
+                let amplified = 1.0 + (raw_ratio - 1.0) * 4.0;
                 let new_dist = (self.grab_initial_distance * amplified).clamp(0.8, 10.0);
 
                 let new_yaw = self.grab_initial_yaw + dyaw;
-                let new_pitch = self.grab_initial_pitch + dpitch;
+                let new_pitch = (self.grab_initial_pitch + dpitch).clamp(-1.2, 1.2);
 
                 // Spherical → Cartesian
                 let new_center = [
@@ -471,6 +485,77 @@ impl DashboardOverlay {
         }
     }
 
+    /// Initialize the backface swapchain with a solid grey pixel.
+    unsafe fn init_backface(&mut self, next: &NextDispatch) -> Result<(), String> {
+        // Acquire + wait
+        let mut idx = 0;
+        (next.acquire_swapchain_image)(self.backface_swapchain,
+            &xr::SwapchainImageAcquireInfo { ty: xr::SwapchainImageAcquireInfo::TYPE, next: ptr::null() },
+            &mut idx);
+        (next.wait_swapchain_image)(self.backface_swapchain,
+            &xr::SwapchainImageWaitInfo { ty: xr::SwapchainImageWaitInfo::TYPE, next: ptr::null(), timeout: xr::Duration::INFINITE });
+
+        // Clear to grey via vkCmdClearColorImage
+        let device = self.vk.device();
+        device.wait_for_fences(&[self.fence], true, u64::MAX).ok();
+        device.reset_fences(&[self.fence]).ok();
+
+        let cmd = self.command_buffer;
+        device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
+            .map_err(|e| format!("backface begin cmd: {e}"))?;
+
+        // Transition to TRANSFER_DST
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(self.backface_image)
+            .subresource_range(vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1).layer_count(1))
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+        device.cmd_pipeline_barrier(cmd,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(), &[], &[], &[barrier]);
+
+        // Clear to dark grey (0.15, 0.15, 0.18, 0.9)
+        let clear_color = vk::ClearColorValue { float32: [0.15, 0.15, 0.18, 0.9] };
+        device.cmd_clear_color_image(cmd, self.backface_image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL, &clear_color,
+            &[vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1).layer_count(1)]);
+
+        // Transition to COLOR_ATTACHMENT
+        let barrier2 = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .image(self.backface_image)
+            .subresource_range(vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1).layer_count(1))
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+        device.cmd_pipeline_barrier(cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            vk::DependencyFlags::empty(), &[], &[], &[barrier2]);
+
+        device.end_command_buffer(cmd).map_err(|e| format!("backface end cmd: {e}"))?;
+        let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+        device.queue_submit(self.vk.queue(), &[submit], self.fence)
+            .map_err(|e| format!("backface submit: {e}"))?;
+        device.wait_for_fences(&[self.fence], true, u64::MAX).ok();
+
+        // Release
+        (next.release_swapchain_image)(self.backface_swapchain,
+            &xr::SwapchainImageReleaseInfo { ty: xr::SwapchainImageReleaseInfo::TYPE, next: ptr::null() });
+
+        self.backface_initialized = true;
+        log::info!("[ClearXR Layer] Backface initialized (dark grey 1x1).");
+        Ok(())
+    }
+
     /// Front face (dashboard content).
     pub fn quad_layer(&self) -> xr::CompositionLayerQuad {
         xr::CompositionLayerQuad {
@@ -495,17 +580,17 @@ impl DashboardOverlay {
         }
     }
 
-    /// Back face — rotated 180° around Y so it's visible from behind.
-    /// Shows the same swapchain content (mirrored) so you can find the panel.
+    /// Back face — grey card rotated 180° around Y, visible from behind.
+    /// Uses the 1x1 grey swapchain so you can always find the panel.
     pub fn backface_quad_layer(&self) -> xr::CompositionLayerQuad {
-        // For yaw-only quaternion (0, sin(θ/2), 0, cos(θ/2)):
-        // Adding π to θ: sin((θ+π)/2) = cos(θ/2), cos((θ+π)/2) = -sin(θ/2)
+        // Rotate 180° around Y: for quaternion q = (x,y,z,w), multiply by (0,1,0,0).
+        // q * (0,1,0,0): w'=-y, x'=z, y'=w, z'=-x (Hamilton product with OpenXR convention)
         let q = self.pose.orientation;
         let back_orient = xr::Quaternionf {
-            x: 0.0,
-            y: q.w,    // cos(θ/2) → sin((θ+π)/2)
-            z: 0.0,
-            w: -q.y,   // sin(θ/2) → -cos((θ+π)/2) → but cos = -sin, so w = -sin(θ/2)
+            x: q.z,
+            y: q.w,
+            z: -q.x,
+            w: -q.y,
         };
 
         xr::CompositionLayerQuad {
@@ -515,13 +600,10 @@ impl DashboardOverlay {
             space: self.space,
             eye_visibility: xr::EyeVisibility::BOTH,
             sub_image: xr::SwapchainSubImage {
-                swapchain: self.swapchain,
+                swapchain: self.backface_swapchain,
                 image_rect: xr::Rect2Di {
                     offset: xr::Offset2Di { x: 0, y: 0 },
-                    extent: xr::Extent2Di {
-                        width: self.width as i32,
-                        height: self.height as i32,
-                    },
+                    extent: xr::Extent2Di { width: 1, height: 1 },
                 },
                 image_array_index: 0,
             },
@@ -570,6 +652,13 @@ impl DashboardOverlay {
             if let Err(e) = self.import_shared_resources() {
                 log::error!("[ClearXR Layer] Failed to import shared resources: {e}");
                 return Ok(()); // Don't render until import succeeds
+            }
+        }
+
+        // Initialize backface grey card (once)
+        if !self.backface_initialized {
+            if let Err(e) = self.init_backface(next) {
+                log::warn!("[ClearXR Layer] Backface init failed: {e}");
             }
         }
 
@@ -724,6 +813,9 @@ impl Drop for DashboardOverlay {
                 }
                 if self.swapchain != xr::Swapchain::NULL {
                     (next.destroy_swapchain)(self.swapchain);
+                }
+                if self.backface_swapchain != xr::Swapchain::NULL {
+                    (next.destroy_swapchain)(self.backface_swapchain);
                 }
             }
 
