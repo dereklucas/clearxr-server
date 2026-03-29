@@ -1004,10 +1004,28 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     static DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let diag = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    // Poll opaque channel (deprecated — only kept for button overrides that
-    // haven't been migrated to OpenXR actions yet)
+    // Poll opaque channel for button state
+    let mut opaque_had_new_data = false;
     if let Some(ref mut ch) = state.opaque {
+        let before = ch.latest;
         ch.poll();
+        let after = ch.latest;
+        // Log when menu bit changes or new packet arrives
+        if let (Some(b), Some(a)) = (before, after) {
+            let btns_b = { b.left.buttons };
+            let btns_a = { a.left.buttons };
+            let menu_before = btns_b & SC_BTN_MENU;
+            let menu_after = btns_a & SC_BTN_MENU;
+            if menu_before != menu_after {
+                layer_log!(info, "[ClearXR Layer] Opaque menu bit changed: {} → {} (left buttons: 0x{:04x})",
+                    menu_before != 0, menu_after != 0, btns_a);
+                opaque_had_new_data = true;
+            }
+        } else if before.is_none() && after.is_some() {
+            let btns = { after.unwrap().left.buttons };
+            layer_log!(info, "[ClearXR Layer] First opaque packet received. left.buttons=0x{:04x}", btns);
+            opaque_had_new_data = true;
+        }
     }
 
     // Read aim poses captured by hook_locate_space

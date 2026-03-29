@@ -176,9 +176,25 @@ impl LayerDashboard {
             self.fps_timer = std::time::Instant::now();
         }
 
-        // Drain pending keyboard text
+        // Inject pending virtual keyboard text into egui input
         let pending_text: Vec<String> = self.pending_keys.drain(..).collect();
-        let _ = pending_text; // consumed via egui text injection in EguiOverlayRenderer
+        if !pending_text.is_empty() {
+            ctx.input_mut(|input| {
+                for key in &pending_text {
+                    if key == "\x08" {
+                        input.events.push(egui::Event::Key {
+                            key: egui::Key::Backspace,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: Default::default(),
+                        });
+                    } else {
+                        input.events.push(egui::Event::Text(key.clone()));
+                    }
+                }
+            });
+        }
 
         let active_tab = self.active_tab;
         let games = &self.games;
@@ -551,7 +567,8 @@ fn render_launcher_content(
                 .hint_text("Search games...")
                 .text_color(egui::Color32::WHITE)
                 .background_color(egui::Color32::TRANSPARENT)
-                .margin(egui::vec2(14.0 * s, 8.0 * s)),
+                .frame(false)
+                .margin(egui::vec2(16.0 * s, 8.0 * s)),
         );
         // Pill background + border — painted via reserved slots so fill matches stroke rounding
         let search_focused = search_response.has_focus();
