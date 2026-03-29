@@ -41,9 +41,6 @@ pub struct LayerDashboard {
     active_tab: DashboardTab,
     config: Config,
     notifications: NotificationQueue,
-    keyboard_visible: bool,
-    keyboard_shift: bool,
-    pending_keys: Vec<String>,
     visuals_set: bool,
     fps_timer: std::time::Instant,
     fps_frame_count: u32,
@@ -61,6 +58,8 @@ pub struct LayerDashboard {
     game_textures_loaded: bool,
     /// Name of the currently running app (shown as a tab). None = no app running.
     current_app: Option<String>,
+    /// Virtual keyboard (auto-shows when a TextEdit has focus).
+    keyboard: egui_keyboard::Keyboard,
 }
 
 impl LayerDashboard {
@@ -76,9 +75,6 @@ impl LayerDashboard {
             active_tab,
             config,
             notifications: NotificationQueue::new(3),
-            keyboard_visible: false,
-            keyboard_shift: false,
-            pending_keys: Vec::new(),
             fps_timer: std::time::Instant::now(),
             fps_frame_count: 0,
             fps_current: 0.0,
@@ -89,6 +85,7 @@ impl LayerDashboard {
             game_textures: HashMap::new(),
             game_textures_loaded: false,
             current_app: None,
+            keyboard: egui_keyboard::Keyboard::default(),
         }
     }
 
@@ -176,25 +173,8 @@ impl LayerDashboard {
             self.fps_timer = std::time::Instant::now();
         }
 
-        // Inject pending virtual keyboard text into egui input
-        let pending_text: Vec<String> = self.pending_keys.drain(..).collect();
-        if !pending_text.is_empty() {
-            ctx.input_mut(|input| {
-                for key in &pending_text {
-                    if key == "\x08" {
-                        input.events.push(egui::Event::Key {
-                            key: egui::Key::Backspace,
-                            physical_key: None,
-                            pressed: true,
-                            repeat: false,
-                            modifiers: Default::default(),
-                        });
-                    } else {
-                        input.events.push(egui::Event::Text(key.clone()));
-                    }
-                }
-            });
-        }
+        // Pump virtual keyboard events before any widgets render
+        self.keyboard.pump_events(ctx);
 
         let active_tab = self.active_tab;
         let games = &self.games;
@@ -205,9 +185,6 @@ impl LayerDashboard {
         let mut new_tab = active_tab;
         let mut save_clicked = false;
         let mut launch_id: Option<u32> = None;
-        let mut kb_visible = self.keyboard_visible;
-        let mut kb_shift = self.keyboard_shift;
-        let mut kb_keys: Vec<String> = Vec::new();
         let mut desktop_image_rect_out: Option<egui::Rect> = None;
         let dbg = config.display.debug_borders;
 
@@ -336,89 +313,9 @@ impl LayerDashboard {
                 });
             });
 
-        // ---- Virtual keyboard ----
-        let focused_before_keyboard = ctx.memory(|m| m.focused());
-        if kb_visible {
-            egui::TopBottomPanel::bottom("keyboard")
-                .exact_height(200.0 * s)
-                .frame(
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_rgba_premultiplied(24, 24, 48, 240))
-                        .inner_margin(egui::Margin::symmetric((8.0 * s) as i8, (4.0 * s) as i8)),
-                )
-                .show(ctx, |ui| {
-                    let rows: &[&str] =
-                        &["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
-                    for row in rows {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0 * s;
-                            for ch in row.chars() {
-                                let label = if kb_shift {
-                                    ch.to_uppercase().to_string()
-                                } else {
-                                    ch.to_string()
-                                };
-                                let btn = ui.add_sized(
-                                    egui::vec2(36.0 * s, 36.0 * s),
-                                    egui::Button::new(
-                                        egui::RichText::new(&label).size(16.0 * s).monospace(),
-                                    ),
-                                );
-                                if btn.clicked() {
-                                    kb_keys.push(label);
-                                    kb_shift = false;
-                                }
-                            }
-                        });
-                    }
-                    // Bottom row: shift, space, backspace, hide
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0 * s;
-                        if ui
-                            .add_sized(
-                                egui::vec2(60.0 * s, 36.0 * s),
-                                egui::Button::new(egui::RichText::new("Shift").size(14.0 * s)),
-                            )
-                            .clicked()
-                        {
-                            kb_shift = !kb_shift;
-                        }
-                        if ui
-                            .add_sized(
-                                egui::vec2(200.0 * s, 36.0 * s),
-                                egui::Button::new(egui::RichText::new("SPACE").size(14.0 * s)),
-                            )
-                            .clicked()
-                        {
-                            kb_keys.push(" ".into());
-                        }
-                        if ui
-                            .add_sized(
-                                egui::vec2(60.0 * s, 36.0 * s),
-                                egui::Button::new(egui::RichText::new("Bksp").size(14.0 * s)),
-                            )
-                            .clicked()
-                        {
-                            kb_keys.push("\x08".into());
-                        }
-                        if ui
-                            .add_sized(
-                                egui::vec2(60.0 * s, 36.0 * s),
-                                egui::Button::new(egui::RichText::new("Hide").size(14.0 * s)),
-                            )
-                            .clicked()
-                        {
-                            kb_visible = false;
-                        }
-                    });
-                });
-        }
-        // Restore focus after keyboard clicks
-        if !kb_keys.is_empty() {
-            if let Some(id) = focused_before_keyboard {
-                ctx.memory_mut(|m| m.request_focus(id));
-            }
-        }
+        // ---- Virtual keyboard (egui_keyboard crate) ----
+        // Auto-shows when a TextEdit has focus, handles focus restoration internally.
+        self.keyboard.show(ctx);
 
         // ---- Notification overlay ----
         if let Some(notif) = notifications.visible().first() {
@@ -484,18 +381,6 @@ impl LayerDashboard {
 
         // Apply state changes
         self.search = search;
-        self.keyboard_visible = kb_visible;
-        self.keyboard_shift = kb_shift;
-
-        // Queue keyboard keys for next frame
-        for key in kb_keys {
-            self.pending_keys.push(key);
-        }
-
-        // Show keyboard when egui wants text input
-        if ctx.wants_keyboard_input() {
-            self.keyboard_visible = true;
-        }
 
         // Apply tab change
         if new_tab != self.active_tab {
@@ -556,7 +441,7 @@ fn render_launcher_content(
         );
         ui.add_space(16.0 * s);
         let search_width = (ui.available_width() * 0.45).min(320.0 * s);
-        let search_height = 34.0 * s;
+        let search_height = 38.0 * s;
         let search_cr = search_height / 2.0;
         // Reserve paint slots so pill fill + stroke render behind the text input
         let search_fill_idx = ui.painter().add(egui::Shape::Noop);

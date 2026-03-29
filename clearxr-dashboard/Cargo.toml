@@ -16,12 +16,13 @@ required-features = ["desktop"]
 desktop = ["dep:eframe"]
 
 [dependencies]
-eframe = { version = "0.31", optional = true }
+eframe = { version = "0.32", optional = true }
+egui_keyboard = { version = "0.4", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 ash = "0.38"
-egui = "0.31"
-egui-ash-renderer = "0.8"
-epaint = "0.31"
+egui = "0.32"
+egui-ash-renderer = "0.9"
+epaint = "0.32"
 steamlocate = "2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
