@@ -763,11 +763,6 @@ fn render_launcher_content(
                                     bottom_rounding,
                                     egui::Color32::from_rgba_premultiplied(18, 17, 24, 230),
                                 );
-                                // Hairline separator between art and footer
-                                ui.painter().line_segment(
-                                    [footer_rect.left_top(), footer_rect.right_top()],
-                                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 80, 140, 30)),
-                                );
 
                                 // Title — vertically centered, ellipsis-truncated to footer width
                                 debug_rect(ui, footer_rect, egui::Color32::YELLOW, dbg);

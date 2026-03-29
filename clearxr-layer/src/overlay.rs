@@ -71,7 +71,6 @@ pub struct DashboardOverlay {
     visible: bool,
     menu_seen_press: bool,     // have we seen at least one true since last toggle?
     menu_fired: bool,          // have we already fired the toggle for this press cycle?
-    menu_false_count: u32,     // consecutive frames with menu_down=false
     last_menu_toggle: std::time::Instant,
     pose: xr::Posef,
     size: xr::Extent2Df,
@@ -172,7 +171,6 @@ impl DashboardOverlay {
             visible: true,
             menu_seen_press: false,
             menu_fired: false,
-            menu_false_count: 0,
             last_menu_toggle: std::time::Instant::now(),
             pose: xr::Posef {
                 orientation: xr::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
@@ -270,42 +268,36 @@ impl DashboardOverlay {
         //
         // This fires exactly once per press-release cycle, even with flickering pulses.
 
-        if menu_down {
-            self.menu_false_count = 0;
-            if !self.menu_fired {
-                if !self.menu_seen_press {
-                    log::info!("[ClearXR Layer] Menu: IDLE → PRESSED (saw first true)");
-                }
-                self.menu_seen_press = true;
-            }
-        } else {
-            self.menu_false_count += 1;
-
-            // Fire on first false after seeing a press (and haven't fired yet)
-            if self.menu_seen_press && !self.menu_fired {
-                self.menu_fired = true;
-                self.menu_seen_press = false;
-                self.last_menu_toggle = std::time::Instant::now();
-                self.visible = !self.visible;
-                log::info!(
-                    "[ClearXR Layer] Menu: PRESSED → FIRE → COOLDOWN (visible={})",
-                    self.visible
-                );
-                if let Some(ref shmem) = self.shmem {
-                    unsafe {
-                        let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
-                        if self.visible { header.flags |= 1; } else { header.flags &= !1; }
-                    }
-                }
-                return true;
-            }
-
-            // Reset after enough consecutive false frames (button truly released)
-            if self.menu_false_count > 10 && self.menu_fired {
-                log::info!("[ClearXR Layer] Menu: COOLDOWN → IDLE (10+ false frames)");
-                self.menu_seen_press = false;
+        // Time-based cooldown: ignore all input for 500ms after firing.
+        // The opaque channel sends pulses ~200ms apart while held — frame-based
+        // cooldown (10 frames = 110ms) expires between pulses and re-triggers.
+        let now = std::time::Instant::now();
+        if self.menu_fired {
+            if now.duration_since(self.last_menu_toggle).as_millis() >= 500 {
+                log::info!("[ClearXR Layer] Menu: COOLDOWN → IDLE (500ms elapsed)");
                 self.menu_fired = false;
+                self.menu_seen_press = false;
             }
+            // Ignore everything during cooldown
+        } else if menu_down {
+            if !self.menu_seen_press {
+                log::info!("[ClearXR Layer] Menu: IDLE → PRESSED (saw first true)");
+            }
+            self.menu_seen_press = true;
+        } else if self.menu_seen_press {
+            // First false after seeing press — fire!
+            self.menu_fired = true;
+            self.menu_seen_press = false;
+            self.last_menu_toggle = now;
+            self.visible = !self.visible;
+            log::info!("[ClearXR Layer] Menu: PRESSED → FIRE → COOLDOWN (visible={})", self.visible);
+            if let Some(ref shmem) = self.shmem {
+                unsafe {
+                    let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
+                    if self.visible { header.flags |= 1; } else { header.flags &= !1; }
+                }
+            }
+            return true;
         }
         false
     }
