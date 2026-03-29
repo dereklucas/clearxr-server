@@ -282,9 +282,6 @@ impl DashboardOverlay {
     /// The layer does all spatial math here so the dashboard is a pure
     /// "mouse events in, pixels out" module with no 3D math.
     pub fn send_controller_input(&mut self, pkt: &SpatialControllerPacket) {
-        static PIPE_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let pipe_count = PIPE_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
         const GRIP_THRESHOLD: f32 = 0.7;
         const GRAB_MARGIN: f32 = 0.15;
         let head = [0.0f32, 1.6, 0.0]; // fixed head position (orbit center)
@@ -343,8 +340,7 @@ impl DashboardOverlay {
                 let grip_yaw = aim_dir[0].atan2(-aim_dir[2]);
                 let grip_pitch = aim_dir[1].asin();
 
-                // Yaw: negate so controller rotating right → panel moves right
-                let dyaw = -(grip_yaw - self.grab_controller_start_yaw);
+                let dyaw = grip_yaw - self.grab_controller_start_yaw;
                 // Pitch: controller tilting up → panel moves up
                 let dpitch = grip_pitch - self.grab_controller_start_pitch;
 
@@ -370,11 +366,10 @@ impl DashboardOverlay {
                 self.pose.position.y = new_center[1];
                 self.pose.position.z = new_center[2];
 
-                // Apply yaw delta to the orientation saved at grab start.
-                // This avoids computing orientation from scratch (which has
-                // sign convention issues). The panel rotates by exactly the
-                // same amount the controller yaw changed.
-                let half_dyaw = dyaw / 2.0;
+                // Apply yaw delta to orientation. Negate because the panel
+                // needs to rotate opposite to its orbital movement to keep
+                // facing the user (moving right on sphere → rotate left to face center).
+                let half_dyaw = -dyaw / 2.0;
                 let dq = xr::Quaternionf { x: 0.0, y: half_dyaw.sin(), z: 0.0, w: half_dyaw.cos() };
                 let q0 = self.grab_initial_orient;
                 // Quaternion multiply: dq * q0 (apply delta in world space)
@@ -468,14 +463,6 @@ impl DashboardOverlay {
                         ptr::null_mut(),
                     )
                 };
-                if pipe_count < 5 || pipe_count % 360 == 0 {
-                    layer_log!(info,
-                        "[ClearXR Layer] Pipe write: ok={} written={}/{} uv={:?} grab={}",
-                        ok, written, bytes.len(),
-                        best_hit.map(|(u, v, _)| (u, v)),
-                        is_grabbing,
-                    );
-                }
                 if ok == 0 {
                     layer_log!(info, "[ClearXR Layer] Pipe write FAILED, reconnecting.");
                     unsafe { windows_sys::Win32::Foundation::CloseHandle(handle); }

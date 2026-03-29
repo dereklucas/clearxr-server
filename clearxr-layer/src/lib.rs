@@ -1062,22 +1062,40 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     }
 
     // Query menu button via OpenXR actions — only query the hand it was bound to
+    static MENU_DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let menu_diag = MENU_DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut menu_down = false;
+    let menu_action_count = state.menu_actions.len();
     for &(action_raw, hand) in state.menu_actions.keys() {
         let hand_path = match hand {
             Hand::Left => state.left_hand_path,
             Hand::Right => state.right_hand_path,
         };
         if hand_path == xr::Path::NULL { continue; }
-        if let Some(pressed) = query_boolean(&next, session, action_raw, hand_path) {
+        let result_with_hand = query_boolean(&next, session, action_raw, hand_path);
+        if let Some(pressed) = result_with_hand {
             if pressed { menu_down = true; }
         }
         // Also try without subaction path (some runtimes need this)
-        if !menu_down {
-            if let Some(pressed) = query_boolean(&next, session, action_raw, xr::Path::NULL) {
+        let result_no_path = if !menu_down {
+            let r = query_boolean(&next, session, action_raw, xr::Path::NULL);
+            if let Some(pressed) = r {
                 if pressed { menu_down = true; }
             }
+            r
+        } else {
+            None
+        };
+        // Log every 360 frames + whenever menu state changes
+        if menu_diag < 3 || menu_diag % 360 == 0 || menu_down {
+            layer_log!(info,
+                "[ClearXR Layer] Menu query: action=0x{:x} hand={:?} with_path={:?} no_path={:?} menu_down={}",
+                action_raw, hand, result_with_hand, result_no_path, menu_down
+            );
         }
+    }
+    if menu_action_count == 0 && menu_diag < 3 {
+        layer_log!(warn, "[ClearXR Layer] No menu actions tracked! Menu button won't work.");
     }
 
     let mut active_hands = 0u8;
@@ -1127,15 +1145,6 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         // Always send — even when no controllers are active, the dashboard
         // needs a "nothing happening" packet to clear stale pointer/trigger state.
         overlay.send_controller_input(&pkt);
-        if diag < 5 || diag % 360 == 0 {
-            layer_log!(info,
-                "[ClearXR Layer] Controller state: active=0x{:02x} L=[{:.2},{:.2},{:.2}] R=[{:.2},{:.2},{:.2}] L_trig={:.2} R_trig={:.2}",
-                active_hands,
-                left.aim_pos[0], left.aim_pos[1], left.aim_pos[2],
-                right.aim_pos[0], right.aim_pos[1], right.aim_pos[2],
-                left.trigger, right.trigger
-            );
-        }
     }
 }
 

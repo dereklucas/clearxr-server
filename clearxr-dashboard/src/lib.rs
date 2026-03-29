@@ -270,16 +270,6 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
             }
         }
 
-        // Frame timing diagnostic (periodic)
-        static FRAME_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let fc = FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if fc % 200 == 0 {
-            log::info!(
-                "[ClearXR Dashboard] Frame {} took {:.1}ms",
-                fc, frame_start.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-
         // Sleep to target framerate
         let elapsed = frame_start.elapsed();
         if elapsed < target_interval {
