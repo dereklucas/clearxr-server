@@ -202,7 +202,7 @@ impl DashboardOverlay {
             .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
         let image_ci = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_UNORM)
+            .format(vk::Format::R8G8B8A8_SRGB)
             .extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 })
             .mip_levels(1)
             .array_layers(1)

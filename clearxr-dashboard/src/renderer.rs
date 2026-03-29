@@ -160,7 +160,11 @@ impl HeadlessRenderer {
         };
 
         // ── Offscreen render image (exported via named Win32 handle) ──
-        let format = vk::Format::R8G8B8A8_UNORM;
+        // SRGB format: hardware applies sRGB encode on framebuffer write.
+        // With srgb_framebuffer:true, the shader outputs linear values,
+        // and the hardware converts to sRGB. The stored bytes are proper sRGB,
+        // matching what the SRGB OpenXR swapchain expects.
+        let format = vk::Format::R8G8B8A8_SRGB;
 
         let mut external_image_info = vk::ExternalMemoryImageCreateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
@@ -660,7 +664,7 @@ impl HeadlessRenderer {
         // Image (DEVICE_LOCAL, for sampling in egui render pass)
         let image_ci = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_UNORM)
+            .format(vk::Format::R8G8B8A8_SRGB)
             .extent(vk::Extent3D { width, height, depth: 1 })
             .mip_levels(1)
             .array_layers(1)
@@ -681,7 +685,7 @@ impl HeadlessRenderer {
             &vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
-                .format(vk::Format::R8G8B8A8_UNORM)
+                .format(vk::Format::R8G8B8A8_SRGB)
                 .subresource_range(
                     vk::ImageSubresourceRange::default()
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
