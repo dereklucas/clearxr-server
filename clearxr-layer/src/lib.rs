@@ -2034,11 +2034,45 @@ unsafe extern "system" fn hook_get_action_state_boolean(
             }
         };
 
-        let pressed = buttons & bit != 0;
+        let mut pressed = buttons & bit != 0;
+
+        // Debounce menu button for the host app: CloudXR sends rapid pulses
+        // (~10ms true then false) while held. Convert to a single clean press
+        // so the host app (Space) sees one press/release per physical press.
+        if bit == SC_BTN_MENU {
+            use std::sync::Mutex;
+            use std::time::Instant;
+            static MENU_HOOK_STATE: Mutex<(bool, Option<Instant>)> = Mutex::new((false, None));
+            if let Ok(mut guard) = MENU_HOOK_STATE.lock() {
+                let (ref mut reported_pressed, ref mut last_press_time) = *guard;
+                if pressed && !*reported_pressed {
+                    // Rising edge: report true, start cooldown
+                    *reported_pressed = true;
+                    *last_press_time = Some(Instant::now());
+                } else if *reported_pressed {
+                    // In cooldown: report false after 100ms (give app one frame of true)
+                    if let Some(t) = last_press_time {
+                        if t.elapsed().as_millis() > 100 {
+                            *reported_pressed = false;
+                            pressed = false;
+                        } else {
+                            pressed = true; // still in the "pressed" window
+                        }
+                    }
+                    // Don't allow another press for 500ms
+                    if let Some(t) = last_press_time {
+                        if pressed == false && t.elapsed().as_millis() < 500 {
+                            // Suppress: even if opaque says true, we say false
+                            pressed = false;
+                        }
+                    }
+                }
+            }
+        }
+
         let out = &mut *state_out;
         out.current_state = if pressed { xr::TRUE } else { xr::FALSE };
         out.is_active = xr::TRUE;
-        // changed_since_last_sync is left as the runtime reported it
     }
 
     result
