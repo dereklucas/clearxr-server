@@ -69,7 +69,9 @@ pub struct DashboardOverlay {
     pipe: Option<windows_sys::Win32::Foundation::HANDLE>,
     // State
     visible: bool,
-    menu_was_down: bool,
+    menu_seen_press: bool,     // have we seen at least one true since last toggle?
+    menu_fired: bool,          // have we already fired the toggle for this press cycle?
+    menu_false_count: u32,     // consecutive frames with menu_down=false
     last_menu_toggle: std::time::Instant,
     pose: xr::Posef,
     size: xr::Extent2Df,
@@ -168,7 +170,9 @@ impl DashboardOverlay {
             #[cfg(target_os = "windows")]
             pipe,
             visible: true,
-            menu_was_down: false,
+            menu_seen_press: false,
+            menu_fired: false,
+            menu_false_count: 0,
             last_menu_toggle: std::time::Instant::now(),
             pose: xr::Posef {
                 orientation: xr::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
@@ -253,27 +257,48 @@ impl DashboardOverlay {
     }
 
     pub fn update_menu_button(&mut self, menu_down: bool) -> bool {
-        // Toggle on FALLING edge (button release) — prevents repeated triggers
-        // while held, and matches user expectation of "click up to toggle."
-        if !menu_down && self.menu_was_down {
-            let now = std::time::Instant::now();
-            if now.duration_since(self.last_menu_toggle).as_millis() < 300 {
-                self.menu_was_down = menu_down;
-                return false;
+        // State machine for opaque channel menu button (delivers flickering pulses).
+        //
+        // States:
+        //   IDLE (menu_seen_press=false, menu_fired=false)
+        //     → On menu_down=true: transition to PRESSED
+        //   PRESSED (menu_seen_press=true, menu_fired=false)
+        //     → On first menu_down=false: FIRE toggle, transition to COOLDOWN
+        //     → On menu_down=true: stay (accumulate press)
+        //   COOLDOWN (menu_fired=true)
+        //     → Ignore all pulses until 10+ consecutive false frames → back to IDLE
+        //
+        // This fires exactly once per press-release cycle, even with flickering pulses.
+
+        if menu_down {
+            self.menu_false_count = 0;
+            if !self.menu_fired {
+                self.menu_seen_press = true;
             }
-            self.last_menu_toggle = now;
-            self.menu_was_down = menu_down;
-            self.visible = !self.visible;
-            // Write visibility to SHM so dashboard can also read it
-            if let Some(ref shmem) = self.shmem {
-                unsafe {
-                    let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
-                    if self.visible { header.flags |= 1; } else { header.flags &= !1; }
+        } else {
+            self.menu_false_count += 1;
+
+            // Fire on first false after seeing a press (and haven't fired yet)
+            if self.menu_seen_press && !self.menu_fired {
+                self.menu_fired = true;
+                self.menu_seen_press = false;
+                self.last_menu_toggle = std::time::Instant::now();
+                self.visible = !self.visible;
+                if let Some(ref shmem) = self.shmem {
+                    unsafe {
+                        let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
+                        if self.visible { header.flags |= 1; } else { header.flags &= !1; }
+                    }
                 }
+                return true;
             }
-            return true;
+
+            // Reset after enough consecutive false frames (button truly released)
+            if self.menu_false_count > 10 {
+                self.menu_seen_press = false;
+                self.menu_fired = false;
+            }
         }
-        self.menu_was_down = menu_down;
         false
     }
 

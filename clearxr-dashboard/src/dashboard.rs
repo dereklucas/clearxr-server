@@ -201,8 +201,8 @@ impl LayerDashboard {
         // Set dark background (once — calling every frame defeats repaint skipping)
         if !self.visuals_set {
             ctx.set_visuals(egui::Visuals {
-                panel_fill: egui::Color32::from_rgba_premultiplied(10, 10, 20, 250),
-                window_fill: egui::Color32::from_rgba_premultiplied(10, 10, 20, 250),
+                panel_fill: egui::Color32::from_rgba_premultiplied(14, 14, 18, 250),
+                window_fill: egui::Color32::from_rgba_premultiplied(14, 14, 18, 250),
                 ..egui::Visuals::dark()
             });
             self.visuals_set = true;
@@ -216,7 +216,7 @@ impl LayerDashboard {
                 let rect = ui.available_rect_before_wrap();
                 let pill_rect = egui::Rect::from_center_size(
                     rect.center(),
-                    egui::vec2(rect.width() * 0.12, 5.0 * s),
+                    egui::vec2(rect.width() * 0.12, 5.75 * s),
                 );
                 // Hit area is the full panel height, wider than the visual pill
                 let hit_rect = egui::Rect::from_center_size(
@@ -225,9 +225,9 @@ impl LayerDashboard {
                 );
                 let is_hovered = ui.rect_contains_pointer(hit_rect);
                 let color = if is_hovered {
-                    egui::Color32::from_rgba_premultiplied(74, 158, 255, 220)
+                    egui::Color32::from_rgba_premultiplied(55, 90, 160, 220)
                 } else {
-                    egui::Color32::from_rgba_premultiplied(96, 96, 112, 180)
+                    egui::Color32::from_rgba_premultiplied(100, 96, 120, 180)
                 };
                 ui.painter()
                     .rect_filled(pill_rect, pill_rect.height() / 2.0, color);
@@ -238,7 +238,7 @@ impl LayerDashboard {
             .exact_height(44.0 * s)
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_premultiplied(22, 22, 40, 245))
+                    .fill(egui::Color32::from_rgba_premultiplied(18, 18, 24, 245))
                     .inner_margin(egui::Margin::symmetric((16.0 * s) as i8, (6.0 * s) as i8)),
             )
             .show(ctx, |ui| {
@@ -246,7 +246,7 @@ impl LayerDashboard {
                 let bar_rect = ui.max_rect();
                 ui.painter().line_segment(
                     [bar_rect.left_top(), bar_rect.right_top()],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 32)),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(120, 90, 160, 40)),
                 );
                 ui.horizontal_centered(|ui| {
                     // Build tab list — CurrentApp only shown when an app is running
@@ -264,7 +264,7 @@ impl LayerDashboard {
                         let color = if is_active {
                             egui::Color32::WHITE
                         } else {
-                            egui::Color32::from_rgb(120, 124, 148)
+                            egui::Color32::from_rgb(160, 162, 180)
                         };
                         // Title case: first char uppercase, rest lowercase
                         let display_label = {
@@ -292,7 +292,7 @@ impl LayerDashboard {
                                 egui::Shape::rect_filled(
                                     pill,
                                     pill.height() / 2.0,
-                                    egui::Color32::from_rgba_premultiplied(74, 158, 255, 110),
+                                    egui::Color32::from_rgba_premultiplied(40, 70, 140, 110),
                                 ),
                             );
                             ui.painter().set(
@@ -300,7 +300,7 @@ impl LayerDashboard {
                                 egui::Shape::rect_stroke(
                                     pill,
                                     pill.height() / 2.0,
-                                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 180, 255, 180)),
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(60, 100, 180, 140)),
                                     epaint::StrokeKind::Inside,
                                 ),
                             );
@@ -318,7 +318,7 @@ impl LayerDashboard {
                             ui.label(
                                 egui::RichText::new(format!("{:.0} fps", fps))
                                     .size(11.0 * s)
-                                    .color(egui::Color32::from_rgb(100, 106, 130))
+                                    .color(egui::Color32::from_rgb(150, 152, 170))
                                     .monospace(),
                             );
                         },
@@ -419,7 +419,7 @@ impl LayerDashboard {
                     egui::Frame::new()
                         .fill(egui::Color32::from_rgba_premultiplied(16, 24, 48, 230))
                         .corner_radius(8.0 * s)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 80, 140, 30)))
                         .inner_margin(egui::Margin::symmetric((12.0 * s) as i8, (8.0 * s) as i8))
                         .show(ui, |ui| {
                             ui.label(
@@ -451,10 +451,29 @@ impl LayerDashboard {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_premultiplied(10, 10, 20, 250))
+                    .fill(egui::Color32::from_rgba_premultiplied(16, 16, 22, 250))
                     .inner_margin(egui::Margin::symmetric((24.0 * s) as i8, (16.0 * s) as i8)),
             )
-            .show(ctx, |ui| match active_tab {
+            .show(ctx, |ui| {
+                // Specular highlight borders — bright top edge (light catches), dark bottom
+                let panel_rect = ui.max_rect();
+                // Top edge: subtle purple-blue specular highlight
+                ui.painter().line_segment(
+                    [panel_rect.left_top(), panel_rect.right_top()],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(140, 110, 180, 35)),
+                );
+                // Left edge: subtle gradient feel (lighter at top, fading)
+                ui.painter().line_segment(
+                    [panel_rect.left_top(), egui::pos2(panel_rect.left(), panel_rect.center().y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 80, 150, 20)),
+                );
+                // Right edge: subtle pink tint
+                ui.painter().line_segment(
+                    [panel_rect.right_top(), egui::pos2(panel_rect.right(), panel_rect.center().y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(150, 80, 120, 20)),
+                );
+
+                match active_tab {
                 DashboardTab::CurrentApp => {
                     render_current_app_content(ui, current_app, &mut resume_clicked, &mut quit_clicked, s);
                 }
@@ -467,7 +486,7 @@ impl LayerDashboard {
                 DashboardTab::Settings => {
                     render_settings_content(ui, config, &mut save_clicked, s);
                 }
-            });
+            }});
 
         // Store desktop image rect for mouse injection coordinate mapping
         self.desktop_image_rect = desktop_image_rect_out;
@@ -537,22 +556,12 @@ fn render_launcher_content(
     // Header
     ui.add_space(8.0 * s);
     let header_response = ui.horizontal(|ui| {
-        // Ensure row is tall enough to encompass the painted subtitle beneath the title
-        ui.set_min_height(40.0 * s);
+        ui.set_min_height(34.0 * s);
         debug_rect(ui, ui.available_rect_before_wrap(), egui::Color32::from_rgb(0, 255, 255), dbg);
-        let title_response = ui.heading(
+        ui.heading(
             egui::RichText::new("ClearXR")
                 .size(26.0 * s)
-                .color(egui::Color32::from_rgb(74, 158, 255)),
-        );
-        // Paint subtitle below the title
-        let subtitle_pos = egui::pos2(title_response.rect.left(), title_response.rect.bottom() + 2.0 * s);
-        ui.painter().text(
-            subtitle_pos,
-            egui::Align2::LEFT_TOP,
-            "Game Library",
-            egui::FontId::proportional(12.0 * s),
-            egui::Color32::from_rgb(145, 150, 178),
+                .color(egui::Color32::from_rgb(50, 110, 190)),
         );
         ui.add_space(16.0 * s);
         let search_width = (ui.available_width() * 0.45).min(320.0 * s);
@@ -580,9 +589,9 @@ fn render_launcher_content(
             ),
         );
         let search_border_color = if search_focused {
-            egui::Color32::from_rgba_premultiplied(74, 158, 255, 180)
+            egui::Color32::from_rgba_premultiplied(50, 100, 180, 160)
         } else {
-            egui::Color32::from_rgba_premultiplied(255, 255, 255, 28)
+            egui::Color32::from_rgba_premultiplied(100, 80, 140, 30)
         };
         let search_border_width = if search_focused { 1.5 } else { 1.0 };
         ui.painter().set(
@@ -668,18 +677,18 @@ fn render_launcher_content(
 
                                 // Card background
                                 let bg = if is_hovered {
-                                    egui::Color32::from_rgb(38, 38, 72)
+                                    egui::Color32::from_rgb(34, 32, 42)
                                 } else {
-                                    egui::Color32::from_rgb(24, 24, 50)
+                                    egui::Color32::from_rgb(24, 23, 30)
                                 };
                                 let cr = 8.0 * s;
                                 ui.painter().rect_filled(rect, cr, bg);
 
-                                // Card border — visible at rest, accented on hover
+                                // Card border — purple-blue tint at rest, accent on hover
                                 let stroke_color = if is_hovered {
-                                    egui::Color32::from_rgba_premultiplied(90, 170, 255, 130)
+                                    egui::Color32::from_rgba_premultiplied(60, 100, 180, 120)
                                 } else {
-                                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)
+                                    egui::Color32::from_rgba_premultiplied(100, 80, 140, 35)
                                 };
                                 ui.painter().rect_stroke(rect, cr, egui::Stroke::new(1.0, stroke_color), epaint::StrokeKind::Inside);
 
@@ -777,18 +786,18 @@ fn render_launcher_content(
                                 ui.painter().rect_filled(
                                     footer_rect,
                                     bottom_rounding,
-                                    egui::Color32::from_rgba_premultiplied(16, 16, 36, 220),
+                                    egui::Color32::from_rgba_premultiplied(18, 17, 24, 230),
                                 );
                                 // Hairline separator between art and footer
                                 ui.painter().line_segment(
                                     [footer_rect.left_top(), footer_rect.right_top()],
-                                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 36)),
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 80, 140, 30)),
                                 );
 
                                 // Title — vertically centered, ellipsis-truncated to footer width
                                 debug_rect(ui, footer_rect, egui::Color32::YELLOW, dbg);
                                 let title_inset = footer_rect.shrink2(egui::vec2(12.0 * s, 0.0));
-                                let title_color = egui::Color32::from_rgb(230, 232, 242);
+                                let title_color = egui::Color32::from_rgb(200, 200, 210);
                                 let mut job = egui::text::LayoutJob::single_section(
                                     game.name.clone(),
                                     egui::TextFormat {
