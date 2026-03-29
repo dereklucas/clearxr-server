@@ -75,6 +75,7 @@ pub struct DashboardOverlay {
     grab_initial_yaw: f32,
     grab_initial_pitch: f32,
     grab_initial_distance: f32,
+    grab_initial_orient: xr::Quaternionf, // orientation at grab start
     grab_controller_start_yaw: f32,
     grab_controller_start_pitch: f32,
     grab_controller_start_distance: f32,
@@ -167,6 +168,7 @@ impl DashboardOverlay {
             grab_initial_yaw: 0.0,
             grab_initial_pitch: 0.0,
             grab_initial_distance: 0.0,
+            grab_initial_orient: xr::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
             grab_controller_start_yaw: 0.0,
             grab_controller_start_pitch: 0.0,
             grab_controller_start_distance: 0.0,
@@ -354,14 +356,19 @@ impl DashboardOverlay {
                 self.pose.position.y = new_center[1];
                 self.pose.position.z = new_center[2];
 
-                // Orient panel to face the user. OpenXR quad -Z is the front face.
-                // We need -Z to point from panel toward head, so rotate by the yaw
-                // of the (head - panel) direction vector.
-                let to_head = sub(head, new_center);
-                let yaw = to_head[0].atan2(-to_head[2]); // atan2(x, -z) for -Z forward convention
-                let half = yaw / 2.0;
+                // Apply yaw delta to the orientation saved at grab start.
+                // This avoids computing orientation from scratch (which has
+                // sign convention issues). The panel rotates by exactly the
+                // same amount the controller yaw changed.
+                let half_dyaw = dyaw / 2.0;
+                let dq = xr::Quaternionf { x: 0.0, y: half_dyaw.sin(), z: 0.0, w: half_dyaw.cos() };
+                let q0 = self.grab_initial_orient;
+                // Quaternion multiply: dq * q0 (apply delta in world space)
                 self.pose.orientation = xr::Quaternionf {
-                    x: 0.0, y: half.sin(), z: 0.0, w: half.cos(),
+                    x: dq.w * q0.x + dq.x * q0.w + dq.y * q0.z - dq.z * q0.y,
+                    y: dq.w * q0.y - dq.x * q0.z + dq.y * q0.w + dq.z * q0.x,
+                    z: dq.w * q0.z + dq.x * q0.y - dq.y * q0.x + dq.z * q0.w,
+                    w: dq.w * q0.w - dq.x * q0.x - dq.y * q0.y - dq.z * q0.z,
                 };
 
                 // Scale size proportionally with distance
@@ -396,6 +403,7 @@ impl DashboardOverlay {
                 self.grab_initial_distance = dist;
                 self.grab_initial_yaw = to_panel[0].atan2(-to_panel[2]);
                 self.grab_initial_pitch = (to_panel[1] / dist).asin();
+                self.grab_initial_orient = self.pose.orientation; // preserve current orientation
 
                 let hand = if best_hand_idx == 0 { pkt.left } else { pkt.right };
                 let aim_rot = [hand.rot_x, hand.rot_y, hand.rot_z, hand.rot_w];
