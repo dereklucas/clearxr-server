@@ -556,6 +556,7 @@ fn spawn_default_app_launch_if_enabled(
             }
         }
 
+        let runtime_state_arc = runtime_state.clone();
         let mut runtime_state = runtime_state.lock().await;
         if let Some(process) = runtime_state.clearxr_process.as_mut() {
             match process.try_wait() {
@@ -601,6 +602,52 @@ fn spawn_default_app_launch_if_enabled(
             }
             Err(error) => {
                 warn!("Failed to start clear-xr.exe: {error}");
+            }
+        }
+
+        // Drop the lock before the polling loop
+        drop(runtime_state);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            let actions = {
+                let rt = runtime_state_arc.lock().await;
+                rt.dashboard.as_ref().map(|d| d.drain_actions()).unwrap_or_default()
+            };
+
+            for action in actions {
+                match action {
+                    clearxr_dashboard::dashboard::DashboardAction::LaunchGame(app_id) => {
+                        info!("Dashboard requested game launch: app_id={}", app_id);
+                        let mut rt = runtime_state_arc.lock().await;
+                        // Kill Space first
+                        if let Some(ref mut process) = rt.clearxr_process {
+                            info!("Killing Space (pid {}) for game launch.", process.id());
+                            let _ = process.kill();
+                            let _ = process.wait();
+                            rt.clearxr_process = None;
+                        }
+                        // Launch via Steam
+                        let url = format!("steam://rungameid/{}", app_id);
+                        info!("Launching: {}", url);
+                        let _ = StdCommand::new("cmd")
+                            .args(["/C", "start", "", &url])
+                            .spawn();
+                    }
+                    clearxr_dashboard::dashboard::DashboardAction::SaveConfig => {
+                        info!("Dashboard requested config save.");
+                    }
+                    clearxr_dashboard::dashboard::DashboardAction::QuitApp => {
+                        info!("Dashboard requested app quit.");
+                        let mut rt = runtime_state_arc.lock().await;
+                        if let Some(ref mut process) = rt.clearxr_process {
+                            let _ = process.kill();
+                            let _ = process.wait();
+                            rt.clearxr_process = None;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     });

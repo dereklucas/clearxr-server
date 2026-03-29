@@ -31,19 +31,24 @@ const DASHBOARD_HEIGHT: u32 = 1280;
 pub struct DashboardService {
     keep_running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Actions produced by the dashboard UI, polled by the streamer.
+    actions: Arc<std::sync::Mutex<Vec<dashboard::DashboardAction>>>,
 }
 
 impl DashboardService {
     /// Start the dashboard render loop on a background thread.
     pub fn start() -> Result<Self, String> {
         let keep_running = Arc::new(AtomicBool::new(true));
+        let actions: Arc<std::sync::Mutex<Vec<dashboard::DashboardAction>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let kr = keep_running.clone();
+        let actions_clone = actions.clone();
 
         let thread = std::thread::Builder::new()
             .name("dashboard-render".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    render_loop(kr)
+                    render_loop(kr, actions_clone)
                 }));
                 match result {
                     Ok(Ok(())) => log::info!("[ClearXR Dashboard] Render loop exited normally."),
@@ -66,7 +71,14 @@ impl DashboardService {
         Ok(Self {
             keep_running,
             thread: Some(thread),
+            actions,
         })
+    }
+
+    /// Drain any pending actions from the dashboard UI.
+    /// Called by the streamer to process LaunchGame, SaveConfig, etc.
+    pub fn drain_actions(&self) -> Vec<dashboard::DashboardAction> {
+        self.actions.lock().map_or_else(|_| Vec::new(), |mut v| v.drain(..).collect())
     }
 
     /// Stop the render loop and wait for the thread to finish.
@@ -86,7 +98,10 @@ impl Drop for DashboardService {
 }
 
 /// Main render loop — runs on the dashboard thread.
-fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
+fn render_loop(
+    keep_running: Arc<AtomicBool>,
+    action_queue: Arc<std::sync::Mutex<Vec<dashboard::DashboardAction>>>,
+) -> Result<(), String> {
     // Set Windows timer resolution to 1ms (default is ~15.6ms, ruins sleep accuracy)
     #[cfg(target_os = "windows")]
     {
@@ -252,21 +267,13 @@ fn render_loop(keep_running: Arc<AtomicBool>) -> Result<(), String> {
         prev_trigger = trigger;
         prev_secondary = secondary;
 
-        // Handle actions
-        for action in actions {
-            match action {
-                dashboard::DashboardAction::LaunchGame(app_id) => {
-                    log::info!("[ClearXR Dashboard] LaunchGame({})", app_id);
-                }
-                dashboard::DashboardAction::SaveConfig => {
-                    log::info!("[ClearXR Dashboard] Config saved.");
-                }
-                dashboard::DashboardAction::Resume => {
-                    log::info!("[ClearXR Dashboard] Resume.");
-                }
-                dashboard::DashboardAction::QuitApp => {
-                    log::info!("[ClearXR Dashboard] QuitApp.");
-                }
+        // Forward actions to the streamer via the shared queue
+        if !actions.is_empty() {
+            for action in &actions {
+                log::info!("[ClearXR Dashboard] Action: {:?}", action);
+            }
+            if let Ok(mut queue) = action_queue.lock() {
+                queue.extend(actions);
             }
         }
 
