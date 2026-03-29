@@ -253,9 +253,9 @@ impl DashboardOverlay {
     }
 
     pub fn update_menu_button(&mut self, menu_down: bool) -> bool {
-        if menu_down && !self.menu_was_down {
-            // Debounce: the opaque channel delivers menu as momentary pulses,
-            // causing rapid re-triggers. Ignore toggles within 300ms.
+        // Toggle on FALLING edge (button release) — prevents repeated triggers
+        // while held, and matches user expectation of "click up to toggle."
+        if !menu_down && self.menu_was_down {
             let now = std::time::Instant::now();
             if now.duration_since(self.last_menu_toggle).as_millis() < 300 {
                 self.menu_was_down = menu_down;

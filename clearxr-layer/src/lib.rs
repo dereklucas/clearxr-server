@@ -976,6 +976,30 @@ unsafe fn query_boolean(next: &NextDispatch, session: xr::Session, action_raw: u
     }
 }
 
+/// Actively query a vector2f action (thumbstick) for a specific hand.
+unsafe fn query_vector2f(next: &NextDispatch, session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<(f32, f32)> {
+    let get_info = xr::ActionStateGetInfo {
+        ty: xr::ActionStateGetInfo::TYPE,
+        next: std::ptr::null(),
+        action: xr::Action::from_raw(action_raw),
+        subaction_path: subaction,
+    };
+    let mut state_out = xr::ActionStateVector2f {
+        ty: xr::ActionStateVector2f::TYPE,
+        next: std::ptr::null_mut(),
+        current_state: xr::Vector2f { x: 0.0, y: 0.0 },
+        changed_since_last_sync: xr::FALSE,
+        last_change_time: xr::Time::from_nanos(0),
+        is_active: xr::FALSE,
+    };
+    let r = (next.get_action_state_vector2f)(session, &get_info, &mut state_out);
+    if r == xr::Result::SUCCESS && state_out.is_active.into() {
+        Some((state_out.current_state.x, state_out.current_state.y))
+    } else {
+        None
+    }
+}
+
 unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     static DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let diag = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1023,6 +1047,18 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
                 break;
             }
         }
+        // Find thumbstick action for this hand
+        if let Some(lock) = THUMBSTICK_ACTIONS.get() {
+            if let Ok(map) = lock.read() {
+                for &action_raw in map.keys() {
+                    if let Some((x, y)) = query_vector2f(&next, session, action_raw, hand_path) {
+                        hand_state.thumbstick_x = x;
+                        hand_state.thumbstick_y = y;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     // Query menu button via OpenXR actions — only query the hand it was bound to
@@ -1035,6 +1071,12 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         if hand_path == xr::Path::NULL { continue; }
         if let Some(pressed) = query_boolean(&next, session, action_raw, hand_path) {
             if pressed { menu_down = true; }
+        }
+        // Also try without subaction path (some runtimes need this)
+        if !menu_down {
+            if let Some(pressed) = query_boolean(&next, session, action_raw, xr::Path::NULL) {
+                if pressed { menu_down = true; }
+            }
         }
     }
 
