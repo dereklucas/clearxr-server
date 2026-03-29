@@ -1061,41 +1061,18 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         }
     }
 
-    // Query menu button via OpenXR actions — only query the hand it was bound to
-    static MENU_DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let menu_diag = MENU_DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Read menu button from opaque channel. The runtime reserves the menu button
+    // and doesn't expose it via xrGetActionStateBoolean (returns is_active=false).
+    // Our hook_get_action_state_boolean overrides the result for the HOST APP using
+    // opaque channel data, but query_boolean bypasses our hook and goes to the runtime
+    // directly. So we must read the opaque channel ourselves.
     let mut menu_down = false;
-    let menu_action_count = state.menu_actions.len();
-    for &(action_raw, hand) in state.menu_actions.keys() {
-        let hand_path = match hand {
-            Hand::Left => state.left_hand_path,
-            Hand::Right => state.right_hand_path,
-        };
-        if hand_path == xr::Path::NULL { continue; }
-        let result_with_hand = query_boolean(&next, session, action_raw, hand_path);
-        if let Some(pressed) = result_with_hand {
-            if pressed { menu_down = true; }
+    if let Some(ref ch) = state.opaque {
+        if let Some(pkt) = ch.latest {
+            let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
+            let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
+            menu_down = left_menu || right_menu;
         }
-        // Also try without subaction path (some runtimes need this)
-        let result_no_path = if !menu_down {
-            let r = query_boolean(&next, session, action_raw, xr::Path::NULL);
-            if let Some(pressed) = r {
-                if pressed { menu_down = true; }
-            }
-            r
-        } else {
-            None
-        };
-        // Log every 360 frames + whenever menu state changes
-        if menu_diag < 3 || menu_diag % 360 == 0 || menu_down {
-            layer_log!(info,
-                "[ClearXR Layer] Menu query: action=0x{:x} hand={:?} with_path={:?} no_path={:?} menu_down={}",
-                action_raw, hand, result_with_hand, result_no_path, menu_down
-            );
-        }
-    }
-    if menu_action_count == 0 && menu_diag < 3 {
-        layer_log!(warn, "[ClearXR Layer] No menu actions tracked! Menu button won't work.");
     }
 
     let mut active_hands = 0u8;
