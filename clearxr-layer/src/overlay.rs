@@ -421,6 +421,22 @@ impl DashboardOverlay {
 
         // Build packet for dashboard — don't send pointer during grab (prevents phantom clicks)
         let is_grabbing = self.grab_hand.is_some();
+        // Build per-hand raw state from the SpatialControllerPacket
+        let make_hand = |hand: crate::opaque::SpatialControllerHand, mask: u8| -> HandStatePkt {
+            HandStatePkt {
+                buttons: { hand.buttons },
+                active: if pkt.active_hands & mask != 0 { 1 } else { 0 },
+                _pad: 0,
+                trigger: { hand.trigger },
+                grip: { hand.grip },
+                thumbstick_x: { hand.thumbstick_x },
+                thumbstick_y: { hand.thumbstick_y },
+                pos_x: { hand.pos_x },
+                pos_y: { hand.pos_y },
+                pos_z: { hand.pos_z },
+            }
+        };
+
         let input_pkt = DashboardInputPacket {
             magic: 0x4449,
             flags: if best_hit.is_some() && !is_grabbing { 0x01 } else { 0x00 },
@@ -430,6 +446,8 @@ impl DashboardOverlay {
             trigger: if is_grabbing { 0.0 } else { best_trigger },
             grip: if is_grabbing { 0.0 } else { best_grip },
             thumbstick_y: best_thumbstick_y,
+            left: make_hand(pkt.left, 0x01),
+            right: make_hand(pkt.right, 0x02),
         };
 
         #[cfg(target_os = "windows")]
@@ -901,6 +919,22 @@ unsafe fn create_stage_space(next: &NextDispatch, session: xr::Session) -> Resul
 // DashboardInputPacket — simplified packet sent to the dashboard
 // ============================================================
 
+/// Per-hand raw state. Must match clearxr-dashboard/src/input_pipe.rs HandState.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+struct HandStatePkt {
+    buttons: u16,
+    active: u8,
+    _pad: u8,
+    trigger: f32,
+    grip: f32,
+    thumbstick_x: f32,
+    thumbstick_y: f32,
+    pos_x: f32,
+    pos_y: f32,
+    pos_z: f32,
+}
+
 /// Pre-computed input packet. Must match clearxr-dashboard/src/input_pipe.rs.
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -913,6 +947,8 @@ struct DashboardInputPacket {
     trigger: f32,
     grip: f32,
     thumbstick_y: f32,
+    left: HandStatePkt,
+    right: HandStatePkt,
 }
 
 // ============================================================

@@ -22,6 +22,7 @@ pub enum DashboardTab {
     CurrentApp,
     Launcher,
     Desktop,
+    Controllers,
     Settings,
 }
 
@@ -58,6 +59,9 @@ pub struct LayerDashboard {
     game_textures_loaded: bool,
     /// Name of the currently running app (shown as a tab). None = no app running.
     current_app: Option<String>,
+    /// Raw controller state from the layer (for controller test tab).
+    controller_left: crate::input_pipe::HandState,
+    controller_right: crate::input_pipe::HandState,
     /// Virtual keyboard (auto-shows when a TextEdit has focus).
     keyboard: egui_keyboard::Keyboard,
 }
@@ -85,6 +89,8 @@ impl LayerDashboard {
             game_textures: HashMap::new(),
             game_textures_loaded: false,
             current_app: None,
+            controller_left: Default::default(),
+            controller_right: Default::default(),
             keyboard: egui_keyboard::Keyboard::default(),
         }
     }
@@ -110,6 +116,11 @@ impl LayerDashboard {
     }
 
     /// Set the currently running app name. Pass None to clear.
+    pub fn set_controller_state(&mut self, left: crate::input_pipe::HandState, right: crate::input_pipe::HandState) {
+        self.controller_left = left;
+        self.controller_right = right;
+    }
+
     pub fn set_current_app(&mut self, name: Option<String>) {
         if name.is_some() && self.current_app.is_none() {
             self.active_tab = DashboardTab::CurrentApp;
@@ -244,6 +255,7 @@ impl LayerDashboard {
                     }
                     tabs.push((DashboardTab::Launcher, "LAUNCHER".into()));
                     tabs.push((DashboardTab::Desktop, "DESKTOP".into()));
+                    tabs.push((DashboardTab::Controllers, "CONTROLLERS".into()));
                     tabs.push((DashboardTab::Settings, "SETTINGS".into()));
 
                     for (tab, label) in &tabs {
@@ -382,6 +394,8 @@ impl LayerDashboard {
         let desktop_error = &self.desktop_error;
 
         let game_textures = &self.game_textures;
+        let controller_left = self.controller_left;
+        let controller_right = self.controller_right;
         let current_app = &self.current_app;
         let mut resume_clicked = false;
         let mut quit_clicked = false;
@@ -401,6 +415,9 @@ impl LayerDashboard {
                 }
                 DashboardTab::Desktop => {
                     desktop_image_rect_out = render_desktop_content(ui, desktop_texture_id, desktop_error, s);
+                }
+                DashboardTab::Controllers => {
+                    render_controller_content(ui, &controller_left, &controller_right, s);
                 }
                 DashboardTab::Settings => {
                     render_settings_content(ui, config, &mut save_clicked, s);
@@ -962,4 +979,215 @@ fn render_settings_content(ui: &mut egui::Ui, config: &mut Config, save_clicked:
     if save_btn.clicked() {
         *save_clicked = true;
     }
+}
+
+// ============================================================
+// Controllers tab
+// ============================================================
+
+fn render_controller_content(
+    ui: &mut egui::Ui,
+    left: &crate::input_pipe::HandState,
+    right: &crate::input_pipe::HandState,
+    s: f32,
+) {
+    use crate::input_pipe::*;
+
+    ui.heading(
+        egui::RichText::new("Controller Input")
+            .size(20.0 * s)
+            .color(egui::Color32::from_rgb(74, 158, 255)),
+    );
+    ui.add_space(8.0 * s);
+
+    let hands = [("Left", left), ("Right", right)];
+
+    ui.columns(2, |cols| {
+        for (i, (label, hand)) in hands.iter().enumerate() {
+            let ui = &mut cols[i];
+            let active = hand.active != 0;
+
+            // Header
+            ui.horizontal(|ui| {
+                let color = if active {
+                    egui::Color32::from_rgb(100, 255, 100)
+                } else {
+                    egui::Color32::from_rgb(128, 128, 128)
+                };
+                ui.label(
+                    egui::RichText::new(format!("{} Hand", label))
+                        .size(16.0 * s)
+                        .color(color)
+                        .strong(),
+                );
+                if !active {
+                    ui.label(
+                        egui::RichText::new("(not tracked)")
+                            .size(12.0 * s)
+                            .color(egui::Color32::from_rgb(128, 128, 128)),
+                    );
+                }
+            });
+            ui.add_space(4.0 * s);
+
+            // Buttons
+            ui.label(egui::RichText::new("Buttons").size(13.0 * s).color(egui::Color32::from_rgb(180, 180, 200)));
+            egui::Grid::new(format!("btns_{}", label))
+                .num_columns(4)
+                .spacing([8.0 * s, 4.0 * s])
+                .show(ui, |ui| {
+                    let btn = |ui: &mut egui::Ui, name: &str, mask: u16| {
+                        let pressed = hand.buttons & mask != 0;
+                        let color = if pressed {
+                            egui::Color32::from_rgb(74, 158, 255)
+                        } else {
+                            egui::Color32::from_rgb(60, 60, 70)
+                        };
+                        let text_color = if pressed {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(120, 120, 140)
+                        };
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(48.0 * s, 24.0 * s),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 4.0 * s, color);
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            name,
+                            egui::FontId::proportional(11.0 * s),
+                            text_color,
+                        );
+                    };
+
+                    btn(ui, "A/X", BTN_A);
+                    btn(ui, "B/Y", BTN_B);
+                    btn(ui, "Menu", BTN_MENU);
+                    btn(ui, "Stick", BTN_THUMBSTICK);
+                    ui.end_row();
+                });
+
+            ui.add_space(4.0 * s);
+
+            // Touch sensors
+            ui.label(egui::RichText::new("Touch").size(13.0 * s).color(egui::Color32::from_rgb(180, 180, 200)));
+            ui.horizontal(|ui| {
+                let touch = |ui: &mut egui::Ui, name: &str, mask: u16| {
+                    let touched = hand.buttons & mask != 0;
+                    let color = if touched {
+                        egui::Color32::from_rgb(255, 180, 50)
+                    } else {
+                        egui::Color32::from_rgb(50, 50, 60)
+                    };
+                    ui.label(
+                        egui::RichText::new(name)
+                            .size(11.0 * s)
+                            .color(color),
+                    );
+                };
+                touch(ui, "A/X", TOUCH_A);
+                touch(ui, "B/Y", TOUCH_B);
+                touch(ui, "Trig", TOUCH_TRIGGER);
+                touch(ui, "Stick", TOUCH_THUMBSTICK);
+            });
+
+            ui.add_space(6.0 * s);
+
+            // Analog values
+            ui.label(egui::RichText::new("Analogs").size(13.0 * s).color(egui::Color32::from_rgb(180, 180, 200)));
+            egui::Grid::new(format!("analogs_{}", label))
+                .num_columns(2)
+                .spacing([8.0 * s, 4.0 * s])
+                .show(ui, |ui| {
+                    let bar = |ui: &mut egui::Ui, name: &str, value: f32| {
+                        ui.label(
+                            egui::RichText::new(name)
+                                .size(12.0 * s)
+                                .color(egui::Color32::from_rgb(160, 160, 180)),
+                        );
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(120.0 * s, 14.0 * s),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 3.0 * s, egui::Color32::from_rgb(40, 40, 50));
+                        let fill_w = rect.width() * value.abs().clamp(0.0, 1.0);
+                        let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, rect.height()));
+                        let fill_color = if value > 0.5 {
+                            egui::Color32::from_rgb(74, 158, 255)
+                        } else {
+                            egui::Color32::from_rgb(60, 120, 200)
+                        };
+                        ui.painter().rect_filled(fill_rect, 3.0 * s, fill_color);
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            format!("{:.2}", value),
+                            egui::FontId::proportional(10.0 * s),
+                            egui::Color32::WHITE,
+                        );
+                        ui.end_row();
+                    };
+
+                    bar(ui, "Trigger", hand.trigger);
+                    bar(ui, "Grip", hand.grip);
+                });
+
+            ui.add_space(6.0 * s);
+
+            // Thumbstick visualization
+            ui.label(egui::RichText::new("Thumbstick").size(13.0 * s).color(egui::Color32::from_rgb(180, 180, 200)));
+            let stick_size = 80.0 * s;
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(stick_size, stick_size),
+                egui::Sense::hover(),
+            );
+            // Background circle
+            let center = rect.center();
+            let radius = stick_size / 2.0 - 2.0;
+            ui.painter().circle_filled(center, radius, egui::Color32::from_rgb(40, 40, 50));
+            ui.painter().circle_stroke(center, radius, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 90)));
+            // Crosshair
+            ui.painter().line_segment(
+                [egui::pos2(center.x - radius, center.y), egui::pos2(center.x + radius, center.y)],
+                egui::Stroke::new(0.5, egui::Color32::from_rgb(60, 60, 70)),
+            );
+            ui.painter().line_segment(
+                [egui::pos2(center.x, center.y - radius), egui::pos2(center.x, center.y + radius)],
+                egui::Stroke::new(0.5, egui::Color32::from_rgb(60, 60, 70)),
+            );
+            // Dot
+            let dot_x = center.x + hand.thumbstick_x * (radius - 6.0);
+            let dot_y = center.y - hand.thumbstick_y * (radius - 6.0); // Y inverted for screen coords
+            ui.painter().circle_filled(
+                egui::pos2(dot_x, dot_y),
+                5.0 * s,
+                egui::Color32::from_rgb(74, 158, 255),
+            );
+            // Value label
+            ui.label(
+                egui::RichText::new(format!("({:.2}, {:.2})", hand.thumbstick_x, hand.thumbstick_y))
+                    .size(11.0 * s)
+                    .color(egui::Color32::from_rgb(140, 140, 160)),
+            );
+
+            ui.add_space(6.0 * s);
+
+            // Position
+            ui.label(egui::RichText::new("Position").size(13.0 * s).color(egui::Color32::from_rgb(180, 180, 200)));
+            ui.label(
+                egui::RichText::new(format!(
+                    "x: {:.3}  y: {:.3}  z: {:.3}",
+                    hand.pos_x, hand.pos_y, hand.pos_z
+                ))
+                .size(11.0 * s)
+                .color(egui::Color32::from_rgb(160, 160, 180))
+                .family(egui::FontFamily::Monospace),
+            );
+        }
+    });
+
+    // Force continuous repaint so analog values update in real-time
+    ui.ctx().request_repaint();
 }

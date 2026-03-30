@@ -7,10 +7,24 @@
 /// Name of the named pipe.
 pub const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
 
-/// Pre-computed input packet from the layer. The layer does all spatial math
-/// (ray-quad intersection) and sends just the UI-relevant result.
-///
-/// 24 bytes, matches the layer's definition exactly.
+/// Per-hand raw controller state for the controller test tab.
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+pub struct HandState {
+    pub buttons: u16,       // bitmask: A=0, B=1, thumbstick=4, menu=5, touchA=6, touchB=7, touchTrig=8, touchThumb=10
+    pub active: u8,         // 1 if hand is tracked
+    pub _pad: u8,
+    pub trigger: f32,       // 0.0-1.0
+    pub grip: f32,          // 0.0-1.0
+    pub thumbstick_x: f32,  // -1.0 to 1.0
+    pub thumbstick_y: f32,  // -1.0 to 1.0
+    pub pos_x: f32,
+    pub pos_y: f32,
+    pub pos_z: f32,
+}
+
+/// Dashboard input packet from the layer.
+/// Contains pre-computed UV hit + raw per-hand state for the controller test tab.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct DashboardInputPacket {
@@ -19,10 +33,23 @@ pub struct DashboardInputPacket {
     pub _pad: u8,
     pub pointer_u: f32,    // UV coords (valid if has_pointer)
     pub pointer_v: f32,
-    pub trigger: f32,      // 0.0-1.0 raw value
-    pub grip: f32,         // 0.0-1.0 raw value
-    pub thumbstick_y: f32, // -1.0 to 1.0 raw value
+    pub trigger: f32,      // best-hand trigger 0.0-1.0
+    pub grip: f32,         // best-hand grip 0.0-1.0
+    pub thumbstick_y: f32, // best-hand thumbstick Y -1.0 to 1.0
+    // Extended: per-hand raw state for controller test tab
+    pub left: HandState,
+    pub right: HandState,
 }
+
+// Button bitmask constants (match the layer's opaque.rs)
+pub const BTN_A: u16            = 1 << 0;
+pub const BTN_B: u16            = 1 << 1;
+pub const BTN_THUMBSTICK: u16   = 1 << 4;
+pub const BTN_MENU: u16         = 1 << 5;
+pub const TOUCH_A: u16          = 1 << 6;
+pub const TOUCH_B: u16          = 1 << 7;
+pub const TOUCH_TRIGGER: u16    = 1 << 8;
+pub const TOUCH_THUMBSTICK: u16 = 1 << 10;
 
 const PACKET_SIZE: usize = std::mem::size_of::<DashboardInputPacket>();
 

@@ -162,8 +162,11 @@ fn render_loop(
     while keep_running.load(Ordering::Relaxed) {
         let frame_start = std::time::Instant::now();
 
-        // Read pre-computed input from the layer (UV + buttons, no spatial math needed)
+        // Read pre-computed input from the layer (UV + buttons + raw hand state)
         if let Some(pkt) = pipe.try_read() {
+            // Update controller state for the controller test tab
+            dashboard.set_controller_state(pkt.left, pkt.right);
+
             if pkt.flags & 0x01 != 0 {
                 pointer_uv = Some((pkt.pointer_u, pkt.pointer_v));
             } else {
