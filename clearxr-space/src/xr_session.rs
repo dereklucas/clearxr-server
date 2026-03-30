@@ -419,6 +419,36 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
             }
         }
 
+        // Check for external shutdown signal (streamer sets this when launching a game)
+        #[cfg(target_os = "windows")]
+        {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> isize;
+                fn CreateEventW(attrs: *const u8, manual: i32, initial: i32, name: *const u16) -> isize;
+                fn WaitForSingleObject(handle: isize, ms: u32) -> u32;
+                fn ResetEvent(handle: isize) -> i32;
+            }
+            static SHUTDOWN_EVENT: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+            let event = *SHUTDOWN_EVENT.get_or_init(|| {
+                let name: Vec<u16> = "Global\\ClearXR_Shutdown\0".encode_utf16().collect();
+                let h = unsafe { OpenEventW(0x00100000, 0, name.as_ptr()) }; // SYNCHRONIZE
+                if h == 0 {
+                    unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) }
+                } else {
+                    h
+                }
+            });
+            if event != 0 {
+                let result = unsafe { WaitForSingleObject(event, 0) };
+                if result == 0 { // WAIT_OBJECT_0
+                    log::info!("Received ClearXR_Shutdown signal, requesting exit.");
+                    keep_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                    unsafe { ResetEvent(event); }
+                }
+            }
+        }
+
         if !keep_running.load(std::sync::atomic::Ordering::Relaxed) {
             if session_running {
                 session.request_exit()?;

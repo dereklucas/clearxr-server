@@ -134,8 +134,11 @@ fn session_loop(
                     Ok(()) => log::info!("[ClearXR Fallback] Session ended cleanly."),
                     Err(e) => log::warn!("[ClearXR Fallback] Session error: {}", e),
                 }
-                // After session ends, go idle
-                session_state.store(STATE_IDLE, Ordering::Release);
+                // After session ends, go idle — but only if we weren't reclaimed
+                // while cleaning up (compare_exchange avoids overwriting a concurrent reclaim)
+                let _ = session_state.compare_exchange(
+                    STATE_YIELDING, STATE_IDLE, Ordering::Release, Ordering::Relaxed,
+                );
             }
             STATE_IDLE | STATE_YIELDING => {
                 // Wait for reclaim signal
@@ -256,13 +259,21 @@ fn run_session(
 
     // Session state tracking
     let mut xr_session_running = false;
+    let mut exit_requested = false;
 
     // Frame loop
     while keep_running.load(Ordering::Acquire) {
-        // Check if we should yield
-        if session_state.load(Ordering::Acquire) == STATE_YIELDING {
-            log::info!("[ClearXR Fallback] Yielding — destroying session.");
-            break;
+        // Check if we should yield — request graceful exit first
+        if session_state.load(Ordering::Acquire) == STATE_YIELDING && !exit_requested {
+            if xr_session_running {
+                log::info!("[ClearXR Fallback] Yielding — requesting session exit.");
+                session.request_exit().map_err(|e| format!("request_exit: {e}"))?;
+                exit_requested = true;
+                // Continue the event loop to process STOPPING → end → EXITING → break
+            } else {
+                log::info!("[ClearXR Fallback] Yielding — session not running, breaking.");
+                break;
+            }
         }
 
         // Poll OpenXR events

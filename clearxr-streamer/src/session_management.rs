@@ -516,6 +516,29 @@ fn is_connection_close(error: &io::Error) -> bool {
     )
 }
 
+/// Signal Space to exit gracefully via a named Win32 event.
+#[cfg(target_os = "windows")]
+fn signal_clearxr_shutdown() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(attrs: *const u8, manual: i32, initial: i32, name: *const u16) -> isize;
+        fn SetEvent(handle: isize) -> i32;
+    }
+    let name: Vec<u16> = "Global\\ClearXR_Shutdown\0".encode_utf16().collect();
+    let h = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
+    if h != 0 {
+        unsafe { SetEvent(h); }
+        info!("Signaled ClearXR_Shutdown event.");
+    } else {
+        warn!("Failed to create/signal ClearXR_Shutdown event.");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn signal_clearxr_shutdown() {
+    warn!("Graceful shutdown signal not implemented on this platform.");
+}
+
 fn spawn_default_app_launch_if_enabled(
     app_state: AppState,
     runtime_state: Arc<Mutex<SessionRuntimeState>>,
@@ -651,44 +674,93 @@ fn spawn_default_app_launch_if_enabled(
                 match action {
                     clearxr_dashboard::dashboard::DashboardAction::LaunchGame(app_id) => {
                         info!("Dashboard requested game launch: app_id={}", app_id);
-                        let mut rt = runtime_state_arc.lock().await;
-                        // Kill Space first
-                        if let Some(ref mut process) = rt.clearxr_process {
-                            info!("Killing Space (pid {}) for game launch.", process.id());
-                            let _ = process.kill();
-                            let _ = process.wait();
-                            rt.clearxr_process = None;
-                        }
-                        // Reclaim fallback session (dashboard stays visible during transition)
-                        if let Some(ref fb) = rt.fallback_session {
-                            fb.reclaim_session();
-                        }
-                        drop(rt);
-                        // Give the fallback session time to create the XR session
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-                        // Yield fallback session for the game
-                        let rt = runtime_state_arc.lock().await;
-                        if let Some(ref fb) = rt.fallback_session {
-                            fb.yield_session();
-                        }
-                        drop(rt);
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        // 1. Signal Space to exit gracefully via named event
+                        signal_clearxr_shutdown();
 
-                        // Launch via Steam
+                        // 2. Wait for Space to actually exit (with timeout)
+                        {
+                            let mut rt = runtime_state_arc.lock().await;
+                            if let Some(ref mut process) = rt.clearxr_process {
+                                let pid = process.id();
+                                info!("Waiting for Space (pid {}) to exit gracefully...", pid);
+                                drop(rt); // release lock while waiting
+
+                                // Give Space up to 3 seconds to exit cleanly
+                                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                    let mut rt = runtime_state_arc.lock().await;
+                                    if let Some(ref mut p) = rt.clearxr_process {
+                                        match p.try_wait() {
+                                            Ok(Some(_)) => {
+                                                info!("Space exited cleanly.");
+                                                rt.clearxr_process = None;
+                                                break;
+                                            }
+                                            _ => {
+                                                if tokio::time::Instant::now() > deadline {
+                                                    warn!("Space didn't exit in 3s, force killing.");
+                                                    let _ = p.kill();
+                                                    let _ = p.wait();
+                                                    rt.clearxr_process = None;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. Wait for the OpenXR session to be fully released
+                        info!("Waiting for OpenXR session to be free...");
+                        let session_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            // TODO: poll cloudxr.query_status_once() for game_is_connected == false
+                            // For now, just wait 1 second after Space exits
+                            if tokio::time::Instant::now() > session_deadline {
+                                break;
+                            }
+                            // Simple heuristic: if Space process is gone, wait 1s for runtime cleanup
+                            let rt = runtime_state_arc.lock().await;
+                            if rt.clearxr_process.is_none() {
+                                drop(rt);
+                                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                                break;
+                            }
+                        }
+                        info!("Session should be free now.");
+
+                        // 4. Yield the fallback session (if active) so the game can create its own
+                        {
+                            let rt = runtime_state_arc.lock().await;
+                            if let Some(ref fb) = rt.fallback_session {
+                                if fb.is_active() {
+                                    fb.yield_session();
+                                }
+                            }
+                            drop(rt);
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+
+                        // 5. Launch via Steam
                         let url = format!("steam://rungameid/{}", app_id);
                         info!("Launching: {}", url);
                         let _ = StdCommand::new("cmd")
                             .args(["/C", "start", "", &url])
                             .spawn();
 
-                        // If game doesn't connect within 30s, reclaim + re-launch Space
+                        // 6. Timeout: if game doesn't connect within 30s, reclaim + re-launch Space
                         let rt_clone = runtime_state_arc.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                             let rt = rt_clone.lock().await;
                             if rt.clearxr_process.is_none() {
-                                info!("Game didn't launch within 30s, reclaiming fallback session.");
+                                info!("Game didn't launch within 30s, reclaiming fallback + re-launching Space.");
                                 if let Some(ref fb) = rt.fallback_session {
                                     fb.reclaim_session();
                                 }
