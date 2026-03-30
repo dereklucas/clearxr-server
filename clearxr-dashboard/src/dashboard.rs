@@ -317,6 +317,37 @@ impl LayerDashboard {
         // Auto-shows when a TextEdit has focus, handles focus restoration internally.
         self.keyboard.show(ctx);
 
+        // Show a keyboard dismiss button when a text field has focus
+        if ctx.wants_keyboard_input() {
+            // Position just above the keyboard (which anchors to CENTER_BOTTOM)
+            let kb_safe = self.keyboard.safe_rect(ctx);
+            let btn_y = kb_safe.bottom() - 30.0 * s;
+            egui::Area::new(egui::Id::new("kb_dismiss"))
+                .fixed_pos(egui::pos2(ctx.screen_rect().right() - 60.0 * s, btn_y))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Hide").size(13.0 * s).color(
+                                    egui::Color32::from_rgb(160, 162, 180),
+                                ),
+                            )
+                            .fill(egui::Color32::from_rgba_premultiplied(30, 30, 40, 220))
+                            .corner_radius(6.0 * s),
+                        )
+                        .clicked()
+                    {
+                        // Surrender focus on the active text field so keyboard auto-hides
+                        ctx.memory_mut(|m| {
+                            if let Some(id) = m.focused() {
+                                m.surrender_focus(id);
+                            }
+                        });
+                    }
+                });
+        }
+
         // ---- Notification overlay ----
         if let Some(notif) = notifications.visible().first() {
             egui::Area::new(egui::Id::new("notification"))
@@ -547,7 +578,9 @@ fn render_launcher_content(
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
                                 let rect = ui.available_rect_before_wrap();
-                                let is_hovered = ui.rect_contains_pointer(rect);
+                                // Register the full card rect as clickable
+                                let card_response = ui.allocate_rect(rect, egui::Sense::click());
+                                let is_hovered = card_response.hovered();
                                 if is_hovered {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
@@ -694,10 +727,11 @@ fn render_launcher_content(
                                     galley,
                                     title_color,
                                 );
+                                card_response
                             },
                         );
 
-                        if response.response.clicked() {
+                        if response.inner.clicked() {
                             *launch_app_id = Some(game.app_id);
                         }
                     }

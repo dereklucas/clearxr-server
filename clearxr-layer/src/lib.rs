@@ -1005,27 +1005,8 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     let diag = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // Poll opaque channel for button state
-    let mut opaque_had_new_data = false;
     if let Some(ref mut ch) = state.opaque {
-        let before = ch.latest;
         ch.poll();
-        let after = ch.latest;
-        // Log when menu bit changes or new packet arrives
-        if let (Some(b), Some(a)) = (before, after) {
-            let btns_b = { b.left.buttons };
-            let btns_a = { a.left.buttons };
-            let menu_before = btns_b & SC_BTN_MENU;
-            let menu_after = btns_a & SC_BTN_MENU;
-            if menu_before != menu_after {
-                layer_log!(info, "[ClearXR Layer] Opaque menu bit changed: {} → {} (left buttons: 0x{:04x})",
-                    menu_before != 0, menu_after != 0, btns_a);
-                opaque_had_new_data = true;
-            }
-        } else if before.is_none() && after.is_some() {
-            let btns = { after.unwrap().left.buttons };
-            layer_log!(info, "[ClearXR Layer] First opaque packet received. left.buttons=0x{:04x}", btns);
-            opaque_had_new_data = true;
-        }
     }
 
     // Read aim poses captured by hook_locate_space
@@ -2034,42 +2015,7 @@ unsafe extern "system" fn hook_get_action_state_boolean(
             }
         };
 
-        let mut pressed = buttons & bit != 0;
-
-        // Debounce menu button for the host app: CloudXR sends rapid pulses
-        // (~10ms true then false) while held. Convert to a single clean press
-        // so the host app (Space) sees one press/release per physical press.
-        if bit == SC_BTN_MENU {
-            use std::sync::Mutex;
-            use std::time::Instant;
-            static MENU_HOOK_STATE: Mutex<(bool, Option<Instant>)> = Mutex::new((false, None));
-            if let Ok(mut guard) = MENU_HOOK_STATE.lock() {
-                let (ref mut reported_pressed, ref mut last_press_time) = *guard;
-                if pressed && !*reported_pressed {
-                    // Rising edge: report true, start cooldown
-                    *reported_pressed = true;
-                    *last_press_time = Some(Instant::now());
-                } else if *reported_pressed {
-                    // In cooldown: report false after 100ms (give app one frame of true)
-                    if let Some(t) = last_press_time {
-                        if t.elapsed().as_millis() > 100 {
-                            *reported_pressed = false;
-                            pressed = false;
-                        } else {
-                            pressed = true; // still in the "pressed" window
-                        }
-                    }
-                    // Don't allow another press for 500ms
-                    if let Some(t) = last_press_time {
-                        if pressed == false && t.elapsed().as_millis() < 500 {
-                            // Suppress: even if opaque says true, we say false
-                            pressed = false;
-                        }
-                    }
-                }
-            }
-        }
-
+        let pressed = buttons & bit != 0;
         let out = &mut *state_out;
         out.current_state = if pressed { xr::TRUE } else { xr::FALSE };
         out.is_active = xr::TRUE;

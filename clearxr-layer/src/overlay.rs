@@ -69,9 +69,7 @@ pub struct DashboardOverlay {
     pipe: Option<windows_sys::Win32::Foundation::HANDLE>,
     // State
     visible: bool,
-    menu_seen_press: bool,     // have we seen at least one true since last toggle?
-    menu_fired: bool,          // have we already fired the toggle for this press cycle?
-    last_menu_toggle: std::time::Instant,
+    menu_was_down: bool,
     pose: xr::Posef,
     size: xr::Extent2Df,
     // Grab/drag state
@@ -169,9 +167,7 @@ impl DashboardOverlay {
             #[cfg(target_os = "windows")]
             pipe,
             visible: true,
-            menu_seen_press: false,
-            menu_fired: false,
-            last_menu_toggle: std::time::Instant::now(),
+            menu_was_down: false,
             pose: xr::Posef {
                 orientation: xr::Quaternionf { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
                 position: xr::Vector3f { x: 0.0, y: 1.5, z: -2.5 },
@@ -255,46 +251,20 @@ impl DashboardOverlay {
     }
 
     pub fn update_menu_button(&mut self, menu_down: bool) -> bool {
-        // State machine for opaque channel menu button (delivers flickering pulses).
-        //
-        // States:
-        //   IDLE (menu_seen_press=false, menu_fired=false)
-        //     → On menu_down=true: transition to PRESSED
-        //   PRESSED (menu_seen_press=true, menu_fired=false)
-        //     → On first menu_down=false: FIRE toggle, transition to COOLDOWN
-        //     → On menu_down=true: stay (accumulate press)
-        //   COOLDOWN (menu_fired=true)
-        //     → Ignore all pulses until 10+ consecutive false frames → back to IDLE
-        //
-        // This fires exactly once per press-release cycle, even with flickering pulses.
-
-        // Fire on FIRST press, then 2-second cooldown.
-        // The opaque channel sends pulses every ~500-700ms while held — no shorter
-        // cooldown can distinguish held-button pulses from separate taps. So we fire
-        // instantly on the first true and suppress everything for 2 seconds.
-        let now = std::time::Instant::now();
-        if self.menu_fired {
-            // Cooldown: ignore all input for 2 seconds
-            if now.duration_since(self.last_menu_toggle).as_millis() >= 2000 {
-                log::info!("[ClearXR Layer] Menu: COOLDOWN → IDLE (2s elapsed)");
-                self.menu_fired = false;
-                self.menu_seen_press = false;
-            }
-        } else if menu_down && !self.menu_seen_press {
-            // Fire immediately on first true
-            self.menu_fired = true;
-            self.menu_seen_press = true;
-            self.last_menu_toggle = now;
+        // Simple falling-edge detection: toggle on button release.
+        // The visionOS client now uses capture() which delivers clean held-state.
+        if !menu_down && self.menu_was_down {
             self.visible = !self.visible;
-            log::info!("[ClearXR Layer] Menu: FIRE on press (visible={})", self.visible);
             if let Some(ref shmem) = self.shmem {
                 unsafe {
                     let header = &mut *(shmem.as_ptr() as *mut ShmHeader);
                     if self.visible { header.flags |= 1; } else { header.flags &= !1; }
                 }
             }
+            self.menu_was_down = false;
             return true;
         }
+        self.menu_was_down = menu_down;
         false
     }
 

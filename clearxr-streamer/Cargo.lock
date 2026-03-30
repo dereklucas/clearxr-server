@@ -524,6 +524,7 @@ dependencies = [
  "directories",
  "egui",
  "egui-ash-renderer",
+ "egui_keyboard",
  "enigo",
  "env_logger",
  "epaint",
@@ -958,18 +959,18 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ecolor"
-version = "0.31.1"
+version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc4feb366740ded31a004a0e4452fbf84e80ef432ecf8314c485210229672fd1"
+checksum = "94bdf37f8d5bd9aa7f753573fdda9cf7343afa73dd28d7bfe9593bd9798fc07e"
 dependencies = [
  "emath",
 ]
 
 [[package]]
 name = "egui"
-version = "0.31.1"
+version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25dd34cec49ab55d85ebf70139cb1ccd29c977ef6b6ba4fe85489d6877ee9ef3"
+checksum = "5d5d0306cd61ca75e29682926d71f2390160247f135965242e904a636f51c0dc"
 dependencies = [
  "ahash 0.8.12",
  "bitflags 2.11.0",
@@ -977,13 +978,15 @@ dependencies = [
  "epaint",
  "nohash-hasher",
  "profiling",
+ "smallvec",
+ "unicode-segmentation",
 ]
 
 [[package]]
 name = "egui-ash-renderer"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b98634d0948894c6108149c954624d61ea952070649550cbb23e19e1913a6515"
+checksum = "ba0cf74be66b26fe90c931d65fde1316f16c4d0fa211e7b580ab3db76a45cb5f"
 dependencies = [
  "ash",
  "egui",
@@ -992,10 +995,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "emath"
-version = "0.31.1"
+name = "egui_keyboard"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e4cadcff7a5353ba72b7fea76bf2122b5ebdbc68e8155aa56dfdea90083fe1b"
+checksum = "27f94641b81a7a5e5867e6f4e6bf84cbfbcd69adafdc5daa71065d4ac18fa5c2"
+dependencies = [
+ "egui",
+]
+
+[[package]]
+name = "emath"
+version = "0.32.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45fd7bc25f769a3c198fe1cf183124bf4de3bd62ef7b4f1eaf6b08711a3af8db"
 
 [[package]]
 name = "embed-resource"
@@ -1073,9 +1085,9 @@ dependencies = [
 
 [[package]]
 name = "epaint"
-version = "0.31.1"
+version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fcc0f5a7c613afd2dee5e4b30c3e6acafb8ad6f0edb06068811f708a67c562"
+checksum = "63adcea970b7a13094fe97a36ab9307c35a750f9e24bf00bb7ef3de573e0fddb"
 dependencies = [
  "ab_glyph",
  "ahash 0.8.12",
@@ -1089,9 +1101,9 @@ dependencies = [
 
 [[package]]
 name = "epaint_default_fonts"
-version = "0.31.1"
+version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc7e7a64c02cf7a5b51e745a9e45f60660a286f151c238b9d397b3e923f5082f"
+checksum = "1537accc50c9cab5a272c39300bdd0dd5dca210f6e5e8d70be048df9596e7ca2"
 
 [[package]]
 name = "equivalent"
