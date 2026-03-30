@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod dashboard;
+pub mod fallback_session;
 pub mod game_scanner;
 pub mod input_pipe;
 pub mod notifications;

@@ -29,6 +29,7 @@ struct SessionRuntimeState {
     previous_session_status: Option<String>,
     clearxr_process: Option<StdChild>,
     dashboard: Option<clearxr_dashboard::DashboardService>,
+    fallback_session: Option<clearxr_dashboard::fallback_session::FallbackSession>,
 }
 
 impl Default for SessionRuntimeState {
@@ -37,6 +38,7 @@ impl Default for SessionRuntimeState {
             previous_session_status: None,
             clearxr_process: None,
             dashboard: None,
+            fallback_session: None,
         }
     }
 }
@@ -595,6 +597,32 @@ fn spawn_default_app_launch_if_enabled(
             }
         }
 
+        // Start fallback OpenXR session (keeps dashboard visible when no game is running).
+        // The layer auto-loads as an implicit API layer and injects the dashboard quad.
+        if runtime_state.fallback_session.is_none() {
+            match clearxr_dashboard::fallback_session::FallbackSession::start() {
+                Ok(fb) => {
+                    runtime_state.fallback_session = Some(fb);
+                    // Give the fallback session a moment to create the XR session
+                    drop(runtime_state);
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    runtime_state = runtime_state_arc.lock().await;
+                }
+                Err(error) => {
+                    warn!("Failed to start fallback session: {error}");
+                }
+            }
+        }
+
+        // Yield the fallback session so Space can create its own
+        if let Some(ref fb) = runtime_state.fallback_session {
+            fb.yield_session();
+            // Give the runtime a moment to tear down
+            drop(runtime_state);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            runtime_state = runtime_state_arc.lock().await;
+        }
+
         match StdCommand::new(&clearxr_exe_path).spawn() {
             Ok(child) => {
                 info!("Started clear-xr.exe with pid {}", child.id());
@@ -602,6 +630,10 @@ fn spawn_default_app_launch_if_enabled(
             }
             Err(error) => {
                 warn!("Failed to start clear-xr.exe: {error}");
+                // Space failed to launch — reclaim the fallback session
+                if let Some(ref fb) = runtime_state.fallback_session {
+                    fb.reclaim_session();
+                }
             }
         }
 
@@ -627,12 +659,41 @@ fn spawn_default_app_launch_if_enabled(
                             let _ = process.wait();
                             rt.clearxr_process = None;
                         }
+                        // Reclaim fallback session (dashboard stays visible during transition)
+                        if let Some(ref fb) = rt.fallback_session {
+                            fb.reclaim_session();
+                        }
+                        drop(rt);
+                        // Give the fallback session time to create the XR session
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+                        // Yield fallback session for the game
+                        let rt = runtime_state_arc.lock().await;
+                        if let Some(ref fb) = rt.fallback_session {
+                            fb.yield_session();
+                        }
+                        drop(rt);
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
                         // Launch via Steam
                         let url = format!("steam://rungameid/{}", app_id);
                         info!("Launching: {}", url);
                         let _ = StdCommand::new("cmd")
                             .args(["/C", "start", "", &url])
                             .spawn();
+
+                        // If game doesn't connect within 30s, reclaim + re-launch Space
+                        let rt_clone = runtime_state_arc.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            let rt = rt_clone.lock().await;
+                            if rt.clearxr_process.is_none() {
+                                info!("Game didn't launch within 30s, reclaiming fallback session.");
+                                if let Some(ref fb) = rt.fallback_session {
+                                    fb.reclaim_session();
+                                }
+                            }
+                        });
                     }
                     clearxr_dashboard::dashboard::DashboardAction::SaveConfig => {
                         info!("Dashboard requested config save.");

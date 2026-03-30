@@ -20,6 +20,7 @@ eframe = { version = "0.32", optional = true }
 egui_keyboard = { version = "0.4", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 ash = "0.38"
+openxr = { version = "0.19", features = ["loaded"] }
 egui = "0.32"
 egui-ash-renderer = "0.9"
 epaint = "0.32"
