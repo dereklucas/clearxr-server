@@ -157,42 +157,84 @@ fn run_session(
     session_state: &AtomicU8,
 ) -> Result<(), String> {
     // Get Vulkan requirements
-    let reqs = instance.graphics_requirements::<xr::Vulkan>(system)
+    let _reqs = instance.graphics_requirements::<xr::Vulkan>(system)
         .map_err(|e| format!("graphics_requirements: {e}"))?;
-    log::info!("[ClearXR Fallback] Vulkan graphics requirements loaded.");
 
-    // Create minimal Vulkan device
+    // ── Vulkan setup (same pattern as Space's VkBackend::new) ──
+
+    // 1. Required instance extensions from the XR runtime
+    let req_inst_exts = instance.vulkan_legacy_instance_extensions(system)
+        .map_err(|e| format!("vulkan_legacy_instance_extensions: {e}"))?;
+    log::info!("[ClearXR Fallback] Required VkInstance extensions: {}", req_inst_exts);
+
+    let inst_ext_cstrings: Vec<std::ffi::CString> = req_inst_exts
+        .split_ascii_whitespace()
+        .map(|s| std::ffi::CString::new(s).unwrap())
+        .collect();
+    let inst_ext_ptrs: Vec<*const std::ffi::c_char> =
+        inst_ext_cstrings.iter().map(|s| s.as_ptr()).collect();
+
+    // 2. Create Vulkan instance
     let vk_entry = unsafe { ash::Entry::load() }
         .map_err(|e| format!("ash Entry: {e}"))?;
 
     let vk_app_info = vk::ApplicationInfo::default()
-        .api_version(vk::make_api_version(0, 1, 2, 0));
+        .api_version(vk::make_api_version(0, 1, 1, 0));
     let vk_instance = unsafe {
         vk_entry.create_instance(
-            &vk::InstanceCreateInfo::default().application_info(&vk_app_info),
+            &vk::InstanceCreateInfo::default()
+                .application_info(&vk_app_info)
+                .enabled_extension_names(&inst_ext_ptrs),
             None,
         )
     }.map_err(|e| format!("vkCreateInstance: {e}"))?;
 
-    let physical_devices = unsafe { vk_instance.enumerate_physical_devices() }
-        .map_err(|e| format!("enumerate physical devices: {e}"))?;
-    let physical_device = physical_devices.into_iter().next()
-        .ok_or("No Vulkan physical device found")?;
+    // 3. Physical device — mandated by XR runtime
+    let phys_dev_raw = unsafe {
+        instance.vulkan_graphics_device(
+            system,
+            std::mem::transmute(vk_instance.handle()),
+        )
+    }.map_err(|e| format!("vulkan_graphics_device: {e}"))?;
+    let physical_device: vk::PhysicalDevice = unsafe { std::mem::transmute(phys_dev_raw) };
 
-    let queue_family = 0u32; // Use first queue family
+    // 4. Graphics queue family
+    let queue_families = unsafe {
+        vk_instance.get_physical_device_queue_family_properties(physical_device)
+    };
+    let queue_family = queue_families.iter().enumerate()
+        .find(|(_, p)| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        .map(|(i, _)| i as u32)
+        .ok_or("No graphics queue family found")?;
+
+    // 5. Required device extensions from XR runtime
+    let req_dev_exts = instance.vulkan_legacy_device_extensions(system)
+        .map_err(|e| format!("vulkan_legacy_device_extensions: {e}"))?;
+    log::info!("[ClearXR Fallback] Required VkDevice extensions: {}", req_dev_exts);
+
+    let dev_ext_cstrings: Vec<std::ffi::CString> = req_dev_exts
+        .split_ascii_whitespace()
+        .map(|s| std::ffi::CString::new(s).unwrap())
+        .collect();
+    let dev_ext_ptrs: Vec<*const std::ffi::c_char> =
+        dev_ext_cstrings.iter().map(|s| s.as_ptr()).collect();
+
+    // 6. Create Vulkan device with runtime's required extensions
+    let queue_priority = 1.0f32;
     let queue_ci = vk::DeviceQueueCreateInfo::default()
         .queue_family_index(queue_family)
-        .queue_priorities(&[1.0]);
+        .queue_priorities(std::slice::from_ref(&queue_priority));
     let vk_device = unsafe {
         vk_instance.create_device(
             physical_device,
             &vk::DeviceCreateInfo::default()
-                .queue_create_infos(std::slice::from_ref(&queue_ci)),
+                .queue_create_infos(std::slice::from_ref(&queue_ci))
+                .enabled_extension_names(&dev_ext_ptrs),
             None,
         )
     }.map_err(|e| format!("vkCreateDevice: {e}"))?;
 
-    // Create OpenXR session
+    // 7. Create OpenXR session
     let (session, mut frame_waiter, mut frame_stream) = unsafe {
         instance.create_session::<xr::Vulkan>(
             system,
@@ -206,7 +248,7 @@ fn run_session(
         )
     }.map_err(|e| format!("xrCreateSession: {e}"))?;
 
-    log::info!("[ClearXR Fallback] Session created.");
+    log::info!("[ClearXR Fallback] Session created successfully.");
 
     // Create STAGE reference space
     let stage = session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY)
@@ -234,12 +276,14 @@ fn run_session(
                     log::info!("[ClearXR Fallback] Session state: {:?}", new_state);
                     match new_state {
                         xr::SessionState::READY => {
-                            session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)
-                                .or_else(|e| {
-                                    // Try quad varjo if stereo fails
-                                    log::warn!("[ClearXR Fallback] begin(STEREO) failed: {e}, trying PRIMARY_QUAD_VARJO");
-                                    Err(e)
-                                })
+                            // Use the runtime's preferred view configuration
+                            let view_configs = instance.enumerate_view_configurations(system)
+                                .map_err(|e| format!("enumerate view configs: {e}"))?;
+                            let view_config = view_configs.first()
+                                .copied()
+                                .unwrap_or(xr::ViewConfigurationType::PRIMARY_STEREO);
+                            log::info!("[ClearXR Fallback] Using view config: {:?}", view_config);
+                            session.begin(view_config)
                                 .map_err(|e| format!("session begin: {e}"))?;
                             xr_session_running = true;
                         }
