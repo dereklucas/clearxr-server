@@ -116,15 +116,18 @@ impl InputPipeServer {
         {
             let handle = self.pipe?;
 
-            // Only call ConnectNamedPipe when not yet connected (avoids kernel syscall per frame).
+            // Reconnect pipe when client disconnected. DisconnectNamedPipe is
+            // required before a new client can connect to a NOWAIT pipe.
             if !self.connected {
-                use windows::Win32::System::Pipes::ConnectNamedPipe;
+                use windows::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe};
+                // Disconnect the old client first (required for PIPE_NOWAIT)
+                unsafe { DisconnectNamedPipe(handle).ok() };
                 let result = unsafe { ConnectNamedPipe(handle, None) };
-                // ERROR_PIPE_CONNECTED (0x217) means client already connected — that's fine.
                 if result.is_ok() {
                     self.connected = true;
+                    log::info!("[ClearXR Dashboard] Pipe client connected.");
                 } else if let Err(ref e) = result {
-                    if e.code().0 as u32 == 0x80070217 {
+                    if e.code().0 as u32 == 0x80070217 { // ERROR_PIPE_CONNECTED
                         self.connected = true;
                     }
                 }

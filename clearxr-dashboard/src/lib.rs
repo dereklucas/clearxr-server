@@ -202,10 +202,10 @@ fn render_loop(
             secondary,
             scroll_delta,
             |ctx| {
-                // Request repaint when desktop tab is active to keep the mirror updating
-                if dashboard.is_desktop_active() && has_desktop_tex {
-                    ctx.request_repaint();
-                }
+                // Always request repaint so the overlay stays alive across
+                // session transitions (even without input, the FPS counter
+                // and frame_counter need to keep advancing).
+                ctx.request_repaint();
                 actions = dashboard.render(ctx);
             },
         );
