@@ -608,8 +608,9 @@ fn spawn_default_app_launch_if_enabled(
             return;
         }
 
+        // TEMPORARILY DISABLED: dashboard + fallback disabled to test game launch isolation
         // Start the dashboard rendering service (SHM + named pipe for layer overlay)
-        if runtime_state.dashboard.is_none() {
+        if false && runtime_state.dashboard.is_none() {
             match crate::dashboard_service::start() {
                 Ok(service) => {
                     runtime_state.dashboard = Some(service);
@@ -620,9 +621,8 @@ fn spawn_default_app_launch_if_enabled(
             }
         }
 
-        // Start fallback OpenXR session (keeps dashboard visible when no game is running).
-        // The layer auto-loads as an implicit API layer and injects the dashboard quad.
-        if runtime_state.fallback_session.is_none() {
+        // TEMPORARILY DISABLED
+        if false && runtime_state.fallback_session.is_none() {
             match clearxr_dashboard::fallback_session::FallbackSession::start() {
                 Ok(fb) => {
                     runtime_state.fallback_session = Some(fb);

@@ -35,7 +35,6 @@ const MAX_LAYER_NAME: usize = 256;
 const MAX_SETTINGS_PATH: usize = 512;
 
 const LAYER_NAME: &str = "XR_APILAYER_CLEARXR_controller_fix";
-const BUILD_MARKER: &str = "OVERLAY_TRACE_BUILD_2026-03-25_00-05_ET";
 
 #[cfg(windows)]
 unsafe fn output_debug_string(message: &str) {
@@ -63,11 +62,6 @@ fn layer_log_file() -> &'static Mutex<Option<File>> {
     FILE.get_or_init(|| Mutex::new(open_layer_log_file()))
 }
 
-fn trace_log_file() -> &'static Mutex<Option<File>> {
-    static FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
-    FILE.get_or_init(|| Mutex::new(open_trace_log_file()))
-}
-
 fn open_layer_log_file() -> Option<File> {
     let base_dir = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -79,25 +73,6 @@ fn open_layer_log_file() -> Option<File> {
         .append(true)
         .open(log_dir.join("clearxr-layer.log"))
         .ok()
-}
-
-fn open_trace_log_file() -> Option<File> {
-    let log_dir = PathBuf::from(r"C:\Apps\clearxr-server\clearxr-layer\target-local");
-    create_dir_all(&log_dir).ok()?;
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("clearxr-layer-trace.log"))
-        .ok()
-}
-
-fn direct_trace(message: &str) {
-    if let Ok(mut file_guard) = trace_log_file().lock() {
-        if let Some(file) = file_guard.as_mut() {
-            let _ = writeln!(file, "{}", message);
-            let _ = file.flush();
-        }
-    }
 }
 
 pub(crate) fn debug_log(level: log::Level, message: &str) {
@@ -186,7 +161,6 @@ struct NextDispatch {
     get_instance_proc_addr: xr::pfn::GetInstanceProcAddr,
     destroy_instance: xr::pfn::DestroyInstance,
     get_system: xr::pfn::GetSystem,
-    get_system_properties: xr::pfn::GetSystemProperties,
     create_session: xr::pfn::CreateSession,
     destroy_session: xr::pfn::DestroySession,
     end_frame: xr::pfn::EndFrame,
@@ -200,7 +174,6 @@ struct NextDispatch {
     wait_swapchain_image: xr::pfn::WaitSwapchainImage,
     release_swapchain_image: xr::pfn::ReleaseSwapchainImage,
     suggest_interaction_profile_bindings: xr::pfn::SuggestInteractionProfileBindings,
-    get_current_interaction_profile: xr::pfn::GetCurrentInteractionProfile,
     sync_actions: xr::pfn::SyncActions,
     get_action_state_boolean: xr::pfn::GetActionStateBoolean,
     apply_haptic_feedback: xr::pfn::ApplyHapticFeedback,
@@ -209,11 +182,6 @@ struct NextDispatch {
     string_to_path: xr::pfn::StringToPath,
     create_action_space: xr::pfn::CreateActionSpace,
     locate_space: xr::pfn::LocateSpace,
-    get_action_state_float: xr::pfn::GetActionStateFloat,
-    get_action_state_vector2f: xr::pfn::GetActionStateVector2f,
-    /// Optional: xrCreateVulkanDeviceKHR (from XR_KHR_vulkan_enable2).
-    /// Used to inject VK_KHR_external_memory_win32 into the host app's device.
-    create_vulkan_device_khr: Option<xr::pfn::CreateVulkanDeviceKHR>,
 }
 
 // ============================================================
@@ -294,6 +262,38 @@ struct LayerState {
     right_hand_path: xr::Path,
     /// Session handle (needed for active float queries)
     session: xr::Session,
+    /// Deferred Vulkan binding for lazy overlay creation in hook_end_frame.
+    pending_vulkan_binding: Option<PendingVulkanBinding>,
+}
+
+/// Stored Vulkan binding info for deferred overlay creation.
+/// Individual fields avoid storing the raw `*const c_void` next pointer.
+#[derive(Clone, Copy)]
+struct PendingVulkanBinding {
+    instance: xr::platform::VkInstance,
+    physical_device: xr::platform::VkPhysicalDevice,
+    device: xr::platform::VkDevice,
+    queue_family_index: u32,
+    queue_index: u32,
+}
+
+// Safety: the Vulkan handles (VkInstance, VkPhysicalDevice, VkDevice) are opaque
+// handles that are valid across threads.  They are only used to reconstruct a
+// GraphicsBindingVulkanKHR for overlay initialisation on the xrEndFrame thread.
+unsafe impl Send for PendingVulkanBinding {}
+
+impl PendingVulkanBinding {
+    fn to_graphics_binding(&self) -> xr::GraphicsBindingVulkanKHR {
+        xr::GraphicsBindingVulkanKHR {
+            ty: xr::GraphicsBindingVulkanKHR::TYPE,
+            next: std::ptr::null(),
+            instance: self.instance,
+            physical_device: self.physical_device,
+            device: self.device,
+            queue_family_index: self.queue_family_index,
+            queue_index: self.queue_index,
+        }
+    }
 }
 
 /// Captured controller state for one hand.
@@ -318,18 +318,7 @@ static NEXT_CREATE: Mutex<Option<CreateApiLayerInstanceFn>> = Mutex::new(None);
 // without locking LAYER. This is the key to avoiding mutex contention.
 static NEXT: OnceLock<NextDispatch> = OnceLock::new();
 
-/// Determine hand from a subaction path using the stored path values (no mutex needed).
-fn hand_from_subaction_path(subaction: xr::Path) -> Option<Hand> {
-    if subaction == xr::Path::NULL { return None; }
-    let raw = subaction.into_raw();
-    let left = LEFT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
-    let right = RIGHT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
-    if raw == left { Some(Hand::Left) }
-    else if raw == right { Some(Hand::Right) }
-    else { None }
-}
-
-// Hot-path state for xrLocateSpace / xrGetActionStateFloat hooks.
+// Hot-path state for xrLocateSpace hooks.
 // These are called dozens of times per frame — must be lock-free or near-lock-free.
 // Function pointers are write-once — use OnceLock (already imported above).
 // Maps and controller state use RwLock (readers don't block each other).
@@ -347,9 +336,6 @@ static THUMBSTICK_ACTIONS: OnceLock<RwLock<HashMap<u64, ()>>> = OnceLock::new();
 static NEXT_LOCATE_SPACE: OnceLock<xr::pfn::LocateSpace> = OnceLock::new();
 static NEXT_GET_FLOAT: OnceLock<xr::pfn::GetActionStateFloat> = OnceLock::new();
 static NEXT_GET_VEC2: OnceLock<xr::pfn::GetActionStateVector2f> = OnceLock::new();
-// Hand subaction paths — set during suggest_bindings, used by float hooks to determine hand
-static LEFT_HAND_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static RIGHT_HAND_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ============================================================
 // DLL export: xrNegotiateLoaderApiLayerInterface
@@ -368,17 +354,7 @@ pub unsafe extern "system" fn xrNegotiateLoaderApiLayerInterface(
     .format_timestamp_millis()
     .try_init();
 
-    // Also log to a file via OutputDebugString (visible in DebugView/VS Output)
     layer_log!(info, "[ClearXR Layer] xrNegotiateLoaderApiLayerInterface called.");
-    direct_trace(&format!(
-        "BUILD {} negotiate entered",
-        BUILD_MARKER
-    ));
-    layer_log!(
-        warn,
-        "[ClearXR Layer] BUILD MARKER {} loaded from DLL. If you see this, the installed DLL is definitely updated.",
-        BUILD_MARKER
-    );
 
     if loader_info.is_null() || request.is_null() {
         layer_log!(error, "[ClearXR Layer] Negotiation received null pointers.");
@@ -450,15 +426,6 @@ unsafe extern "system" fn layer_create_api_layer_instance(
     instance_out: *mut xr::Instance,
 ) -> xr::Result {
     layer_log!(info, "[ClearXR Layer] layer_create_api_layer_instance called.");
-    direct_trace(&format!(
-        "BUILD {} create_api_layer_instance entered",
-        BUILD_MARKER
-    ));
-    layer_log!(
-        warn,
-        "[ClearXR Layer] BUILD MARKER {} reached layer_create_api_layer_instance.",
-        BUILD_MARKER
-    );
 
     if ci.is_null() || layer_ci.is_null() || instance_out.is_null() {
         layer_log!(error, "[ClearXR Layer] Null pointer passed to create instance (ci={} layer_ci={} out={})",
@@ -582,20 +549,12 @@ unsafe extern "system" fn layer_create_api_layer_instance(
             )
             .unwrap_or(xr::Path::NULL);
 
-            // Resolve hand subaction paths for the float/vec2 hooks
-            if let Some(left_path) = string_to_path(&dispatch, instance, b"/user/hand/left\0") {
-                LEFT_HAND_PATH.store(left_path.into_raw(), std::sync::atomic::Ordering::Relaxed);
-            }
-            if let Some(right_path) = string_to_path(&dispatch, instance, b"/user/hand/right\0") {
-                RIGHT_HAND_PATH.store(right_path.into_raw(), std::sync::atomic::Ordering::Relaxed);
-            }
-
             // Store the dispatch table in a lock-free static for all hooks.
             // This MUST be done before dispatch is moved into LayerState.
             let _ = NEXT.set(dispatch);
             let _ = NEXT_LOCATE_SPACE.set(dispatch.locate_space);
-            let _ = NEXT_GET_FLOAT.set(dispatch.get_action_state_float);
-            let _ = NEXT_GET_VEC2.set(dispatch.get_action_state_vector2f);
+            let _ = NEXT_GET_FLOAT.set(load_fn(next_gpa, instance, b"xrGetActionStateFloat\0"));
+            let _ = NEXT_GET_VEC2.set(load_fn(next_gpa, instance, b"xrGetActionStateVector2f\0"));
             let _ = THUMBSTICK_ACTIONS.set(RwLock::new(HashMap::new()));
             let _ = AIM_SPACES.set(RwLock::new(HashMap::new()));
             let _ = TRIGGER_ACTIONS.set(RwLock::new(HashMap::new()));
@@ -621,6 +580,7 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                 left_hand_path: string_to_path(&dispatch, instance, b"/user/hand/left\0").unwrap_or(xr::Path::NULL),
                 right_hand_path: string_to_path(&dispatch, instance, b"/user/hand/right\0").unwrap_or(xr::Path::NULL),
                 session: xr::Session::NULL,
+                pending_vulkan_binding: None,
             });
 
             layer_log!(
@@ -706,23 +666,11 @@ unsafe fn load_fn<T>(
     )))
 }
 
-/// Try to load a function pointer (returns None if not available).
-unsafe fn try_load_fn<T: Copy>(
-    gpa: xr::pfn::GetInstanceProcAddr,
-    instance: xr::Instance,
-    name: &[u8],
-) -> Option<T> {
-    let mut fp: Option<xr::pfn::VoidFunction> = None;
-    (gpa)(instance, name.as_ptr() as *const c_char, &mut fp);
-    fp.map(|_| std::mem::transmute_copy(&fp))
-}
-
 unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instance) -> NextDispatch {
     NextDispatch {
         get_instance_proc_addr: gpa,
         destroy_instance: load_fn(gpa, instance, b"xrDestroyInstance\0"),
         get_system: load_fn(gpa, instance, b"xrGetSystem\0"),
-        get_system_properties: load_fn(gpa, instance, b"xrGetSystemProperties\0"),
         create_session: load_fn(gpa, instance, b"xrCreateSession\0"),
         destroy_session: load_fn(gpa, instance, b"xrDestroySession\0"),
         end_frame: load_fn(gpa, instance, b"xrEndFrame\0"),
@@ -736,7 +684,6 @@ unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instan
         wait_swapchain_image: load_fn(gpa, instance, b"xrWaitSwapchainImage\0"),
         release_swapchain_image: load_fn(gpa, instance, b"xrReleaseSwapchainImage\0"),
         suggest_interaction_profile_bindings: load_fn(gpa, instance, b"xrSuggestInteractionProfileBindings\0"),
-        get_current_interaction_profile: load_fn(gpa, instance, b"xrGetCurrentInteractionProfile\0"),
         sync_actions: load_fn(gpa, instance, b"xrSyncActions\0"),
         get_action_state_boolean: load_fn(gpa, instance, b"xrGetActionStateBoolean\0"),
         apply_haptic_feedback: load_fn(gpa, instance, b"xrApplyHapticFeedback\0"),
@@ -745,9 +692,6 @@ unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instan
         string_to_path: load_fn(gpa, instance, b"xrStringToPath\0"),
         create_action_space: load_fn(gpa, instance, b"xrCreateActionSpace\0"),
         locate_space: load_fn(gpa, instance, b"xrLocateSpace\0"),
-        get_action_state_float: load_fn(gpa, instance, b"xrGetActionStateFloat\0"),
-        get_action_state_vector2f: load_fn(gpa, instance, b"xrGetActionStateVector2f\0"),
-        create_vulkan_device_khr: try_load_fn(gpa, instance, b"xrCreateVulkanDeviceKHR\0"),
     }
 }
 
@@ -786,12 +730,6 @@ unsafe fn path_to_string(next: &NextDispatch, instance: xr::Instance, path: xr::
     std::str::from_utf8(&buf[..len as usize - 1]).ok().map(str::to_owned)
 }
 
-unsafe fn system_name_to_string(system_name: &[c_char]) -> String {
-    CStr::from_ptr(system_name.as_ptr())
-        .to_string_lossy()
-        .into_owned()
-}
-
 // ============================================================
 // xrGetInstanceProcAddr — dispatch to our hooks or pass through
 // ============================================================
@@ -806,71 +744,32 @@ unsafe extern "system" fn layer_get_instance_proc_addr(
     }
 
     let name_str = CStr::from_ptr(name);
-    let tracked_name = name_str.to_bytes();
-    if matches!(
-        tracked_name,
-        b"xrCreateSession"
-            | b"xrDestroySession"
-            | b"xrEndFrame"
-            | b"xrBeginFrame"
-            | b"xrWaitFrame"
-            | b"xrCreateReferenceSpace"
-            | b"xrCreateSwapchain"
-    ) {
-        direct_trace(&format!(
-            "BUILD {} gpa query {} instance={:?}",
-            BUILD_MARKER,
-            name_str.to_string_lossy(),
-            instance
-        ));
-        layer_log!(
-            info,
-            "[ClearXR Layer] BUILD MARKER {} GPA query for {} (instance={:?}).",
-            BUILD_MARKER,
-            name_str.to_string_lossy(),
-            instance
-        );
-    }
 
     // Return our intercepted functions
     macro_rules! intercept {
         ($fn_name:expr, $fn_ptr:expr) => {
             if name_str.to_bytes() == $fn_name {
-                direct_trace(&format!(
-                    "BUILD {} intercept {}",
-                    BUILD_MARKER,
-                    name_str.to_string_lossy()
-                ));
-                layer_log!(
-                    info,
-                    "[ClearXR Layer] BUILD MARKER {} intercepting {}.",
-                    BUILD_MARKER,
-                    name_str.to_string_lossy()
-                );
                 *function = Some(std::mem::transmute($fn_ptr as *const ()));
                 return xr::Result::SUCCESS;
             }
         };
     }
 
+    // Core hooks (from original layer):
     intercept!(b"xrGetInstanceProcAddr", layer_get_instance_proc_addr as xr::pfn::GetInstanceProcAddr);
     intercept!(b"xrDestroyInstance", hook_destroy_instance as xr::pfn::DestroyInstance);
     intercept!(b"xrGetSystem", hook_get_system as xr::pfn::GetSystem);
-    intercept!(b"xrGetSystemProperties", hook_get_system_properties as xr::pfn::GetSystemProperties);
     intercept!(b"xrCreateSession", hook_create_session as xr::pfn::CreateSession);
     intercept!(b"xrDestroySession", hook_destroy_session as xr::pfn::DestroySession);
-    intercept!(b"xrEndFrame", hook_end_frame as xr::pfn::EndFrame);
     intercept!(b"xrSuggestInteractionProfileBindings", hook_suggest_bindings as xr::pfn::SuggestInteractionProfileBindings);
-    intercept!(b"xrGetCurrentInteractionProfile", hook_get_current_interaction_profile as xr::pfn::GetCurrentInteractionProfile);
     intercept!(b"xrSyncActions", hook_sync_actions as xr::pfn::SyncActions);
     intercept!(b"xrGetActionStateBoolean", hook_get_action_state_boolean as xr::pfn::GetActionStateBoolean);
     intercept!(b"xrApplyHapticFeedback", hook_apply_haptic_feedback as xr::pfn::ApplyHapticFeedback);
     intercept!(b"xrStopHapticFeedback", hook_stop_haptic_feedback as xr::pfn::StopHapticFeedback);
+    // Dashboard overlay hooks:
+    intercept!(b"xrEndFrame", hook_end_frame as xr::pfn::EndFrame);
     intercept!(b"xrCreateActionSpace", hook_create_action_space as xr::pfn::CreateActionSpace);
     intercept!(b"xrLocateSpace", hook_locate_space as xr::pfn::LocateSpace);
-    intercept!(b"xrCreateVulkanDeviceKHR", hook_create_vulkan_device_khr as xr::pfn::CreateVulkanDeviceKHR);
-    // xrGetActionStateFloat and xrGetActionStateVector2f are NOT intercepted.
-    // We actively query these values in poll_opaque_and_update_overlay instead.
 
     // Pass through to next layer
     let guard = LAYER.lock().unwrap();
@@ -929,7 +828,8 @@ unsafe fn find_vulkan_binding<'a>(
 }
 
 /// Actively query a float action value for a specific hand.
-unsafe fn query_float(next: &NextDispatch, session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<f32> {
+unsafe fn query_float(session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<f32> {
+    let next_fn = NEXT_GET_FLOAT.get()?;
     let get_info = xr::ActionStateGetInfo {
         ty: xr::ActionStateGetInfo::TYPE,
         next: std::ptr::null(),
@@ -944,7 +844,7 @@ unsafe fn query_float(next: &NextDispatch, session: xr::Session, action_raw: u64
         last_change_time: xr::Time::from_nanos(0),
         is_active: xr::FALSE,
     };
-    let r = (next.get_action_state_float)(session, &get_info, &mut state_out);
+    let r = (*next_fn)(session, &get_info, &mut state_out);
     if r == xr::Result::SUCCESS && state_out.is_active.into() {
         Some(state_out.current_state)
     } else {
@@ -977,7 +877,8 @@ unsafe fn query_boolean(next: &NextDispatch, session: xr::Session, action_raw: u
 }
 
 /// Actively query a vector2f action (thumbstick) for a specific hand.
-unsafe fn query_vector2f(next: &NextDispatch, session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<(f32, f32)> {
+unsafe fn query_vector2f(session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<(f32, f32)> {
+    let next_fn = NEXT_GET_VEC2.get()?;
     let get_info = xr::ActionStateGetInfo {
         ty: xr::ActionStateGetInfo::TYPE,
         next: std::ptr::null(),
@@ -992,7 +893,7 @@ unsafe fn query_vector2f(next: &NextDispatch, session: xr::Session, action_raw: 
         last_change_time: xr::Time::from_nanos(0),
         is_active: xr::FALSE,
     };
-    let r = (next.get_action_state_vector2f)(session, &get_info, &mut state_out);
+    let r = (*next_fn)(session, &get_info, &mut state_out);
     if r == xr::Result::SUCCESS && state_out.is_active.into() {
         Some((state_out.current_state.x, state_out.current_state.y))
     } else {
@@ -1012,18 +913,13 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     // Read aim poses captured by hook_locate_space
     let cs = CONTROLLER_STATE.read().unwrap().clone();
 
-    // Actively query trigger/squeeze/thumbstick values (not intercepted — we call directly)
-    let next = match NEXT.get() {
-        Some(n) => *n,
-        None => return,
-    };
     let session = state.session;
     if session == xr::Session::NULL { return; }
 
     let mut left = cs[0];
     let mut right = cs[1];
 
-    // Query trigger + squeeze for each hand
+    // Actively query trigger/squeeze/thumbstick values (not intercepted — we call directly)
     for (hand_path, hand_state) in [
         (state.left_hand_path, &mut left),
         (state.right_hand_path, &mut right),
@@ -1032,17 +928,15 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
 
         // Find trigger action for this hand
         for &(action_raw, _hand) in state.trigger_actions.keys() {
-            let val = query_float(&next, session, action_raw, hand_path);
-            if val.is_some() {
-                hand_state.trigger = val.unwrap_or(0.0);
+            if let Some(val) = query_float(session, action_raw, hand_path) {
+                hand_state.trigger = val;
                 break;
             }
         }
         // Find squeeze action for this hand
         for &(action_raw, _hand) in state.squeeze_actions.keys() {
-            let val = query_float(&next, session, action_raw, hand_path);
-            if val.is_some() {
-                hand_state.squeeze = val.unwrap_or(0.0);
+            if let Some(val) = query_float(session, action_raw, hand_path) {
+                hand_state.squeeze = val;
                 break;
             }
         }
@@ -1050,7 +944,7 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         if let Some(lock) = THUMBSTICK_ACTIONS.get() {
             if let Ok(map) = lock.read() {
                 for &action_raw in map.keys() {
-                    if let Some((x, y)) = query_vector2f(&next, session, action_raw, hand_path) {
+                    if let Some((x, y)) = query_vector2f(session, action_raw, hand_path) {
                         hand_state.thumbstick_x = x;
                         hand_state.thumbstick_y = y;
                         break;
@@ -1182,100 +1076,6 @@ unsafe extern "system" fn hook_get_system(
     result
 }
 
-/// Extensions we inject into the host app's VkDevice for shared Vulkan image support.
-const REQUIRED_VK_DEVICE_EXTENSIONS: &[&[u8]] = &[
-    b"VK_KHR_external_memory\0",
-    b"VK_KHR_external_memory_win32\0",
-    b"VK_KHR_external_semaphore\0",
-    b"VK_KHR_external_semaphore_win32\0",
-    b"VK_KHR_timeline_semaphore\0",
-];
-
-/// Build an extended extension list by appending our required extensions,
-/// skipping any already present. Returns the new list of pointers.
-///
-/// Safety: `existing` must be valid C string pointers for the duration of the call.
-unsafe fn inject_extensions(existing: &[*const c_char]) -> Vec<*const c_char> {
-    let mut result = existing.to_vec();
-    for &required in REQUIRED_VK_DEVICE_EXTENSIONS {
-        let required_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(required);
-        let already_present = result.iter().any(|&name| {
-            std::ffi::CStr::from_ptr(name) == required_cstr
-        });
-        if !already_present {
-            result.push(required.as_ptr() as *const c_char);
-        }
-    }
-    result
-}
-
-/// Hook xrCreateVulkanDeviceKHR to inject external memory/semaphore extensions.
-/// This allows the layer to import shared Vulkan images from the dashboard process.
-unsafe extern "system" fn hook_create_vulkan_device_khr(
-    instance: xr::Instance,
-    create_info: *const xr::VulkanDeviceCreateInfoKHR,
-    vulkan_device: *mut xr::platform::VkDevice,
-    vulkan_result: *mut xr::platform::VkResult,
-) -> xr::Result {
-    let next = match NEXT.get() {
-        Some(n) => *n,
-        None => return xr::Result::ERROR_HANDLE_INVALID,
-    };
-    let real_fn = match next.create_vulkan_device_khr {
-        Some(f) => f,
-        None => return xr::Result::ERROR_FUNCTION_UNSUPPORTED,
-    };
-
-    let ci = &*create_info;
-    let vk_ci = ci.vulkan_create_info as *const ash::vk::DeviceCreateInfo;
-    if vk_ci.is_null() {
-        return real_fn(instance, create_info, vulkan_device, vulkan_result);
-    }
-
-    let orig_ci = &*vk_ci;
-
-    // Collect existing extension names and inject our required ones
-    let existing_count = orig_ci.enabled_extension_count as usize;
-    let existing: Vec<*const c_char> = if existing_count > 0 && !orig_ci.pp_enabled_extension_names.is_null() {
-        std::slice::from_raw_parts(orig_ci.pp_enabled_extension_names, existing_count).to_vec()
-    } else {
-        Vec::new()
-    };
-    let ext_names = inject_extensions(&existing);
-
-    layer_log!(info,
-        "[ClearXR Layer] Injecting {} Vulkan device extensions ({} total) for shared image support.",
-        ext_names.len() - existing_count, ext_names.len()
-    );
-
-    // Build modified VkDeviceCreateInfo
-    let mut modified_vk_ci = orig_ci.clone();
-    modified_vk_ci.enabled_extension_count = ext_names.len() as u32;
-    modified_vk_ci.pp_enabled_extension_names = ext_names.as_ptr();
-
-    // Build modified XrVulkanDeviceCreateInfoKHR
-    let modified_ci = xr::VulkanDeviceCreateInfoKHR {
-        ty: ci.ty,
-        next: ci.next,
-        system_id: ci.system_id,
-        create_flags: ci.create_flags,
-        pfn_get_instance_proc_addr: ci.pfn_get_instance_proc_addr,
-        vulkan_physical_device: ci.vulkan_physical_device,
-        vulkan_create_info: &modified_vk_ci as *const ash::vk::DeviceCreateInfo as *const std::ffi::c_void,
-        vulkan_allocator: ci.vulkan_allocator,
-    };
-
-    let result = real_fn(instance, &modified_ci, vulkan_device, vulkan_result);
-
-    if result == xr::Result::SUCCESS {
-        layer_log!(info, "[ClearXR Layer] VkDevice created with shared image extensions.");
-    } else {
-        layer_log!(warn, "[ClearXR Layer] xrCreateVulkanDeviceKHR failed: {:?}", result);
-    }
-
-    result
-}
-
 unsafe extern "system" fn hook_create_session(
     instance: xr::Instance,
     ci: *const xr::SessionCreateInfo,
@@ -1286,107 +1086,31 @@ unsafe extern "system" fn hook_create_session(
         Some(s) => s,
         None => return xr::Result::ERROR_HANDLE_INVALID,
     };
-    layer_log!(
-        info,
-        "[ClearXR Layer] hook_create_session entered (instance={:?}, ci_null={}, session_null={}).",
-        instance,
-        ci.is_null(),
-        session.is_null()
-    );
-    direct_trace(&format!(
-        "BUILD {} hook_create_session entered instance={:?} ci_null={} session_null={}",
-        BUILD_MARKER,
-        instance,
-        ci.is_null(),
-        session.is_null()
-    ));
+
     let result = (state.next.create_session)(instance, ci, session);
-    layer_log!(
-        info,
-        "[ClearXR Layer] hook_create_session next returned {:?} (session={:?}).",
-        result,
-        if session.is_null() { xr::Session::NULL } else { *session }
-    );
-    if result != xr::Result::SUCCESS {
-        return result;
-    }
-    if ci.is_null() || session.is_null() {
+    if result != xr::Result::SUCCESS || ci.is_null() || session.is_null() {
         return result;
     }
 
     state.session = *session;
 
+    // Store the Vulkan binding for lazy overlay creation in hook_end_frame.
     if let Some(binding) = find_vulkan_binding((*ci).next as *const xr::BaseInStructure) {
-        layer_log!(
-            info,
-            "[ClearXR Layer] hook_create_session found Vulkan binding: queue_family={} queue_index={}.",
-            binding.queue_family_index,
-            binding.queue_index
-        );
-        match DashboardOverlay::new(&state.next, *session, binding) {
-            Ok(overlay) => {
-                state.overlay = Some(overlay);
-                layer_log!(
-                    info,
-                    "[ClearXR Layer] Dashboard overlay attached to session {:?} using Vulkan binding; default visible.",
-                    *session
-                );
-            }
-            Err(err) => {
-                layer_log!(warn, "[ClearXR Layer] Dashboard overlay disabled: {}", err);
-                state.overlay = None;
-            }
-        }
+        state.pending_vulkan_binding = Some(PendingVulkanBinding {
+            instance: binding.instance,
+            physical_device: binding.physical_device,
+            device: binding.device,
+            queue_family_index: binding.queue_family_index,
+            queue_index: binding.queue_index,
+        });
     } else {
-        let mut chain = (*ci).next as *const xr::BaseInStructure;
-        while !chain.is_null() {
-            let candidate = &*chain;
-            layer_log!(
-                info,
-                "[ClearXR Layer] hook_create_session saw create-info chain struct {:?}.",
-                candidate.ty
-            );
-            chain = candidate.next;
-        }
         layer_log!(
             warn,
-            "[ClearXR Layer] Session created without XR_KHR_vulkan_enable binding; dashboard overlay spike is inactive."
+            "[ClearXR Layer] Session created without Vulkan binding; dashboard overlay inactive."
         );
-        state.overlay = None;
     }
 
-    let _ = instance;
-    result
-}
-
-unsafe extern "system" fn hook_get_system_properties(
-    instance: xr::Instance,
-    system_id: xr::SystemId,
-    properties: *mut xr::SystemProperties,
-) -> xr::Result {
-    let guard = LAYER.lock().unwrap();
-    let state = match guard.as_ref() {
-        Some(s) => s,
-        None => return xr::Result::ERROR_HANDLE_INVALID,
-    };
-
-    let result = (state.next.get_system_properties)(instance, system_id, properties);
-    if result != xr::Result::SUCCESS || properties.is_null() {
-        return result;
-    }
-
-    let props = &*properties;
-    let system_name = system_name_to_string(&props.system_name);
-    layer_log!(
-        info,
-        "[ClearXR Layer] xrGetSystemProperties system_id={} vendor_id={} system_name={:?} orientation_tracking={} position_tracking={}",
-        system_id.into_raw(),
-        props.vendor_id,
-        system_name,
-        props.tracking_properties.orientation_tracking,
-        props.tracking_properties.position_tracking
-    );
-
+    layer_log!(info, "[ClearXR Layer] Session {:?} created.", *session);
     result
 }
 
@@ -1427,6 +1151,7 @@ unsafe extern "system" fn hook_suggest_bindings(
     let sb = &*suggested_bindings;
     let bindings = std::slice::from_raw_parts(sb.suggested_bindings, sb.count_suggested_bindings as usize);
 
+    let mut recorded = 0u32;
     for binding in bindings {
         // Convert the XrPath to a string
         let mut buf = [0u8; 512];
@@ -1448,36 +1173,28 @@ unsafe extern "system" fn hook_suggest_bindings(
         if let Some((hand, component)) = parse_binding_path(path_str) {
             let action_raw = binding.action.into_raw();
             if let Some(bit) = component_to_bit(component) {
-                log::info!(
-                    "[ClearXR Layer] Recorded binding: action 0x{:x} {:?} {} → bit 0x{:x}",
-                    action_raw, hand, path_str, bit
-                );
                 state.overrides.insert((action_raw, hand), bit);
+                recorded += 1;
             }
 
             // Track aim pose actions for xrLocateSpace interception
             if component == "/input/aim/pose" {
                 state.aim_actions.insert(action_raw);
-                layer_log!(info, "[ClearXR Layer] Tracked aim action: 0x{:x} {:?}", action_raw, hand);
             }
             // Track trigger/squeeze float actions
             if component == "/input/trigger/value" {
                 state.trigger_actions.insert((action_raw, hand), ());
                 if let Some(lock) = TRIGGER_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert((action_raw, hand), ()); } }
-                layer_log!(info, "[ClearXR Layer] Tracked trigger action: 0x{:x} {:?}", action_raw, hand);
             }
             if component == "/input/squeeze/value" {
                 state.squeeze_actions.insert((action_raw, hand), ());
                 if let Some(lock) = SQUEEZE_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert((action_raw, hand), ()); } }
-                layer_log!(info, "[ClearXR Layer] Tracked squeeze action: 0x{:x} {:?}", action_raw, hand);
             }
             if component == "/input/menu/click" {
                 state.menu_actions.insert((action_raw, hand), ());
-                layer_log!(info, "[ClearXR Layer] Tracked menu action: 0x{:x} {:?}", action_raw, hand);
             }
             if component == "/input/thumbstick" {
                 if let Some(lock) = THUMBSTICK_ACTIONS.get() { if let Ok(mut m) = lock.write() { m.insert(action_raw, ()); } }
-                layer_log!(info, "[ClearXR Layer] Tracked thumbstick action: 0x{:x}", action_raw);
             }
 
             if is_haptic_output_path(component) {
@@ -1486,59 +1203,10 @@ unsafe extern "system" fn hook_suggest_bindings(
         }
     }
 
+    layer_log!(info, "[ClearXR Layer] Recorded {} override bindings from {} suggested.", recorded, bindings.len());
+
     // Pass through to next layer
     (state.next.suggest_interaction_profile_bindings)(instance, suggested_bindings)
-}
-
-unsafe extern "system" fn hook_get_current_interaction_profile(
-    session: xr::Session,
-    top_level_user_path: xr::Path,
-    interaction_profile: *mut xr::InteractionProfileState,
-) -> xr::Result {
-    let mut guard = LAYER.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
-        None => return xr::Result::ERROR_HANDLE_INVALID,
-    };
-
-    let result = (state.next.get_current_interaction_profile)(
-        session,
-        top_level_user_path,
-        interaction_profile,
-    );
-    if result != xr::Result::SUCCESS || interaction_profile.is_null() {
-        return result;
-    }
-
-    let current = &mut *interaction_profile;
-    let top_level_user_path_str = path_to_string(&state.next, state.instance, top_level_user_path)
-        .unwrap_or_else(|| format!("<unresolved {:?}>", top_level_user_path));
-    let current_profile_str = path_to_string(&state.next, state.instance, current.interaction_profile)
-        .unwrap_or_else(|| format!("<unresolved {:?}>", current.interaction_profile));
-    layer_log!(
-        info,
-        "[ClearXR Layer] xrGetCurrentInteractionProfile top_level_user_path={} returned_profile={}",
-        top_level_user_path_str,
-        current_profile_str
-    );
-
-    if current.interaction_profile == xr::Path::NULL && state.oculus_touch_profile != xr::Path::NULL {
-        current.interaction_profile = state.oculus_touch_profile;
-        let substituted_profile_str = path_to_string(
-            &state.next,
-            state.instance,
-            current.interaction_profile,
-        )
-        .unwrap_or_else(|| format!("<unresolved {:?}>", current.interaction_profile));
-        layer_log!(
-            info,
-            "[ClearXR Layer] Substituted Oculus Touch interaction profile for top-level path {} -> {}.",
-            top_level_user_path_str,
-            substituted_profile_str
-        );
-    }
-
-    result
 }
 
 unsafe extern "system" fn hook_sync_actions(
@@ -1576,6 +1244,22 @@ unsafe extern "system" fn hook_end_frame(
             Some(s) => s,
             None => return (next.end_frame)(session, frame_end_info),
         };
+
+        // Lazy overlay creation: deferred from hook_create_session to first frame.
+        if state.overlay.is_none() {
+            if let Some(pending) = state.pending_vulkan_binding.take() {
+                let binding = pending.to_graphics_binding();
+                match DashboardOverlay::new(&state.next, session, &binding) {
+                    Ok(overlay) => {
+                        state.overlay = Some(overlay);
+                        layer_log!(info, "[ClearXR Layer] Dashboard overlay created (lazy init on first frame).");
+                    }
+                    Err(err) => {
+                        layer_log!(warn, "[ClearXR Layer] Dashboard overlay disabled: {}", err);
+                    }
+                }
+            }
+        }
 
         poll_opaque_and_update_overlay(state);
 
@@ -1704,96 +1388,6 @@ unsafe extern "system" fn hook_locate_space(
     result
 }
 
-unsafe extern "system" fn hook_get_action_state_float(
-    session: xr::Session,
-    get_info: *const xr::ActionStateGetInfo,
-    state_out: *mut xr::ActionStateFloat,
-) -> xr::Result {
-    // Hot path — use OnceLock/RwLock, NOT the LAYER mutex.
-    let next_fn = match NEXT_GET_FLOAT.get() {
-        Some(&f) => f,
-        None => return xr::Result::ERROR_HANDLE_INVALID,
-    };
-
-    let result = (next_fn)(session, get_info, state_out);
-    if result != xr::Result::SUCCESS || get_info.is_null() || state_out.is_null() {
-        return result;
-    }
-
-    let info = &*get_info;
-    let action_raw = info.action.into_raw();
-    let out = &*state_out;
-
-    // Read locks — no contention with other readers
-    let trigger_guard = TRIGGER_ACTIONS.get().and_then(|l| l.read().ok());
-    let squeeze_guard = SQUEEZE_ACTIONS.get().and_then(|l| l.read().ok());
-
-    // Determine hand from subaction path (lock-free)
-    let hand = hand_from_subaction_path(info.subaction_path);
-
-    static FDIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let fd = FDIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if fd < 8 {
-        let sub_raw = info.subaction_path.into_raw();
-        let left_raw = LEFT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
-        let right_raw = RIGHT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
-        log::info!(
-            "[ClearXR Layer] Float: action=0x{:x} subaction=0x{:x} hand={:?} left_path=0x{:x} right_path=0x{:x} val={:.2}",
-            action_raw, sub_raw, hand, left_raw, right_raw, out.current_state
-        );
-    }
-
-    if let Some(hand) = hand {
-        let idx = match hand { Hand::Left => 0, Hand::Right => 1 };
-        let is_trigger = trigger_guard.as_ref().map_or(false, |m| m.contains_key(&(action_raw, hand)));
-        let is_squeeze = squeeze_guard.as_ref().map_or(false, |m| m.contains_key(&(action_raw, hand)));
-
-        if is_trigger || is_squeeze {
-            if let Ok(mut cs) = CONTROLLER_STATE.write() {
-                if is_trigger { cs[idx].trigger = out.current_state; }
-                if is_squeeze { cs[idx].squeeze = out.current_state; }
-            }
-        }
-    }
-
-    result
-}
-
-unsafe extern "system" fn hook_get_action_state_vector2f(
-    session: xr::Session,
-    get_info: *const xr::ActionStateGetInfo,
-    state_out: *mut xr::ActionStateVector2f,
-) -> xr::Result {
-    let next = match NEXT_GET_VEC2.get() {
-        Some(&f) => f,
-        None => return xr::Result::ERROR_HANDLE_INVALID,
-    };
-    let result = (next)(session, get_info, state_out);
-    if result != xr::Result::SUCCESS || get_info.is_null() || state_out.is_null() {
-        return result;
-    }
-
-    let info = &*get_info;
-    let action_raw = info.action.into_raw();
-    let out = &*state_out;
-
-    let is_thumbstick = THUMBSTICK_ACTIONS.get()
-        .and_then(|l| l.read().ok())
-        .map_or(false, |m| m.contains_key(&action_raw));
-
-    if is_thumbstick && out.is_active.into() {
-        if let Some(hand) = hand_from_subaction_path(info.subaction_path) {
-            let idx = match hand { Hand::Left => 0, Hand::Right => 1 };
-            if let Ok(mut cs) = CONTROLLER_STATE.write() {
-                cs[idx].thumbstick_x = out.current_state.x;
-                cs[idx].thumbstick_y = out.current_state.y;
-            }
-        }
-    }
-
-    result
-}
-
 unsafe extern "system" fn hook_apply_haptic_feedback(
     session: xr::Session,
     haptic_action_info: *const xr::HapticActionInfo,
@@ -1864,20 +1458,8 @@ unsafe extern "system" fn hook_apply_haptic_feedback(
                 Hand::Left => 0,
                 Hand::Right => 1,
             };
-            let sent = ch.send_haptic(hand_idx, duration_ns, vibration.frequency, vibration.amplitude);
-            layer_log!(
-                info,
-                "[ClearXR Layer] Apply haptic action=0x{:x} hand={:?} duration_ns={} frequency={} amplitude={} sent={}",
-                action_raw,
-                hand,
-                duration_ns,
-                vibration.frequency,
-                vibration.amplitude,
-                sent
-            );
+            ch.send_haptic(hand_idx, duration_ns, vibration.frequency, vibration.amplitude);
         }
-    } else {
-        layer_log!(warn, "[ClearXR Layer] Haptic request received before opaque channel was ready.");
     }
 
     result
@@ -1926,14 +1508,7 @@ unsafe extern "system" fn hook_stop_haptic_feedback(
                 Hand::Left => 0,
                 Hand::Right => 1,
             };
-            let sent = ch.send_haptic(hand_idx, 0, 0.0, 0.0);
-            layer_log!(
-                info,
-                "[ClearXR Layer] Stop haptic action=0x{:x} hand={:?} sent={}",
-                action_raw,
-                hand,
-                sent
-            );
+            ch.send_haptic(hand_idx, 0, 0.0, 0.0);
         }
     }
 
@@ -2022,70 +1597,4 @@ unsafe extern "system" fn hook_get_action_state_boolean(
     }
 
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extension_injection_from_empty() {
-        unsafe {
-            let existing: Vec<*const c_char> = vec![];
-            let result = inject_extensions(&existing);
-            assert_eq!(result.len(), REQUIRED_VK_DEVICE_EXTENSIONS.len());
-            for &required in REQUIRED_VK_DEVICE_EXTENSIONS {
-                let required_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(required);
-                let found = result.iter().any(|&name| {
-                    std::ffi::CStr::from_ptr(name) == required_cstr
-                });
-                assert!(found, "Missing extension: {:?}", required_cstr);
-            }
-        }
-    }
-
-    #[test]
-    fn test_extension_injection_dedup() {
-        unsafe {
-            let existing_ext = b"VK_KHR_timeline_semaphore\0";
-            let existing: Vec<*const c_char> = vec![existing_ext.as_ptr() as *const c_char];
-            let result = inject_extensions(&existing);
-            assert_eq!(result.len(), REQUIRED_VK_DEVICE_EXTENSIONS.len());
-            let timeline_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(b"VK_KHR_timeline_semaphore\0");
-            let count = result.iter().filter(|&&name| {
-                std::ffi::CStr::from_ptr(name) == timeline_cstr
-            }).count();
-            assert_eq!(count, 1, "VK_KHR_timeline_semaphore should appear exactly once");
-        }
-    }
-
-    #[test]
-    fn test_extension_injection_preserves_existing() {
-        unsafe {
-            let app_ext = b"VK_KHR_swapchain\0";
-            let existing: Vec<*const c_char> = vec![app_ext.as_ptr() as *const c_char];
-            let result = inject_extensions(&existing);
-            assert_eq!(result.len(), 1 + REQUIRED_VK_DEVICE_EXTENSIONS.len());
-            let app_cstr = std::ffi::CStr::from_bytes_with_nul_unchecked(app_ext);
-            assert!(result.iter().any(|&name| {
-                std::ffi::CStr::from_ptr(name) == app_cstr
-            }));
-        }
-    }
-
-    #[test]
-    fn test_wide_string_names_decode() {
-        use crate::overlay::IMAGE_HANDLE_NAME;
-        let image_name: String = IMAGE_HANDLE_NAME.iter()
-            .take_while(|&&c| c != 0)
-            .map(|&c| char::from_u32(c as u32).unwrap())
-            .collect();
-        assert_eq!(image_name, "ClearXR_DashboardImage");
-    }
-
-    #[test]
-    fn test_wide_string_null_terminated() {
-        use crate::overlay::IMAGE_HANDLE_NAME;
-        assert_eq!(*IMAGE_HANDLE_NAME.last().unwrap(), 0u16);
-    }
 }
