@@ -59,6 +59,7 @@ pub struct InputPipeServer {
     pipe: Option<windows::Win32::Foundation::HANDLE>,
     #[cfg(target_os = "windows")]
     connected: bool,
+    needs_disconnect: bool,
     buffer: [u8; PACKET_SIZE],
 }
 
@@ -91,6 +92,7 @@ impl InputPipeServer {
                     Ok(Self {
                         pipe: Some(h),
                         connected: false,
+                        needs_disconnect: false,
                         buffer: [0u8; PACKET_SIZE],
                     })
                 }
@@ -116,19 +118,25 @@ impl InputPipeServer {
         {
             let handle = self.pipe?;
 
-            // Reconnect pipe when client disconnected. DisconnectNamedPipe is
-            // required before a new client can connect to a NOWAIT pipe.
+            // Reconnect pipe when client disconnected.
             if !self.connected {
                 use windows::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe};
-                // Disconnect the old client first (required for PIPE_NOWAIT)
-                unsafe { DisconnectNamedPipe(handle).ok() };
+                // DisconnectNamedPipe once to reset the pipe for a new client.
+                // Track whether we've already disconnected to avoid killing
+                // a freshly connected client on the next poll.
+                if !self.needs_disconnect {
+                    self.needs_disconnect = true;
+                    unsafe { DisconnectNamedPipe(handle).ok() };
+                }
                 let result = unsafe { ConnectNamedPipe(handle, None) };
                 if result.is_ok() {
                     self.connected = true;
+                    self.needs_disconnect = false;
                     log::info!("[ClearXR Dashboard] Pipe client connected.");
                 } else if let Err(ref e) = result {
                     if e.code().0 as u32 == 0x80070217 { // ERROR_PIPE_CONNECTED
                         self.connected = true;
+                        self.needs_disconnect = false;
                     }
                 }
                 if !self.connected {

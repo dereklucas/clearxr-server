@@ -473,9 +473,10 @@ impl DashboardOverlay {
                     )
                 };
                 if ok == 0 {
-                    layer_log!(info, "[ClearXR Layer] Pipe write FAILED, reconnecting.");
                     unsafe { windows_sys::Win32::Foundation::CloseHandle(handle); }
                     self.pipe = None;
+                    // Don't log every frame — the reconnect in send_controller_input
+                    // will retry silently until it succeeds
                 }
             }
         }
