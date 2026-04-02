@@ -754,16 +754,52 @@ fn spawn_default_app_launch_if_enabled(
                             .args(["/C", "start", "", &url])
                             .spawn();
 
-                        // 6. Timeout: if game doesn't connect within 30s, reclaim + re-launch Space
+                        // 6. Timeout: if game doesn't connect within 30s, reclaim fallback + re-launch Space
                         let rt_clone = runtime_state_arc.clone();
+                        let app_state_clone = app_state.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                            let rt = rt_clone.lock().await;
-                            if rt.clearxr_process.is_none() {
-                                info!("Game didn't launch within 30s, reclaiming fallback + re-launching Space.");
+
+                            // Check if a game actually connected via CloudXR status
+                            let game_running = if let Some(cloudxr) = app_state_clone.cloudxr().await {
+                                cloudxr.query_status_once().await
+                                    .map(|s| s.game_is_connected)
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+
+                            if !game_running {
+                                info!("Game didn't connect within 30s. Reclaiming fallback + re-launching Space.");
+                                let mut rt = rt_clone.lock().await;
+                                // Reclaim fallback session (dashboard visible)
                                 if let Some(ref fb) = rt.fallback_session {
                                     fb.reclaim_session();
                                 }
+                                // Re-launch Space
+                                let (settings, _) = match crate::settings::load_settings() {
+                                    Ok(s) => s,
+                                    Err(e) => { warn!("Can't re-launch Space: settings load failed: {e}"); return; }
+                                };
+                                let exe = resolve_clearxr_exe_path(&settings.clearxr_exe_path);
+                                if exe.exists() {
+                                    // Yield fallback before Space launch
+                                    if let Some(ref fb) = rt.fallback_session {
+                                        fb.yield_session();
+                                    }
+                                    drop(rt);
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    let mut rt = rt_clone.lock().await;
+                                    match StdCommand::new(&exe).spawn() {
+                                        Ok(child) => {
+                                            info!("Re-launched Space (pid {})", child.id());
+                                            rt.clearxr_process = Some(child);
+                                        }
+                                        Err(e) => warn!("Failed to re-launch Space: {e}"),
+                                    }
+                                }
+                            } else {
+                                info!("Game is connected — not re-launching Space.");
                             }
                         });
                     }

@@ -152,6 +152,25 @@ fn session_loop(
     Ok(())
 }
 
+/// RAII guard for Vulkan objects — ensures cleanup on any exit path (including `?`).
+struct VulkanGuard {
+    device: Option<ash::Device>,
+    instance: Option<ash::Instance>,
+}
+impl Drop for VulkanGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(ref device) = self.device {
+                device.device_wait_idle().ok();
+                device.destroy_device(None);
+            }
+            if let Some(ref instance) = self.instance {
+                instance.destroy_instance(None);
+            }
+        }
+    }
+}
+
 /// Create a Vulkan-backed OpenXR session and run the frame loop.
 fn run_session(
     instance: &xr::Instance,
@@ -237,6 +256,12 @@ fn run_session(
         )
     }.map_err(|e| format!("vkCreateDevice: {e}"))?;
 
+    // RAII guard — ensures Vulkan cleanup on any exit path (including ? bail-out)
+    let mut vk_guard = VulkanGuard {
+        device: Some(vk_device.clone()),
+        instance: Some(vk_instance.clone()),
+    };
+
     // 7. Create OpenXR session
     let (session, mut frame_waiter, mut frame_stream) = unsafe {
         instance.create_session::<xr::Vulkan>(
@@ -260,9 +285,10 @@ fn run_session(
     // Session state tracking
     let mut xr_session_running = false;
     let mut exit_requested = false;
+    let mut session_exiting = false;
 
     // Frame loop
-    while keep_running.load(Ordering::Acquire) {
+    'frame_loop: while keep_running.load(Ordering::Acquire) && !session_exiting {
         // Check if we should yield — request graceful exit first
         if session_state.load(Ordering::Acquire) == STATE_YIELDING && !exit_requested {
             if xr_session_running {
@@ -272,7 +298,7 @@ fn run_session(
                 // Continue the event loop to process STOPPING → end → EXITING → break
             } else {
                 log::info!("[ClearXR Fallback] Yielding — session not running, breaking.");
-                break;
+                break 'frame_loop;
             }
         }
 
@@ -287,12 +313,15 @@ fn run_session(
                     log::info!("[ClearXR Fallback] Session state: {:?}", new_state);
                     match new_state {
                         xr::SessionState::READY => {
-                            // Use the runtime's preferred view configuration
+                            // Prefer PRIMARY_STEREO; fall back to whatever's available
                             let view_configs = instance.enumerate_view_configurations(system)
                                 .map_err(|e| format!("enumerate view configs: {e}"))?;
-                            let view_config = view_configs.first()
-                                .copied()
-                                .unwrap_or(xr::ViewConfigurationType::PRIMARY_STEREO);
+                            let view_config = if view_configs.contains(&xr::ViewConfigurationType::PRIMARY_STEREO) {
+                                xr::ViewConfigurationType::PRIMARY_STEREO
+                            } else {
+                                view_configs.first().copied()
+                                    .unwrap_or(xr::ViewConfigurationType::PRIMARY_STEREO)
+                            };
                             log::info!("[ClearXR Fallback] Using view config: {:?}", view_config);
                             session.begin(view_config)
                                 .map_err(|e| format!("session begin: {e}"))?;
@@ -303,13 +332,19 @@ fn run_session(
                             xr_session_running = false;
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
-                            break;
+                            log::info!("[ClearXR Fallback] Session exiting.");
+                            session_exiting = true;
+                            break; // break inner event loop; outer checks session_exiting
                         }
                         _ => {}
                     }
                 }
                 _ => {}
             }
+        }
+
+        if session_exiting {
+            break 'frame_loop;
         }
 
         if !xr_session_running {
@@ -325,25 +360,22 @@ fn run_session(
             .map_err(|e| format!("begin_frame: {e}"))?;
 
         // Submit empty frame — the layer adds the dashboard quad via hook_end_frame.
-        // We don't submit any layers ourselves. The layer's xrEndFrame hook will
-        // append the CompositionLayerQuad with the shared dashboard image.
         frame_stream.end(
             frame_state.predicted_display_time,
             xr::EnvironmentBlendMode::OPAQUE,
-            &[], // empty — the layer adds the dashboard overlay
+            &[],
         ).map_err(|e| format!("end_frame: {e}"))?;
     }
 
-    // Cleanup
+    // Cleanup — explicit drops ensure OpenXR is destroyed before Vulkan.
+    // The VulkanGuard handles vk_device + vk_instance cleanup automatically
+    // (including on ? bail-out earlier in the function).
+    log::info!("[ClearXR Fallback] Cleaning up session + Vulkan...");
     drop(stage);
-    drop(session);
     drop(frame_stream);
     drop(frame_waiter);
-
-    unsafe {
-        vk_device.destroy_device(None);
-        vk_instance.destroy_instance(None);
-    }
+    drop(session); // last Arc holder → calls xrDestroySession
+    drop(vk_guard); // destroys Vulkan device + instance
 
     log::info!("[ClearXR Fallback] Session destroyed, Vulkan cleaned up.");
     Ok(())
