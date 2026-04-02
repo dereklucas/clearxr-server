@@ -644,11 +644,11 @@ impl DashboardOverlay {
             return Ok(());
         }
 
-        // Import shared Vulkan resources on first connected frame
+        // Import shared Vulkan resources (retry each frame until dashboard is ready)
         if !self.shared_resources_imported {
-            if let Err(e) = self.import_shared_resources() {
-                log::error!("[ClearXR Layer] Failed to import shared resources: {e}");
-                return Ok(()); // Don't render until import succeeds
+            match self.import_shared_resources() {
+                Ok(()) => {}
+                Err(_) => return Ok(()), // Dashboard not ready yet — retry next frame
             }
         }
 
