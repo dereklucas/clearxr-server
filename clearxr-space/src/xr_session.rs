@@ -5,19 +5,18 @@
 ///   PRIMARY_STEREO      – 2 views (standard left/right) as fallback
 
 use anyhow::Result;
-use glam::{self, Vec3};
+use glam;
 use log::{debug, info, warn};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc};
 
 use openxr as xr;
 
-use crate::input::ControllerState;
 use crate::mirror_window::MirrorWindow;
 use crate::renderer::{HandData, Renderer};
 use crate::vk_backend::VkBackend;
 
-pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()> {
+pub fn run(keep_running: Arc<AtomicBool>) -> Result<()> {
     // --------------------------------------------------------
     // 1. OpenXR instance
     // --------------------------------------------------------
@@ -53,25 +52,16 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
         info!("XR_KHR_composition_layer_depth not available – depth disabled.");
     }
 
-    let xr_instance = xr_entry
-        .create_instance(
-            &xr::ApplicationInfo {
-                application_name: "Clear XR",
-                application_version: 1,
-                engine_name: "Clear XR Engine",
-                engine_version: 1,
-            },
-            &extensions,
-            &[],
-        )
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to create OpenXR instance: {}\n\
-                 No OpenXR runtime found. Please install SteamVR, Meta Quest Link, \
-                 or another OpenXR-compatible runtime.",
-                e
-            )
-        })?;
+    let xr_instance = xr_entry.create_instance(
+        &xr::ApplicationInfo {
+            application_name: "Clear XR",
+            application_version: 1,
+            engine_name: "Clear XR Engine",
+            engine_version: 1,
+        },
+        &extensions,
+        &[],
+    )?;
 
     let props = xr_instance.properties()?;
     info!(
@@ -82,16 +72,7 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
     // --------------------------------------------------------
     // 2. System
     // --------------------------------------------------------
-    let system = xr_instance
-        .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to get OpenXR system for HMD: {}\n\
-                 Is your VR headset connected and powered on? \
-                 The OpenXR runtime could not find a head-mounted display.",
-                e
-            )
-        })?;
+    let system = xr_instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
 
     let vk_reqs = xr_instance.graphics_requirements::<xr::Vulkan>(system)?;
     let min_ver = vk_reqs.min_api_version_supported;
@@ -244,11 +225,17 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
             xr::Binding::new(&y_click_action, xr_instance.string_to_path("/user/hand/left/input/y/click")?),
             // Menu
             xr::Binding::new(&menu_click_action, xr_instance.string_to_path("/user/hand/left/input/menu/click")?),
+            xr::Binding::new(&menu_click_action, xr_instance.string_to_path("/user/hand/right/input/menu/click")?),
+            
             // Haptic output
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
-            // Trigger/thumbstick touch (squeeze/touch does NOT exist in the Oculus Touch profile —
+            // Grip/Trigger/thumbstick touch (squeeze/touch does NOT exist in the Oculus Touch profile —
             // squeeze touch data comes from the opaque data channel instead)
+
+            xr::Binding::new(&squeeze_touch_action, xr_instance.string_to_path("/user/hand/left/input/squeeze/touch")?),
+            xr::Binding::new(&squeeze_touch_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/touch")?),
+            
             xr::Binding::new(&trigger_touch_action, xr_instance.string_to_path("/user/hand/left/input/trigger/touch")?),
             xr::Binding::new(&trigger_touch_action, xr_instance.string_to_path("/user/hand/right/input/trigger/touch")?),
             xr::Binding::new(&thumbstick_touch_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick/touch")?),
@@ -277,15 +264,7 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
                 queue_index: 0,
             },
         )
-    }
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to create XR session: {}\n\
-             Is another VR application already running? \
-             Close other VR apps and try again.",
-            e
-        )
-    })?;
+    }?;
 
     // --------------------------------------------------------
     // 6. Reference space
@@ -380,26 +359,6 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
     };
 
     // --------------------------------------------------------
-    // 7c. Shell (panels, launcher UI, screen capture, input)
-    // --------------------------------------------------------
-    let config = crate::config::Config::load();
-    let mut shell = crate::shell::Shell::new(config, use_screen_capture, &vk, renderer.render_pass)?;
-
-    // Read stage bounds from OpenXR and pass to boundary system
-    match session.reference_space_bounds_rect(xr::ReferenceSpaceType::STAGE) {
-        Ok(Some(bounds)) => {
-            info!("Stage bounds: {}m x {}m", bounds.width, bounds.height);
-            shell.dashboard.boundary.set_bounds(bounds.width, bounds.height);
-        }
-        Ok(None) => {
-            info!("Stage bounds not available (using defaults).");
-        }
-        Err(e) => {
-            log::warn!("Failed to read stage bounds: {:?}", e);
-        }
-    }
-
-    // --------------------------------------------------------
     // 8. Main loop
     // --------------------------------------------------------
     let mut session_running = false;
@@ -416,36 +375,6 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
             if !m.pump_events() {
                 info!("Mirror window closed, requesting exit.");
                 keep_running.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-
-        // Check for external shutdown signal (streamer sets this when launching a game)
-        #[cfg(target_os = "windows")]
-        {
-            #[link(name = "kernel32")]
-            extern "system" {
-                fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> isize;
-                fn CreateEventW(attrs: *const u8, manual: i32, initial: i32, name: *const u16) -> isize;
-                fn WaitForSingleObject(handle: isize, ms: u32) -> u32;
-                fn ResetEvent(handle: isize) -> i32;
-            }
-            static SHUTDOWN_EVENT: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
-            let event = *SHUTDOWN_EVENT.get_or_init(|| {
-                let name: Vec<u16> = "Global\\ClearXR_Shutdown\0".encode_utf16().collect();
-                let h = unsafe { OpenEventW(0x00100000, 0, name.as_ptr()) }; // SYNCHRONIZE
-                if h == 0 {
-                    unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) }
-                } else {
-                    h
-                }
-            });
-            if event != 0 {
-                let result = unsafe { WaitForSingleObject(event, 0) };
-                if result == 0 { // WAIT_OBJECT_0
-                    log::info!("Received ClearXR_Shutdown signal, requesting exit.");
-                    keep_running.store(false, std::sync::atomic::Ordering::SeqCst);
-                    unsafe { ResetEvent(event); }
-                }
             }
         }
 
@@ -765,103 +694,10 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
                 }
             }
         }
-        // ---- Shell tick: input, panel content, FPS ----
-        let controller = ControllerState {
-            left: crate::input::HandState {
-                active: hand_data.active[2] > 0.5,
-                aim_pos: Vec3::new(hand_data.ctrl_aim_pos[0][0], hand_data.ctrl_aim_pos[0][1], hand_data.ctrl_aim_pos[0][2]),
-                aim_dir: Vec3::new(hand_data.ctrl_aim_dir[0][0], hand_data.ctrl_aim_dir[0][1], hand_data.ctrl_aim_dir[0][2]),
-                trigger: hand_data.ctrl_inputs[0][0],
-                squeeze: hand_data.ctrl_inputs[0][1],
-                thumbstick: [hand_data.ctrl_inputs[0][2], hand_data.ctrl_inputs[0][3]],
-                grip_pos: Vec3::new(hand_data.ctrl_grip[0][0], hand_data.ctrl_grip[0][1], hand_data.ctrl_grip[0][2]),
-                grip_rot: glam::Quat::IDENTITY,
-                // Left hand: X/Y buttons (not A/B)
-                a_click: false,
-                b_click: false,
-                x_click: hand_data.ctrl_clicks[0][0] > 0.5,
-                y_click: hand_data.ctrl_clicks[0][1] > 0.5,
-                menu_click: hand_data.ctrl_buttons[0][3] > 0.5,
-                thumbstick_click: hand_data.ctrl_buttons[0][2] > 0.5,
-                a_touch: false,
-                b_touch: false,
-                x_touch: hand_data.ctrl_buttons[0][0] > 0.5,
-                y_touch: hand_data.ctrl_buttons[0][1] > 0.5,
-                trigger_touch: hand_data.ctrl_touches[0][0] > 0.5,
-                thumbstick_touch: hand_data.ctrl_touches[0][2] > 0.5,
-            },
-            right: crate::input::HandState {
-                active: hand_data.active[3] > 0.5,
-                aim_pos: Vec3::new(hand_data.ctrl_aim_pos[1][0], hand_data.ctrl_aim_pos[1][1], hand_data.ctrl_aim_pos[1][2]),
-                aim_dir: Vec3::new(hand_data.ctrl_aim_dir[1][0], hand_data.ctrl_aim_dir[1][1], hand_data.ctrl_aim_dir[1][2]),
-                trigger: hand_data.ctrl_inputs[1][0],
-                squeeze: hand_data.ctrl_inputs[1][1],
-                thumbstick: [hand_data.ctrl_inputs[1][2], hand_data.ctrl_inputs[1][3]],
-                grip_pos: Vec3::new(hand_data.ctrl_grip[1][0], hand_data.ctrl_grip[1][1], hand_data.ctrl_grip[1][2]),
-                grip_rot: glam::Quat::IDENTITY,
-                // Right hand: A/B buttons (not X/Y)
-                a_click: hand_data.ctrl_clicks[1][0] > 0.5,
-                b_click: hand_data.ctrl_clicks[1][1] > 0.5,
-                x_click: false,
-                y_click: false,
-                menu_click: hand_data.ctrl_buttons[1][3] > 0.5,
-                thumbstick_click: hand_data.ctrl_buttons[1][2] > 0.5,
-                a_touch: hand_data.ctrl_buttons[1][0] > 0.5,
-                b_touch: hand_data.ctrl_buttons[1][1] > 0.5,
-                x_touch: false,
-                y_touch: false,
-                trigger_touch: hand_data.ctrl_touches[1][0] > 0.5,
-                thumbstick_touch: hand_data.ctrl_touches[1][2] > 0.5,
-            },
-        };
-
-        let shell_frame = shell.tick(&vk, &controller);
-        // Clip both controllers' rays at panel surfaces
-        for (i, dist) in [shell_frame.left_ray_hit_dist, shell_frame.right_ray_hit_dist].iter().enumerate() {
-            hand_data.ctrl_aim_dir[i][3] = if *dist > 0.02 { dist - 0.02 } else { *dist };
-        }
         renderer.update_hand_data(&hand_data);
 
-        // Apply haptic feedback from Shell
-        if let Some(pulse) = shell_frame.haptic_left {
-            let vib = xr::HapticVibration::new()
-                .duration(xr::Duration::from_nanos(pulse.duration_ms as i64 * 1_000_000))
-                .frequency(pulse.frequency)
-                .amplitude(pulse.amplitude);
-            let _ = haptic_action.apply_feedback(&session, left_hand_path, &vib);
-        }
-        if let Some(pulse) = shell_frame.haptic_right {
-            let vib = xr::HapticVibration::new()
-                .duration(xr::Duration::from_nanos(pulse.duration_ms as i64 * 1_000_000))
-                .frequency(pulse.frequency)
-                .amplitude(pulse.amplitude);
-            let _ = haptic_action.apply_feedback(&session, right_hand_path, &vib);
-        }
-
-        // ---- Screenshot: set flag before render so capture happens during this frame ----
-        if shell.dashboard.screenshot_requested {
-            shell.dashboard.screenshot_requested = false;
-            renderer.screenshot_pending = true;
-        }
-
         // ---- Render all views (2 for stereo, 4 for quad) ----
-        let mut panels = shell.panels_mut();
-        renderer.render_frame(&vk, &views, elapsed, mirror.as_mut(), &mut panels)?;
-
-        // ---- Screenshot: retrieve captured pixels and save to PNG ----
-        if let Some((pixels, w, h)) = renderer.screenshot_result.take() {
-            match crate::capture::screenshot::save_screenshot(&pixels, w, h) {
-                Ok(info) => {
-                    use crate::shell::notifications::Notification;
-                    shell.dashboard.notifications.push(
-                        Notification::success("Screenshot", &format!("Saved to {}", info.path.display()))
-                    );
-                }
-                Err(e) => {
-                    log::error!("Screenshot failed: {}", e);
-                }
-            }
-        }
+        renderer.render_frame(&vk, &views, elapsed, mirror.as_mut())?;
 
         // ---- Build composition layer dynamically for N views ----
         // Build depth info structs (must live until xrEndFrame)
@@ -942,7 +778,6 @@ pub fn run(keep_running: Arc<AtomicBool>, use_screen_capture: bool) -> Result<()
     if let Some(ref mut m) = mirror {
         m.destroy(vk.device());
     }
-    shell.destroy(&vk);
     renderer.destroy(&vk);
 
     Ok(())

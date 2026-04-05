@@ -9,7 +9,6 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 
 /// Spawn a background thread that plays the given WAV file in a loop until
 /// `keep_running` is set to false.  Returns immediately.
-#[allow(dead_code)] // Public API; will be wired up when ambient audio is enabled
 pub fn start_looped(wav_path: &Path, keep_running: Arc<AtomicBool>) -> Result<()> {
     // Load the entire WAV into memory up front (on the calling thread).
     let reader = hound::WavReader::open(wav_path)?;

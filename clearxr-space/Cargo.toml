@@ -8,20 +8,12 @@ description = "Clear XR – OpenXR visual showcase placeholder for CloudXR/Apple
 name = "clear-xr"
 path = "src/main.rs"
 
-[features]
-default = ["xr"]
-xr = ["openxr"]
-
 [dependencies]
 # OpenXR bindings – "loaded" dynamically finds the runtime (CloudXR, SteamVR, etc.)
-openxr = { version = "0.17", features = ["loaded"], optional = true }
+openxr = { version = "0.17", features = ["loaded"] }
 
 # Low-level Vulkan – we drive the GPU directly so the runtime picks the right adapter
 ash = "0.38"
-ash-window = "0.13"
-
-# Sub-allocating GPU memory (replaces manual vkAllocateMemory calls)
-gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
 
 # Math (matrices, vectors, quaternions for view transforms)
 glam = "0.27"
@@ -39,41 +31,6 @@ hound = "3"
 # Logging
 log = "0.4"
 env_logger = "0.11"
-
-# Game library detection
-steamlocate = "2"
-
-# Serialization (for game manifests, config)
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-
-# Config file directory resolution
-directories = "5"
-
-# Cross-platform input simulation (mouse injection)
-enigo = "0.6"
-
-# Image encoding (PNG screenshots)
-image = "0.25"
-
-# egui immediate-mode UI (software-rasterized to RGBA, then uploaded to Vulkan texture)
-egui = "0.31"
-epaint = "0.31"
-
-# GPU-accelerated egui rendering into Vulkan images
-egui-ash-renderer = "0.8"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
-    "Win32_Graphics_Gdi",
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D11",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Threading",
-] }
 
 [build-dependencies]
 # No Rust deps needed for shader compilation – we shell out to glslc (Vulkan SDK)

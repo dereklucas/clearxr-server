@@ -1,44 +1,17 @@
-mod app;
 mod audio;
-mod capture;
-mod config;
-mod input;
-mod launcher_panel;
-mod panel;
-mod shell;
-mod ui;
-#[cfg(all(feature = "xr", target_os = "windows"))]
 mod mirror_window;
 mod vk_backend;
-#[cfg(all(feature = "xr", target_os = "windows"))]
 mod xr_session;
 mod renderer;
+
 use anyhow::Result;
 use log::info;
-
-/// Log system diagnostics before any XR/Vulkan initialization.
-fn log_system_info() {
-    info!("ClearXR Shell starting");
-    info!(
-        "Platform: {} {}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
-    if let Ok(exe) = std::env::current_exe() {
-        info!("Executable: {}", exe.display());
-    }
-    if let Ok(dir) = std::env::current_dir() {
-        info!("Working directory: {}", dir.display());
-    }
-}
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),
     )
     .init();
-
-    log_system_info();
 
     info!("==============================================");
     info!("  Clear XR  –  CloudXR visual splash / test space");
@@ -54,19 +27,19 @@ fn main() -> Result<()> {
         })
         .ok();
     }
+ 
+    // // Start background audio loop.
+    // let wav_path = Path::new("assets/clearxr.wav");
+    // if wav_path.exists() {
+    //     if let Err(e) = audio::start_looped(wav_path, running.clone()) {
+    //         warn!("Audio playback failed to start: {}", e);
+    //     }
+    // } else {
+    //     warn!("WAV file not found at {:?} – no audio.", wav_path);
+    // } 
 
-    let args: Vec<String> = std::env::args().collect();
-    let screen_capture = args.iter().any(|a| a == "--screen");
+    xr_session::run(running)?;
 
-    #[cfg(all(feature = "xr", target_os = "windows"))]
-    {
-        xr_session::run(running, screen_capture)?;
-        info!("Clear XR exited cleanly.");
-        return Ok(());
-    }
-
-    #[cfg(not(all(feature = "xr", target_os = "windows")))]
-    anyhow::bail!(
-        "No runtime mode available. Build with --features xr on Windows."
-    );
+    info!("Clear XR exited cleanly.");
+    Ok(())
 }

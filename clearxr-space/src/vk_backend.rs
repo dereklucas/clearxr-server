@@ -1,36 +1,25 @@
 /// Vulkan instance, physical device, logical device, and queue.
 ///
-/// Construction path:
-///   - `new()` (feature = "xr"): XR_KHR_vulkan_enable path where the runtime picks the GPU.
+/// We follow the XR_KHR_vulkan_enable path: the OpenXR runtime tells us which
+/// instance extensions, device extensions, and physical device to use.
 
 use anyhow::Result;
 use ash::{vk, vk::Handle, Device, Instance};
-use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use log::info;
-#[cfg(feature = "xr")]
 use openxr as xr;
 use std::ffi::{c_char, c_void, CString};
-use std::sync::Mutex;
 
 pub struct VkBackend {
-    entry: ash::Entry,
+    _entry: ash::Entry,
     instance: Instance,
     physical_device: vk::PhysicalDevice,
     device: Device,
     queue_family_index: u32,
     queue: vk::Queue,
     pub command_pool: vk::CommandPool,
-    /// GPU memory sub-allocator (replaces manual vkAllocateMemory calls).
-    /// Wrapped in Mutex because gpu-allocator requires &mut self for allocate/free.
-    /// Wrapped in Option so we can drop it before destroying the device.
-    pub allocator: Mutex<Option<Allocator>>,
 }
 
 impl VkBackend {
-    // ================================================================
-    // XR-driven construction (existing path)
-    // ================================================================
-    #[cfg(feature = "xr")]
     pub fn new(xr_instance: &xr::Instance, system: xr::SystemId) -> Result<Self> {
         // ---- 1. Required VkInstance extensions from XR runtime ----
         let req_inst_exts_str = xr_instance.vulkan_legacy_instance_extensions(system)?;
@@ -55,14 +44,7 @@ impl VkBackend {
             inst_ext_cstrings.iter().map(|s| s.as_ptr()).collect();
 
         // ---- 2. Vulkan entry ----
-        let entry = unsafe { ash::Entry::load() }.map_err(|e| {
-            anyhow::anyhow!(
-                "Vulkan is not available: {}\n\
-                 Please install GPU drivers that support Vulkan, or install the \
-                 Vulkan runtime from https://vulkan.lunarg.com/",
-                e
-            )
-        })?;
+        let entry = unsafe { ash::Entry::load()? };
 
         // ---- 3. VkInstance ----
         let app_info = vk::ApplicationInfo {
@@ -84,6 +66,7 @@ impl VkBackend {
         let vk_instance = unsafe { entry.create_instance(&inst_ci, None)? };
 
         // ---- 4. Physical device – mandated by XR runtime ----
+        // vulkan_graphics_device takes/returns *const c_void (opaque handles).
         let phys_dev_raw = unsafe {
             xr_instance.vulkan_graphics_device(
                 system,
@@ -106,10 +89,7 @@ impl VkBackend {
             .enumerate()
             .find(|(_, p)| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
             .map(|(i, _)| i as u32)
-            .ok_or_else(|| anyhow::anyhow!(
-                "No compatible GPU found for OpenXR rendering. \
-                 The selected physical device does not expose a graphics queue family."
-            ))?;
+            .ok_or_else(|| anyhow::anyhow!("No graphics queue family found"))?;
 
         // ---- 6. Required VkDevice extensions from XR runtime ----
         let req_dev_exts_str = xr_instance.vulkan_legacy_device_extensions(system)?;
@@ -157,25 +137,14 @@ impl VkBackend {
         };
         let command_pool = unsafe { device.create_command_pool(&cp_ci, None)? };
 
-        // ---- 9. GPU memory allocator ----
-        let allocator = Allocator::new(&AllocatorCreateDesc {
-            instance: vk_instance.clone(),
-            device: device.clone(),
-            physical_device: phys_dev,
-            debug_settings: Default::default(),
-            buffer_device_address: false,
-            allocation_sizes: Default::default(),
-        })?;
-
         Ok(Self {
-            entry,
+            _entry: entry,
             instance: vk_instance,
             physical_device: phys_dev,
             device,
             queue_family_index,
             queue,
             command_pool,
-            allocator: Mutex::new(Some(allocator)),
         })
     }
 
@@ -205,30 +174,9 @@ impl VkBackend {
         &self.instance
     }
     pub fn entry(&self) -> &ash::Entry {
-        &self.entry
+        &self._entry
     }
 
-    /// Allocate GPU memory via the sub-allocator.
-    /// Panics if the allocator has already been dropped (only during VkBackend::drop).
-    pub fn allocate(
-        &self,
-        desc: &gpu_allocator::vulkan::AllocationCreateDesc<'_>,
-    ) -> Result<gpu_allocator::vulkan::Allocation> {
-        let mut guard = self.allocator.lock().unwrap();
-        let allocator = guard.as_mut().expect("allocator already dropped");
-        Ok(allocator.allocate(desc)?)
-    }
-
-    /// Free a GPU memory allocation.
-    pub fn free(&self, allocation: gpu_allocator::vulkan::Allocation) -> Result<()> {
-        let mut guard = self.allocator.lock().unwrap();
-        let allocator = guard.as_mut().expect("allocator already dropped");
-        Ok(allocator.free(allocation)?)
-    }
-
-    /// Manual memory type selection — no longer needed for normal allocations
-    /// (use `allocate()` instead), but kept for edge cases.
-    #[allow(dead_code)]
     pub fn find_memory_type(
         &self,
         type_filter: u32,
@@ -247,11 +195,6 @@ impl VkBackend {
 
 impl Drop for VkBackend {
     fn drop(&mut self) {
-        // Drop the allocator before destroying the device — it may call
-        // vkFreeMemory during cleanup.
-        if let Ok(slot) = self.allocator.get_mut() {
-            drop(slot.take());
-        }
         unsafe {
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
