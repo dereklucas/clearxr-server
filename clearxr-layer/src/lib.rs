@@ -380,7 +380,7 @@ impl OverlayVariant {
         }
     }
 
-    unsafe fn render_frame(&mut self, next: &NextDispatch) -> Result<(), String> {
+    unsafe fn render_frame(&mut self, next: &NextDispatch) -> Result<bool, String> {
         match self {
             OverlayVariant::Vulkan(o) => o.render_frame(next),
             OverlayVariant::D3D11(o) => o.render_frame(next),
@@ -1472,10 +1472,14 @@ unsafe extern "system" fn hook_end_frame(
 
         match state.overlay.as_mut() {
             Some(overlay) if overlay.is_for_session(session) && overlay.visible() => {
-                if let Err(err) = overlay.render_frame(&next) {
-                    layer_log!(warn, "[ClearXR Layer] Dashboard overlay render failed: {}", err);
+                match overlay.render_frame(&next) {
+                    Ok(true) => Some((overlay.quad_layer(), overlay.backface_quad_layer())),
+                    Ok(false) => None, // swapchain has no content yet — don't submit quad layers
+                    Err(err) => {
+                        layer_log!(warn, "[ClearXR Layer] Dashboard overlay render failed: {}", err);
+                        None
+                    }
                 }
-                Some((overlay.quad_layer(), overlay.backface_quad_layer()))
             }
             _ => None,
         }

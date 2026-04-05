@@ -50,6 +50,7 @@ pub struct DashboardOverlayD3D11 {
     // Shared texture (imported from dashboard process)
     shared_texture: Option<SharedTexture>,
     last_frame_counter: u32,
+    has_rendered: bool,
     // SHM reader
     shmem: Option<Shmem>,
     // Pipe client for controller input
@@ -129,6 +130,7 @@ impl DashboardOverlayD3D11 {
             d3d11,
             shared_texture: None,
             last_frame_counter: 0,
+            has_rendered: false,
             shmem,
             #[cfg(target_os = "windows")]
             pipe,
@@ -442,11 +444,12 @@ impl DashboardOverlayD3D11 {
 
     /// Back face — grey card rotated 180deg around Y.
     pub fn backface_quad_layer(&self) -> xr::CompositionLayerQuad {
+        // Rotate 180° around Y: q * (0,1,0,0) = (-q.z, q.w, q.x, -q.y)
         let q = self.pose.orientation;
         let back_orient = xr::Quaternionf {
-            x: q.z,
+            x: -q.z,
             y: q.w,
-            z: -q.x,
+            z: q.x,
             w: -q.y,
         };
 
@@ -472,14 +475,16 @@ impl DashboardOverlayD3D11 {
         }
     }
 
-    pub unsafe fn render_frame(&mut self, next: &NextDispatch) -> Result<(), String> {
+    /// Returns Ok(true) if the swapchain has valid content (safe to submit as a quad layer),
+    /// Ok(false) if no content yet (do NOT submit quad layers), or Err on failure.
+    pub unsafe fn render_frame(&mut self, next: &NextDispatch) -> Result<bool, String> {
         // Try to open SHM if not connected yet
         if self.shmem.is_none() {
             if let Ok(s) = ShmemConf::new().os_id(SHM_NAME).open() {
                 log::info!("[ClearXR Layer D3D11] SHM connected.");
                 self.shmem = Some(s);
             } else {
-                return Ok(());
+                return Ok(self.has_rendered);
             }
         }
 
@@ -498,14 +503,14 @@ impl DashboardOverlayD3D11 {
         self.size.height = header.panel_size[1];
 
         if !self.visible {
-            return Ok(());
+            return Ok(self.has_rendered);
         }
 
         // Import shared texture (retry each frame until dashboard is ready)
         if self.shared_texture.is_none() {
             match self.import_shared_texture() {
                 Ok(()) => {}
-                Err(_) => return Ok(()),
+                Err(_) => return Ok(false),
             }
         }
 
@@ -519,7 +524,7 @@ impl DashboardOverlayD3D11 {
         // Check frame counter for new frames
         let frame_counter = header.frame_counter.load(Ordering::Acquire);
         if frame_counter == self.last_frame_counter {
-            return Ok(());
+            return Ok(self.has_rendered);
         }
 
         // Acquire swapchain image
@@ -557,7 +562,8 @@ impl DashboardOverlayD3D11 {
             return Err(format!("ReleaseSwapchainImage: {:?}", r));
         }
 
-        Ok(())
+        self.has_rendered = true;
+        Ok(true)
     }
 }
 

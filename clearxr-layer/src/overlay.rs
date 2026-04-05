@@ -61,6 +61,7 @@ pub struct DashboardOverlay {
     shared_image: vk::Image,
     shared_image_memory: vk::DeviceMemory,
     last_frame_counter: u32,
+    has_rendered: bool,
     shared_resources_imported: bool,
     // SHM reader
     shmem: Option<Shmem>,
@@ -162,6 +163,7 @@ impl DashboardOverlay {
             shared_image: vk::Image::null(),
             shared_image_memory: vk::DeviceMemory::null(),
             last_frame_counter: 0,
+            has_rendered: false,
             shared_resources_imported: false,
             shmem,
             #[cfg(target_os = "windows")]
@@ -580,13 +582,12 @@ impl DashboardOverlay {
     /// Back face — grey card rotated 180° around Y, visible from behind.
     /// Uses the 1x1 grey swapchain so you can always find the panel.
     pub fn backface_quad_layer(&self) -> xr::CompositionLayerQuad {
-        // Rotate 180° around Y: for quaternion q = (x,y,z,w), multiply by (0,1,0,0).
-        // q * (0,1,0,0): w'=-y, x'=z, y'=w, z'=-x (Hamilton product with OpenXR convention)
+        // Rotate 180° around Y: q * (0,1,0,0) = (-q.z, q.w, q.x, -q.y)
         let q = self.pose.orientation;
         let back_orient = xr::Quaternionf {
-            x: q.z,
+            x: -q.z,
             y: q.w,
-            z: -q.x,
+            z: q.x,
             w: -q.y,
         };
 
@@ -612,14 +613,16 @@ impl DashboardOverlay {
         }
     }
 
-    pub unsafe fn render_frame(&mut self, next: &NextDispatch) -> Result<(), String> {
+    /// Returns Ok(true) if the swapchain has valid content (safe to submit as a quad layer),
+    /// Ok(false) if no content yet (do NOT submit quad layers), or Err on failure.
+    pub unsafe fn render_frame(&mut self, next: &NextDispatch) -> Result<bool, String> {
         // Try to open SHM if not connected yet
         if self.shmem.is_none() {
             if let Ok(s) = ShmemConf::new().os_id(SHM_NAME).open() {
                 log::info!("[ClearXR Layer] SHM connected.");
                 self.shmem = Some(s);
             } else {
-                return Ok(()); // Dashboard not running yet
+                return Ok(self.has_rendered); // Dashboard not running yet
             }
         }
 
@@ -641,14 +644,14 @@ impl DashboardOverlay {
         self.size.height = header.panel_size[1];
 
         if !self.visible {
-            return Ok(());
+            return Ok(self.has_rendered);
         }
 
         // Import shared Vulkan resources (retry each frame until dashboard is ready)
         if !self.shared_resources_imported {
             match self.import_shared_resources() {
                 Ok(()) => {}
-                Err(_) => return Ok(()), // Dashboard not ready yet — retry next frame
+                Err(_) => return Ok(false), // Dashboard not ready yet — retry next frame
             }
         }
 
@@ -663,7 +666,7 @@ impl DashboardOverlay {
         // fence signals, so a new value means the shared image is stable).
         let frame_counter = header.frame_counter.load(Ordering::Acquire);
         if frame_counter == self.last_frame_counter {
-            return Ok(()); // No new frame from dashboard
+            return Ok(self.has_rendered); // No new frame from dashboard
         }
 
         // Acquire swapchain image
@@ -780,7 +783,8 @@ impl DashboardOverlay {
             return Err(format!("ReleaseSwapchainImage: {:?}", r));
         }
 
-        Ok(())
+        self.has_rendered = true;
+        Ok(true)
     }
 
 }
