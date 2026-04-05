@@ -68,11 +68,85 @@ fn open_layer_log_file() -> Option<File> {
         .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))?;
     let log_dir = base_dir.join("ClearXR").join("logs");
     create_dir_all(&log_dir).ok()?;
+
+    let current = log_dir.join("clearxr-layer.log");
+
+    // Rotate: archive previous session's log before starting a new one.
+    // Best-effort — if the rename fails (file missing, locked by another
+    // process), we fall back to truncating whatever is there.
+    if current.exists() {
+        let ts = {
+            // Use file modification time for the archive name so it reflects
+            // when the *previous* session actually ran, not "now".
+            let meta_time = std::fs::metadata(&current)
+                .and_then(|m| m.modified())
+                .unwrap_or_else(|_| std::time::SystemTime::now());
+            let dur = meta_time
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            // Format as compact timestamp: YYYYMMDD-HHMMSS
+            let secs = dur.as_secs();
+            // Simple UTC breakdown (no chrono dependency needed)
+            let days = secs / 86400;
+            let time_of_day = secs % 86400;
+            let h = time_of_day / 3600;
+            let m = (time_of_day % 3600) / 60;
+            let s = time_of_day % 60;
+            // Days since epoch -> y/m/d (simplified Gregorian)
+            let (y, mo, d) = days_to_ymd(days);
+            format!("{y:04}{mo:02}{d:02}-{h:02}{m:02}{s:02}")
+        };
+        let archive = log_dir.join(format!("clearxr-layer-{ts}.log"));
+        let _ = std::fs::rename(&current, &archive);
+    }
+
+    // Prune old archives: keep only the 10 most recent.
+    prune_old_layer_logs(&log_dir, 10);
+
+    // Create a fresh log file (truncate, not append).
     OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(log_dir.join("clearxr-layer.log"))
+        .write(true)
+        .truncate(true)
+        .open(&current)
         .ok()
+}
+
+/// Convert days since Unix epoch to (year, month, day) in UTC.
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Shift epoch from 1970-01-01 to 0000-03-01 for easier leap-year math.
+    let era_days = days + 719468;
+    let era = era_days / 146097;
+    let doe = era_days - era * 146097; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Remove old `clearxr-layer-*.log` files, keeping the `keep` most recent.
+fn prune_old_layer_logs(log_dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else { return };
+    let mut archives: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| {
+                    n.starts_with("clearxr-layer-") && n.ends_with(".log")
+                })
+        })
+        .collect();
+    // Sort descending by name (timestamp in name makes this chronological).
+    archives.sort_unstable_by(|a, b| b.cmp(a));
+    for old in archives.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 pub(crate) fn debug_log(level: log::Level, message: &str) {
@@ -354,7 +428,7 @@ pub unsafe extern "system" fn xrNegotiateLoaderApiLayerInterface(
     .format_timestamp_millis()
     .try_init();
 
-    layer_log!(info, "[ClearXR Layer] xrNegotiateLoaderApiLayerInterface called.");
+    layer_log!(info, "[ClearXR Layer] xrNegotiateLoaderApiLayerInterface called. Build: {}", env!("CLEARXR_BUILD_TIME"));
 
     if loader_info.is_null() || request.is_null() {
         layer_log!(error, "[ClearXR Layer] Negotiation received null pointers.");
@@ -541,7 +615,10 @@ unsafe extern "system" fn layer_create_api_layer_instance(
             let instance = *instance_out;
 
             // Build dispatch table
-            let dispatch = build_dispatch(next_gpa, instance);
+            let dispatch = match build_dispatch(next_gpa, instance) {
+                Ok(d) => d,
+                Err(e) => return e,
+            };
             let oculus_touch_profile = string_to_path(
                 &dispatch,
                 instance,
@@ -653,6 +730,7 @@ unsafe fn check_extension_available(
 }
 
 /// Load a function pointer from the next layer's dispatch.
+/// Panics if the runtime returns a null function pointer.
 unsafe fn load_fn<T>(
     gpa: xr::pfn::GetInstanceProcAddr,
     instance: xr::Instance,
@@ -666,33 +744,58 @@ unsafe fn load_fn<T>(
     )))
 }
 
-unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instance) -> NextDispatch {
-    NextDispatch {
+/// Try to load a function pointer from the next layer's dispatch.
+/// Returns `None` if the runtime returns a null function pointer.
+unsafe fn try_load_fn<T>(
+    gpa: xr::pfn::GetInstanceProcAddr,
+    instance: xr::Instance,
+    name: &[u8], // null-terminated
+) -> Option<T> {
+    let mut fp: Option<xr::pfn::VoidFunction> = None;
+    (gpa)(instance, name.as_ptr() as *const c_char, &mut fp);
+    fp.map(|_| std::mem::transmute_copy(&fp))
+}
+
+/// Helper: load a required function pointer, logging and returning an error if null.
+macro_rules! require_fn {
+    ($gpa:expr, $instance:expr, $name:literal) => {
+        match try_load_fn($gpa, $instance, concat!($name, "\0").as_bytes()) {
+            Some(f) => f,
+            None => {
+                layer_log!(error, "[ClearXR Layer] Failed to load required function: {}", $name);
+                return Err(xr::Result::ERROR_INITIALIZATION_FAILED);
+            }
+        }
+    };
+}
+
+unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instance) -> Result<NextDispatch, xr::Result> {
+    Ok(NextDispatch {
         get_instance_proc_addr: gpa,
-        destroy_instance: load_fn(gpa, instance, b"xrDestroyInstance\0"),
-        get_system: load_fn(gpa, instance, b"xrGetSystem\0"),
-        create_session: load_fn(gpa, instance, b"xrCreateSession\0"),
-        destroy_session: load_fn(gpa, instance, b"xrDestroySession\0"),
-        end_frame: load_fn(gpa, instance, b"xrEndFrame\0"),
-        create_reference_space: load_fn(gpa, instance, b"xrCreateReferenceSpace\0"),
-        destroy_space: load_fn(gpa, instance, b"xrDestroySpace\0"),
-        enumerate_swapchain_formats: load_fn(gpa, instance, b"xrEnumerateSwapchainFormats\0"),
-        create_swapchain: load_fn(gpa, instance, b"xrCreateSwapchain\0"),
-        destroy_swapchain: load_fn(gpa, instance, b"xrDestroySwapchain\0"),
-        enumerate_swapchain_images: load_fn(gpa, instance, b"xrEnumerateSwapchainImages\0"),
-        acquire_swapchain_image: load_fn(gpa, instance, b"xrAcquireSwapchainImage\0"),
-        wait_swapchain_image: load_fn(gpa, instance, b"xrWaitSwapchainImage\0"),
-        release_swapchain_image: load_fn(gpa, instance, b"xrReleaseSwapchainImage\0"),
-        suggest_interaction_profile_bindings: load_fn(gpa, instance, b"xrSuggestInteractionProfileBindings\0"),
-        sync_actions: load_fn(gpa, instance, b"xrSyncActions\0"),
-        get_action_state_boolean: load_fn(gpa, instance, b"xrGetActionStateBoolean\0"),
-        apply_haptic_feedback: load_fn(gpa, instance, b"xrApplyHapticFeedback\0"),
-        stop_haptic_feedback: load_fn(gpa, instance, b"xrStopHapticFeedback\0"),
-        path_to_string: load_fn(gpa, instance, b"xrPathToString\0"),
-        string_to_path: load_fn(gpa, instance, b"xrStringToPath\0"),
-        create_action_space: load_fn(gpa, instance, b"xrCreateActionSpace\0"),
-        locate_space: load_fn(gpa, instance, b"xrLocateSpace\0"),
-    }
+        destroy_instance: require_fn!(gpa, instance, "xrDestroyInstance"),
+        get_system: require_fn!(gpa, instance, "xrGetSystem"),
+        create_session: require_fn!(gpa, instance, "xrCreateSession"),
+        destroy_session: require_fn!(gpa, instance, "xrDestroySession"),
+        end_frame: require_fn!(gpa, instance, "xrEndFrame"),
+        create_reference_space: require_fn!(gpa, instance, "xrCreateReferenceSpace"),
+        destroy_space: require_fn!(gpa, instance, "xrDestroySpace"),
+        enumerate_swapchain_formats: require_fn!(gpa, instance, "xrEnumerateSwapchainFormats"),
+        create_swapchain: require_fn!(gpa, instance, "xrCreateSwapchain"),
+        destroy_swapchain: require_fn!(gpa, instance, "xrDestroySwapchain"),
+        enumerate_swapchain_images: require_fn!(gpa, instance, "xrEnumerateSwapchainImages"),
+        acquire_swapchain_image: require_fn!(gpa, instance, "xrAcquireSwapchainImage"),
+        wait_swapchain_image: require_fn!(gpa, instance, "xrWaitSwapchainImage"),
+        release_swapchain_image: require_fn!(gpa, instance, "xrReleaseSwapchainImage"),
+        suggest_interaction_profile_bindings: require_fn!(gpa, instance, "xrSuggestInteractionProfileBindings"),
+        sync_actions: require_fn!(gpa, instance, "xrSyncActions"),
+        get_action_state_boolean: require_fn!(gpa, instance, "xrGetActionStateBoolean"),
+        apply_haptic_feedback: require_fn!(gpa, instance, "xrApplyHapticFeedback"),
+        stop_haptic_feedback: require_fn!(gpa, instance, "xrStopHapticFeedback"),
+        path_to_string: require_fn!(gpa, instance, "xrPathToString"),
+        string_to_path: require_fn!(gpa, instance, "xrStringToPath"),
+        create_action_space: require_fn!(gpa, instance, "xrCreateActionSpace"),
+        locate_space: require_fn!(gpa, instance, "xrLocateSpace"),
+    })
 }
 
 unsafe fn string_to_path(
