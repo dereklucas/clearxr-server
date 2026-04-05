@@ -29,6 +29,9 @@ pub struct ShmHeader {
 pub const HEADER_SIZE: usize = 64;
 const _: () = assert!(std::mem::size_of::<ShmHeader>() == HEADER_SIZE);
 
+/// Offset within SHM where raw RGBA8_SRGB pixel data begins (immediately after header).
+pub const PIXEL_DATA_OFFSET: usize = HEADER_SIZE;
+
 /// Writer side (dashboard process). Creates shared memory for metadata.
 pub struct ShmWriter {
     shmem: Shmem,
@@ -36,8 +39,9 @@ pub struct ShmWriter {
 
 impl ShmWriter {
     pub fn create(width: u32, height: u32) -> Result<Self, ShmemError> {
+        let total_size = HEADER_SIZE + (width * height * 4) as usize;
         let shmem = match ShmemConf::new()
-            .size(HEADER_SIZE)
+            .size(total_size)
             .os_id(SHM_NAME)
             .create()
         {
@@ -61,7 +65,7 @@ impl ShmWriter {
             header.gpu_luid = [0; 8];
         }
 
-        log::info!("[ClearXR Dashboard] SHM created: {}x{}, metadata only ({} bytes)", width, height, HEADER_SIZE);
+        log::info!("[ClearXR Dashboard] SHM created: {}x{}, header + pixel buffer ({} bytes)", width, height, total_size);
         Ok(Self { shmem })
     }
 
@@ -92,6 +96,15 @@ impl ShmWriter {
         unsafe {
             let header = &mut *(self.shmem.as_ptr() as *mut ShmHeader);
             if visible { header.flags |= 1; } else { header.flags &= !1; }
+        }
+    }
+
+    /// Write raw RGBA8_SRGB pixel data into the SHM pixel buffer.
+    /// `data` must be exactly `width * height * 4` bytes.
+    pub fn write_pixels(&self, data: &[u8]) {
+        unsafe {
+            let base = self.shmem.as_ptr().add(PIXEL_DATA_OFFSET);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), base, data.len());
         }
     }
 }

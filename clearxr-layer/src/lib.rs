@@ -483,6 +483,8 @@ static TRIGGER_ACTIONS: OnceLock<RwLock<HashMap<(u64, Hand), ()>>> = OnceLock::n
 static SQUEEZE_ACTIONS: OnceLock<RwLock<HashMap<(u64, Hand), ()>>> = OnceLock::new();
 static THUMBSTICK_ACTIONS: OnceLock<RwLock<HashMap<u64, ()>>> = OnceLock::new();
 static NEXT_LOCATE_SPACE: OnceLock<xr::pfn::LocateSpace> = OnceLock::new();
+static LEFT_HAND_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RIGHT_HAND_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // ============================================================
 // DLL export: xrNegotiateLoaderApiLayerInterface
@@ -708,6 +710,11 @@ unsafe extern "system" fn layer_create_api_layer_instance(
             let _ = TRIGGER_ACTIONS.set(RwLock::new(HashMap::new()));
             let _ = SQUEEZE_ACTIONS.set(RwLock::new(HashMap::new()));
 
+            let left_path = string_to_path(&dispatch, instance, b"/user/hand/left\0").unwrap_or(xr::Path::NULL);
+            let right_path = string_to_path(&dispatch, instance, b"/user/hand/right\0").unwrap_or(xr::Path::NULL);
+            LEFT_HAND_PATH.store(left_path.into_raw(), std::sync::atomic::Ordering::Relaxed);
+            RIGHT_HAND_PATH.store(right_path.into_raw(), std::sync::atomic::Ordering::Relaxed);
+
             // Store layer state
             *LAYER.lock().unwrap() = Some(LayerState {
                 instance,
@@ -725,8 +732,8 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                 menu_actions: HashMap::new(),
                 aim_spaces: HashMap::new(),
                 controller_state: Default::default(),
-                left_hand_path: string_to_path(&dispatch, instance, b"/user/hand/left\0").unwrap_or(xr::Path::NULL),
-                right_hand_path: string_to_path(&dispatch, instance, b"/user/hand/right\0").unwrap_or(xr::Path::NULL),
+                left_hand_path: left_path,
+                right_hand_path: right_path,
                 session: xr::Session::NULL,
                 pending_vulkan_binding: None,
                 pending_d3d11_binding: None,

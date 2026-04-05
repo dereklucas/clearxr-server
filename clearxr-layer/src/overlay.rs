@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub(crate) const SHM_NAME: &str = "ClearXR_Dashboard_Meta";
 pub(crate) const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
+/// Byte offset within SHM where RGBA8_SRGB pixel data begins (matches shm.rs PIXEL_DATA_OFFSET).
+pub(crate) const PIXEL_DATA_OFFSET: usize = 64; // = HEADER_SIZE
 
 // Named Win32 handles for cross-process sharing (UTF-16 with null terminator).
 // Must match clearxr-dashboard/src/renderer.rs constants.
@@ -197,7 +199,7 @@ impl DashboardOverlay {
         // ── Import shared image ──
         // Create VkImage with ExternalMemoryImageCreateInfo (must match dashboard's creation params)
         let mut external_image_info = vk::ExternalMemoryImageCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE);
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
         let image_ci = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::R8G8B8A8_SRGB)
@@ -220,7 +222,7 @@ impl DashboardOverlay {
 
         // Import memory via named Win32 handle (null handle + name = name-based import)
         let mut import_win32_info = vk::ImportMemoryWin32HandleInfoKHR::default()
-            .handle_type(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE)
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32)
             .handle(vk::HANDLE::default())
             .name(IMAGE_HANDLE_NAME.as_ptr());
         let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()

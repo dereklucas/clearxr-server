@@ -82,6 +82,13 @@ pub struct HeadlessRenderer {
 
     // User-managed desktop texture (bypasses set_textures bottleneck)
     desktop_texture: Option<DesktopTexture>,
+
+    // CPU-accessible readback buffer for SHM pixel export (D3D11 overlay path).
+    // Permanently mapped; written by GPU via CopyImageToBuffer each render frame.
+    readback_buffer: vk::Buffer,
+    readback_memory: vk::DeviceMemory,
+    readback_ptr: *mut u8,
+    readback_size: usize,
 }
 
 unsafe impl Send for HeadlessRenderer {}
@@ -167,7 +174,7 @@ impl HeadlessRenderer {
         let format = vk::Format::R8G8B8A8_SRGB;
 
         let mut external_image_info = vk::ExternalMemoryImageCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE);
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
         let image_ci = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -176,7 +183,11 @@ impl HeadlessRenderer {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+            .usage(
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
+            )
             .push_next(&mut external_image_info);
         let render_image = unsafe { device.create_image(&image_ci, None)? };
 
@@ -190,11 +201,11 @@ impl HeadlessRenderer {
         .ok_or_else(|| anyhow::anyhow!("No suitable memory type for render image"))?;
 
         // Export memory with a named Win32 handle + dedicated allocation (required for external memory).
-        // D3D11_TEXTURE handle type: importable by both Vulkan and D3D11 (via OpenSharedResource1).
+        // OPAQUE_WIN32: importable by Vulkan (overlay.rs). D3D11 games use the SHM pixel buffer instead.
         let mut export_win32_info = vk::ExportMemoryWin32HandleInfoKHR::default()
             .name(IMAGE_HANDLE_NAME.as_ptr());
         let mut export_mem_info = vk::ExportMemoryAllocateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE);
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
         let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
             .image(render_image);
         let alloc_info = vk::MemoryAllocateInfo::default()
@@ -277,8 +288,32 @@ impl HeadlessRenderer {
         )
         .map_err(|e| anyhow::anyhow!("egui-ash-renderer init failed: {e}"))?;
 
+        // ── CPU-readable readback buffer for SHM pixel export ──
+        // Used by D3D11 overlay games that can't import the Vulkan shared image directly.
+        let readback_size = (width * height * 4) as usize;
+        let rb_buf_ci = vk::BufferCreateInfo::default()
+            .size(readback_size as u64)
+            .usage(vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let readback_buffer = unsafe { device.create_buffer(&rb_buf_ci, None)? };
+        let rb_mem_reqs = unsafe { device.get_buffer_memory_requirements(readback_buffer) };
+        let rb_mem_type = find_memory_type(
+            &mem_props,
+            rb_mem_reqs.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .ok_or_else(|| anyhow::anyhow!("No host-visible memory type for readback buffer"))?;
+        let rb_alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(rb_mem_reqs.size)
+            .memory_type_index(rb_mem_type);
+        let readback_memory = unsafe { device.allocate_memory(&rb_alloc, None)? };
+        unsafe { device.bind_buffer_memory(readback_buffer, readback_memory, 0)? };
+        let readback_ptr = unsafe {
+            device.map_memory(readback_memory, 0, readback_size as u64, vk::MemoryMapFlags::empty())? as *mut u8
+        };
+
         log::info!(
-            "[ClearXR Dashboard] Headless renderer initialized: {}x{}, Vulkan 1.2, shared image + timeline semaphore",
+            "[ClearXR Dashboard] Headless renderer initialized: {}x{}, Vulkan 1.2, shared image + SHM pixel readback",
             width, height
         );
 
@@ -305,6 +340,10 @@ impl HeadlessRenderer {
             prev_secondary: false,
             has_rendered: false,
             desktop_texture: None,
+            readback_buffer,
+            readback_memory,
+            readback_ptr,
+            readback_size,
         })
     }
 
@@ -503,10 +542,11 @@ impl HeadlessRenderer {
 
             device.cmd_end_render_pass(cmd);
 
-            // Transition render image to GENERAL for cross-process sampling
-            let barrier2 = vk::ImageMemoryBarrier::default()
+            // Transition render image: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
+            // so we can copy pixels to the CPU-readable readback buffer.
+            let barrier_to_transfer = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                 .image(self.render_image)
                 .subresource_range(
                     vk::ImageSubresourceRange::default()
@@ -515,13 +555,55 @@ impl HeadlessRenderer {
                         .layer_count(1),
                 )
                 .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_access_mask(vk::AccessFlags::MEMORY_READ);
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
             device.cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[], &[], &[barrier_to_transfer],
+            );
+
+            // Copy render image → readback buffer (for SHM pixel export to D3D11 games).
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)   // tightly packed
+                .buffer_image_height(0) // tightly packed
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 });
+            device.cmd_copy_image_to_buffer(
+                cmd,
+                self.render_image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.readback_buffer,
+                std::slice::from_ref(&region),
+            );
+
+            // Transition render image: TRANSFER_SRC_OPTIMAL → GENERAL for cross-process sampling.
+            let barrier_to_general = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .image(self.render_image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(1)
+                        .layer_count(1),
+                )
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ);
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 vk::DependencyFlags::empty(),
-                &[], &[], &[barrier2],
+                &[], &[], &[barrier_to_general],
             );
 
             device.end_command_buffer(cmd)?;
@@ -765,6 +847,13 @@ impl HeadlessRenderer {
     pub fn height(&self) -> u32 {
         self.height
     }
+
+    /// Returns the most recently rendered pixel data (RGBA8_SRGB, row-major).
+    /// Valid only after a successful `render_frame` returning `Ok(true)`.
+    /// The caller must not modify this slice.
+    pub fn readback_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.readback_ptr, self.readback_size) }
+    }
 }
 
 impl Drop for HeadlessRenderer {
@@ -792,6 +881,9 @@ impl Drop for HeadlessRenderer {
             self.device.destroy_image_view(self.render_image_view, None);
             self.device.destroy_image(self.render_image, None);
             self.device.free_memory(self.render_image_memory, None);
+            self.device.unmap_memory(self.readback_memory);
+            self.device.destroy_buffer(self.readback_buffer, None);
+            self.device.free_memory(self.readback_memory, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);

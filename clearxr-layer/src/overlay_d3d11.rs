@@ -1,14 +1,15 @@
-//! D3D11 dashboard overlay — imports the dashboard's shared texture via
-//! named NT handle (D3D11_TEXTURE export from Vulkan), copies it to an
+//! D3D11 dashboard overlay — reads dashboard pixels from SHM (written by the
+//! dashboard process after each render), uploads via UpdateSubresource to an
 //! OpenXR D3D11 swapchain image each frame, and appends a quad layer.
 //!
-//! Mirrors the structure of overlay.rs but uses D3D11 instead of Vulkan
-//! for the GPU copy work.
+//! Mirrors the structure of overlay.rs but uses D3D11 instead of Vulkan.
+//! No GPU texture sharing required — works regardless of Vulkan interop support.
 
-use crate::d3d11_backend::{D3D11Backend, SharedTexture};
+use crate::d3d11_backend::D3D11Backend;
 use crate::overlay::{
     connect_pipe, create_stage_space, cross, quat_rotate, ray_quad_hit, sub, length,
-    DashboardInputPacket, HandStatePkt, ShmHeader, IMAGE_HANDLE_NAME, SHM_NAME,
+    DashboardInputPacket, HandStatePkt, ShmHeader, SHM_NAME,
+    PIXEL_DATA_OFFSET,
 };
 use crate::opaque::SpatialControllerPacket;
 use crate::NextDispatch;
@@ -47,8 +48,6 @@ pub struct DashboardOverlayD3D11 {
     backface_image: *mut c_void, // ID3D11Texture2D*
     backface_initialized: bool,
     d3d11: D3D11Backend,
-    // Shared texture (imported from dashboard process)
-    shared_texture: Option<SharedTexture>,
     last_frame_counter: u32,
     has_rendered: bool,
     // SHM reader
@@ -128,7 +127,6 @@ impl DashboardOverlayD3D11 {
             backface_image,
             backface_initialized: false,
             d3d11,
-            shared_texture: None,
             last_frame_counter: 0,
             has_rendered: false,
             shmem,
@@ -153,17 +151,6 @@ impl DashboardOverlayD3D11 {
             grab_base_width: 1.6,
             grab_base_height: 1.0,
         })
-    }
-
-    /// Import the dashboard's shared texture via named Win32 handle.
-    unsafe fn import_shared_texture(&mut self) -> Result<(), String> {
-        let shared = self.d3d11.import_shared_texture(IMAGE_HANDLE_NAME.as_ptr())?;
-        log::info!(
-            "[ClearXR Layer D3D11] Shared texture imported: {}x{}",
-            self.width, self.height
-        );
-        self.shared_texture = Some(shared);
-        Ok(())
     }
 
     pub fn is_for_session(&self, session: xr::Session) -> bool {
@@ -488,30 +475,33 @@ impl DashboardOverlayD3D11 {
             }
         }
 
-        let shmem = self.shmem.as_ref().unwrap();
-        let header = &*(shmem.as_ptr() as *const ShmHeader);
+        // Extract everything we need from SHM up front to avoid borrow conflicts.
+        let (pose_pos, pose_orient, panel_size, frame_counter, shmem_size, pixel_ptr_raw) = {
+            let shmem = self.shmem.as_ref().unwrap();
+            let header = &*(shmem.as_ptr() as *const ShmHeader);
+            let fc = header.frame_counter.load(Ordering::Acquire);
+            let sz = shmem.len();
+            let px = shmem.as_ptr().add(PIXEL_DATA_OFFSET);
+            (
+                [header.panel_pos[0], header.panel_pos[1], header.panel_pos[2]],
+                [header.panel_orient[0], header.panel_orient[1], header.panel_orient[2], header.panel_orient[3]],
+                [header.panel_size[0], header.panel_size[1]],
+                fc, sz, px,
+            )
+        };
 
-        // Read panel pose from SHM
-        self.pose.position.x = header.panel_pos[0];
-        self.pose.position.y = header.panel_pos[1];
-        self.pose.position.z = header.panel_pos[2];
-        self.pose.orientation.x = header.panel_orient[0];
-        self.pose.orientation.y = header.panel_orient[1];
-        self.pose.orientation.z = header.panel_orient[2];
-        self.pose.orientation.w = header.panel_orient[3];
-        self.size.width = header.panel_size[0];
-        self.size.height = header.panel_size[1];
+        self.pose.position.x = pose_pos[0];
+        self.pose.position.y = pose_pos[1];
+        self.pose.position.z = pose_pos[2];
+        self.pose.orientation.x = pose_orient[0];
+        self.pose.orientation.y = pose_orient[1];
+        self.pose.orientation.z = pose_orient[2];
+        self.pose.orientation.w = pose_orient[3];
+        self.size.width = panel_size[0];
+        self.size.height = panel_size[1];
 
         if !self.visible {
             return Ok(self.has_rendered);
-        }
-
-        // Import shared texture (retry each frame until dashboard is ready)
-        if self.shared_texture.is_none() {
-            match self.import_shared_texture() {
-                Ok(()) => {}
-                Err(_) => return Ok(false),
-            }
         }
 
         // Initialize backface grey card (once)
@@ -521,11 +511,23 @@ impl DashboardOverlayD3D11 {
             }
         }
 
-        // Check frame counter for new frames
-        let frame_counter = header.frame_counter.load(Ordering::Acquire);
+        // Check frame counter — dashboard bumps this after writing new pixels to SHM.
         if frame_counter == self.last_frame_counter {
             return Ok(self.has_rendered);
         }
+        // frame_counter==0 means dashboard hasn't written pixels yet.
+        if frame_counter == 0 {
+            return Ok(false);
+        }
+
+        // Read pixel data from SHM (RGBA8_SRGB, written by dashboard after each render).
+        let pixel_bytes = (self.width * self.height * 4) as usize;
+        if shmem_size < PIXEL_DATA_OFFSET + pixel_bytes {
+            // SHM was created with old header-only layout — no pixels available yet.
+            return Ok(self.has_rendered);
+        }
+        let pixel_ptr = pixel_ptr_raw as *const c_void;
+        let row_pitch = self.width * 4;
 
         // Acquire swapchain image
         let mut image_index = 0;
@@ -546,10 +548,16 @@ impl DashboardOverlayD3D11 {
         }
 
         let dst = self.images[image_index as usize];
-        let src = self.shared_texture.as_ref().unwrap().texture;
 
-        // D3D11: just CopyResource — no barriers needed (the D3D11 runtime handles synchronization)
-        self.d3d11.copy_resource(dst, src);
+        // Upload SHM pixels to swapchain texture via UpdateSubresource.
+        // No GPU barriers needed — D3D11 handles synchronization internally.
+        update_subresource(
+            self.d3d11.context_ptr(),
+            dst,
+            pixel_ptr,
+            row_pitch,
+            0,
+        );
 
         self.last_frame_counter = frame_counter;
 
@@ -569,7 +577,6 @@ impl DashboardOverlayD3D11 {
 
 impl Drop for DashboardOverlayD3D11 {
     fn drop(&mut self) {
-        // SharedTexture drop handles COM Release.
         // D3D11Backend drop handles device/context Release.
         // OpenXR resources:
         unsafe {
