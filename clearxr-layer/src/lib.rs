@@ -5,6 +5,7 @@
 /// touch and button click events from PS Sense controllers, working around
 /// CloudXR bugs.
 
+mod d3d11_backend;
 mod opaque;
 mod vk_backend;
 
@@ -1005,9 +1006,6 @@ unsafe fn query_vector2f(session: xr::Session, action_raw: u64, subaction: xr::P
 }
 
 unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
-    static DIAG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let diag = DIAG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
     // Poll opaque channel for button state
     if let Some(ref mut ch) = state.opaque {
         ch.poll();
@@ -1063,11 +1061,15 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     // opaque channel data, but query_boolean bypasses our hook and goes to the runtime
     // directly. So we must read the opaque channel ourselves.
     let mut menu_down = false;
+    let mut left_buttons = 0u16;
+    let mut right_buttons = 0u16;
     if let Some(ref ch) = state.opaque {
         if let Some(pkt) = ch.latest {
             let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
             let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
             menu_down = left_menu || right_menu;
+            left_buttons = pkt.left.buttons;
+            right_buttons = pkt.right.buttons;
         }
     }
 
@@ -1080,7 +1082,7 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
         version: 1,
         active_hands,
         left: SpatialControllerHand {
-            buttons: 0,
+            buttons: left_buttons,
             _reserved: 0,
             thumbstick_x: left.thumbstick_x,
             thumbstick_y: left.thumbstick_y,
@@ -1095,7 +1097,7 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
             rot_w: left.aim_orient[3],
         },
         right: SpatialControllerHand {
-            buttons: 0,
+            buttons: right_buttons,
             _reserved: 0,
             thumbstick_x: right.thumbstick_x,
             thumbstick_y: right.thumbstick_y,
@@ -1442,10 +1444,6 @@ unsafe extern "system" fn hook_create_action_space(
             if let Some(lock) = AIM_SPACES.get() {
                 if let Ok(mut map) = lock.write() { map.insert(space_raw, hand); }
             }
-            layer_log!(info,
-                "[ClearXR Layer] Aim space created: space=0x{:x} action=0x{:x} {:?}",
-                space_raw, action_raw, hand
-            );
         }
     }
 

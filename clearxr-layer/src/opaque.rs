@@ -256,14 +256,6 @@ impl OpaqueChannel {
             opaque_log!(warn, "[ClearXR Layer] Haptic send failed: {:?}", result);
             return false;
         }
-        opaque_log!(
-            info,
-            "[ClearXR Layer] Forwarded haptic packet: hand={} duration_ns={} frequency={} amplitude={}",
-            hand,
-            duration_ns,
-            frequency,
-            amplitude
-        );
         true
     }
 
