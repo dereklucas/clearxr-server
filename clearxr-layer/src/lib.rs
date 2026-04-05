@@ -7,10 +7,12 @@
 
 mod d3d11_backend;
 mod opaque;
+mod overlay_d3d11;
 mod vk_backend;
 
 use opaque::*;
 use overlay::*;
+use overlay_d3d11::DashboardOverlayD3D11;
 use openxr_sys as xr;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CStr};
@@ -319,7 +321,7 @@ struct LayerState {
     /// Has the opaque channel extension been enabled?
     has_opaque_ext: bool,
     oculus_touch_profile: xr::Path,
-    overlay: Option<DashboardOverlay>,
+    overlay: Option<OverlayVariant>,
     /// Action handles that are aim pose actions (path contains "/aim/pose")
     aim_actions: HashSet<u64>,
     /// Action handles that are trigger float actions (path contains "/trigger/value")
@@ -339,7 +341,76 @@ struct LayerState {
     session: xr::Session,
     /// Deferred Vulkan binding for lazy overlay creation in hook_end_frame.
     pending_vulkan_binding: Option<PendingVulkanBinding>,
+    /// Deferred D3D11 binding for lazy overlay creation in hook_end_frame.
+    pending_d3d11_binding: Option<PendingD3D11Binding>,
 }
+
+/// Overlay backend variant — Vulkan or D3D11, chosen at session creation time.
+enum OverlayVariant {
+    Vulkan(DashboardOverlay),
+    D3D11(DashboardOverlayD3D11),
+}
+
+impl OverlayVariant {
+    fn is_for_session(&self, session: xr::Session) -> bool {
+        match self {
+            OverlayVariant::Vulkan(o) => o.is_for_session(session),
+            OverlayVariant::D3D11(o) => o.is_for_session(session),
+        }
+    }
+
+    fn visible(&self) -> bool {
+        match self {
+            OverlayVariant::Vulkan(o) => o.visible(),
+            OverlayVariant::D3D11(o) => o.visible(),
+        }
+    }
+
+    fn update_menu_button(&mut self, menu_down: bool) -> bool {
+        match self {
+            OverlayVariant::Vulkan(o) => o.update_menu_button(menu_down),
+            OverlayVariant::D3D11(o) => o.update_menu_button(menu_down),
+        }
+    }
+
+    fn send_controller_input(&mut self, pkt: &SpatialControllerPacket) {
+        match self {
+            OverlayVariant::Vulkan(o) => o.send_controller_input(pkt),
+            OverlayVariant::D3D11(o) => o.send_controller_input(pkt),
+        }
+    }
+
+    unsafe fn render_frame(&mut self, next: &NextDispatch) -> Result<(), String> {
+        match self {
+            OverlayVariant::Vulkan(o) => o.render_frame(next),
+            OverlayVariant::D3D11(o) => o.render_frame(next),
+        }
+    }
+
+    fn quad_layer(&self) -> xr::CompositionLayerQuad {
+        match self {
+            OverlayVariant::Vulkan(o) => o.quad_layer(),
+            OverlayVariant::D3D11(o) => o.quad_layer(),
+        }
+    }
+
+    fn backface_quad_layer(&self) -> xr::CompositionLayerQuad {
+        match self {
+            OverlayVariant::Vulkan(o) => o.backface_quad_layer(),
+            OverlayVariant::D3D11(o) => o.backface_quad_layer(),
+        }
+    }
+}
+
+/// Stored D3D11 binding info for deferred overlay creation.
+#[derive(Clone, Copy)]
+struct PendingD3D11Binding {
+    device: *mut c_void,
+}
+
+// Safety: D3D11 device is a COM object safe to use from another thread.
+// We AddRef it on overlay creation.
+unsafe impl Send for PendingD3D11Binding {}
 
 /// Stored Vulkan binding info for deferred overlay creation.
 /// Individual fields avoid storing the raw `*const c_void` next pointer.
@@ -659,6 +730,7 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                 right_hand_path: string_to_path(&dispatch, instance, b"/user/hand/right\0").unwrap_or(xr::Path::NULL),
                 session: xr::Session::NULL,
                 pending_vulkan_binding: None,
+                pending_d3d11_binding: None,
             });
 
             layer_log!(
@@ -925,6 +997,19 @@ unsafe fn find_vulkan_binding<'a>(
         let candidate = &*next;
         if candidate.ty == xr::GraphicsBindingVulkanKHR::TYPE {
             return Some(&*(next as *const xr::GraphicsBindingVulkanKHR));
+        }
+        next = candidate.next;
+    }
+    None
+}
+
+unsafe fn find_d3d11_binding<'a>(
+    mut next: *const xr::BaseInStructure,
+) -> Option<&'a xr::GraphicsBindingD3D11KHR> {
+    while !next.is_null() {
+        let candidate = &*next;
+        if candidate.ty == xr::GraphicsBindingD3D11KHR::TYPE {
+            return Some(&*(next as *const xr::GraphicsBindingD3D11KHR));
         }
         next = candidate.next;
     }
@@ -1199,7 +1284,8 @@ unsafe extern "system" fn hook_create_session(
 
     state.session = *session;
 
-    // Store the Vulkan binding for lazy overlay creation in hook_end_frame.
+    // Store the graphics binding for lazy overlay creation in hook_end_frame.
+    // Try Vulkan first, then D3D11.
     if let Some(binding) = find_vulkan_binding((*ci).next as *const xr::BaseInStructure) {
         state.pending_vulkan_binding = Some(PendingVulkanBinding {
             instance: binding.instance,
@@ -1208,10 +1294,16 @@ unsafe extern "system" fn hook_create_session(
             queue_family_index: binding.queue_family_index,
             queue_index: binding.queue_index,
         });
+        layer_log!(info, "[ClearXR Layer] Vulkan graphics binding detected.");
+    } else if let Some(binding) = find_d3d11_binding((*ci).next as *const xr::BaseInStructure) {
+        state.pending_d3d11_binding = Some(PendingD3D11Binding {
+            device: binding.device as *mut c_void,
+        });
+        layer_log!(info, "[ClearXR Layer] D3D11 graphics binding detected.");
     } else {
         layer_log!(
             warn,
-            "[ClearXR Layer] Session created without Vulkan binding; dashboard overlay inactive."
+            "[ClearXR Layer] Session created without Vulkan or D3D11 binding; dashboard overlay inactive."
         );
     }
 
@@ -1356,11 +1448,21 @@ unsafe extern "system" fn hook_end_frame(
                 let binding = pending.to_graphics_binding();
                 match DashboardOverlay::new(&state.next, session, &binding) {
                     Ok(overlay) => {
-                        state.overlay = Some(overlay);
-                        layer_log!(info, "[ClearXR Layer] Dashboard overlay created (lazy init on first frame).");
+                        state.overlay = Some(OverlayVariant::Vulkan(overlay));
+                        layer_log!(info, "[ClearXR Layer] Dashboard overlay created (Vulkan, lazy init on first frame).");
                     }
                     Err(err) => {
-                        layer_log!(warn, "[ClearXR Layer] Dashboard overlay disabled: {}", err);
+                        layer_log!(warn, "[ClearXR Layer] Dashboard overlay disabled (Vulkan): {}", err);
+                    }
+                }
+            } else if let Some(pending) = state.pending_d3d11_binding.take() {
+                match DashboardOverlayD3D11::new(&state.next, session, pending.device) {
+                    Ok(overlay) => {
+                        state.overlay = Some(OverlayVariant::D3D11(overlay));
+                        layer_log!(info, "[ClearXR Layer] Dashboard overlay created (D3D11, lazy init on first frame).");
+                    }
+                    Err(err) => {
+                        layer_log!(warn, "[ClearXR Layer] Dashboard overlay disabled (D3D11): {}", err);
                     }
                 }
             }

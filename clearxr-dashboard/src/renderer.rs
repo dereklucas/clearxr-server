@@ -167,7 +167,7 @@ impl HeadlessRenderer {
         let format = vk::Format::R8G8B8A8_SRGB;
 
         let mut external_image_info = vk::ExternalMemoryImageCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE);
         let image_ci = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
@@ -190,10 +190,11 @@ impl HeadlessRenderer {
         .ok_or_else(|| anyhow::anyhow!("No suitable memory type for render image"))?;
 
         // Export memory with a named Win32 handle + dedicated allocation (required for external memory).
+        // D3D11_TEXTURE handle type: importable by both Vulkan and D3D11 (via OpenSharedResource1).
         let mut export_win32_info = vk::ExportMemoryWin32HandleInfoKHR::default()
             .name(IMAGE_HANDLE_NAME.as_ptr());
         let mut export_mem_info = vk::ExportMemoryAllocateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE);
         let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
             .image(render_image);
         let alloc_info = vk::MemoryAllocateInfo::default()

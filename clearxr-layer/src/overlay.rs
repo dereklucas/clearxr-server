@@ -10,8 +10,8 @@ use std::mem::MaybeUninit;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const SHM_NAME: &str = "ClearXR_Dashboard_Meta";
-const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
+pub(crate) const SHM_NAME: &str = "ClearXR_Dashboard_Meta";
+pub(crate) const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
 
 // Named Win32 handles for cross-process sharing (UTF-16 with null terminator).
 // Must match clearxr-dashboard/src/renderer.rs constants.
@@ -27,15 +27,15 @@ pub(crate) const IMAGE_HANDLE_NAME: &[u16] = &[
 /// Metadata only — no pixel data. Pixels shared via VK_KHR_external_memory_win32.
 #[repr(C)]
 pub(crate) struct ShmHeader {
-    frame_counter: AtomicU32,     // 0
-    width: u32,                   // 4
-    height: u32,                  // 8
-    flags: u32,                   // 12
-    panel_pos: [f32; 3],          // 16
-    panel_orient: [f32; 4],       // 28
-    panel_size: [f32; 2],         // 44
-    gpu_luid: [u8; 8],           // 52
-    _reserved: [u8; 4],          // 60 -> total 64
+    pub(crate) frame_counter: AtomicU32,     // 0
+    pub(crate) width: u32,                   // 4
+    pub(crate) height: u32,                  // 8
+    pub(crate) flags: u32,                   // 12
+    pub(crate) panel_pos: [f32; 3],          // 16
+    pub(crate) panel_orient: [f32; 4],       // 28
+    pub(crate) panel_size: [f32; 2],         // 44
+    pub(crate) gpu_luid: [u8; 8],           // 52
+    pub(crate) _reserved: [u8; 4],          // 60 -> total 64
 }
 
 // Safety: DashboardOverlay is only accessed from the thread that calls xrEndFrame.
@@ -195,7 +195,7 @@ impl DashboardOverlay {
         // ── Import shared image ──
         // Create VkImage with ExternalMemoryImageCreateInfo (must match dashboard's creation params)
         let mut external_image_info = vk::ExternalMemoryImageCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE);
         let image_ci = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::R8G8B8A8_SRGB)
@@ -218,7 +218,7 @@ impl DashboardOverlay {
 
         // Import memory via named Win32 handle (null handle + name = name-based import)
         let mut import_win32_info = vk::ImportMemoryWin32HandleInfoKHR::default()
-            .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32)
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE)
             .handle(vk::HANDLE::default())
             .name(IMAGE_HANDLE_NAME.as_ptr());
         let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
@@ -880,7 +880,7 @@ unsafe fn enumerate_swapchain_images(
     Ok(images.into_iter().map(|i| i.assume_init()).collect())
 }
 
-unsafe fn create_stage_space(next: &NextDispatch, session: xr::Session) -> Result<xr::Space, String> {
+pub(crate) unsafe fn create_stage_space(next: &NextDispatch, session: xr::Session) -> Result<xr::Space, String> {
     // Use STAGE space so the overlay quad is in the same coordinate system
     // as controller aim poses from xrLocateSpace (which apps locate relative to STAGE).
     let ci = xr::ReferenceSpaceCreateInfo {
@@ -923,67 +923,67 @@ unsafe fn create_stage_space(next: &NextDispatch, session: xr::Session) -> Resul
 /// Per-hand raw state. Must match clearxr-dashboard/src/input_pipe.rs HandState.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
-struct HandStatePkt {
-    buttons: u16,
-    active: u8,
-    _pad: u8,
-    trigger: f32,
-    grip: f32,
-    thumbstick_x: f32,
-    thumbstick_y: f32,
-    pos_x: f32,
-    pos_y: f32,
-    pos_z: f32,
+pub(crate) struct HandStatePkt {
+    pub buttons: u16,
+    pub active: u8,
+    pub _pad: u8,
+    pub trigger: f32,
+    pub grip: f32,
+    pub thumbstick_x: f32,
+    pub thumbstick_y: f32,
+    pub pos_x: f32,
+    pub pos_y: f32,
+    pub pos_z: f32,
 }
 
 /// Pre-computed input packet. Must match clearxr-dashboard/src/input_pipe.rs.
 #[repr(C)]
 #[derive(Copy, Clone)]
-struct DashboardInputPacket {
-    magic: u16,        // 0x4449 ("DI")
-    flags: u8,         // bit 0: has_pointer
-    _pad: u8,
-    pointer_u: f32,
-    pointer_v: f32,
-    trigger: f32,
-    grip: f32,
-    thumbstick_y: f32,
-    left: HandStatePkt,
-    right: HandStatePkt,
+pub(crate) struct DashboardInputPacket {
+    pub magic: u16,        // 0x4449 ("DI")
+    pub flags: u8,         // bit 0: has_pointer
+    pub _pad: u8,
+    pub pointer_u: f32,
+    pub pointer_v: f32,
+    pub trigger: f32,
+    pub grip: f32,
+    pub thumbstick_y: f32,
+    pub left: HandStatePkt,
+    pub right: HandStatePkt,
 }
 
 // ============================================================
 // Vector math for ray-quad intersection
 // ============================================================
 
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(crate) fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+pub(crate) fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
+pub(crate) fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 
-fn quat_rotate(q: &[f32; 4], v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn quat_rotate(q: &[f32; 4], v: [f32; 3]) -> [f32; 3] {
     let qv = [q[0], q[1], q[2]];
     let w = q[3];
     let t = scale(cross(qv, v), 2.0);
     add(add(v, scale(t, w)), cross(qv, t))
 }
 
-fn length(a: [f32; 3]) -> f32 {
+pub(crate) fn length(a: [f32; 3]) -> f32 {
     (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
 }
 
@@ -992,7 +992,7 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
     [a[0] / l, a[1] / l, a[2] / l]
 }
 
-fn ray_quad_hit(
+pub(crate) fn ray_quad_hit(
     ray_origin: [f32; 3], ray_dir: [f32; 3],
     center: [f32; 3], normal: [f32; 3], right: [f32; 3], up: [f32; 3],
     half_w: f32, half_h: f32,
@@ -1017,7 +1017,7 @@ fn ray_quad_hit(
 // ============================================================
 
 #[cfg(target_os = "windows")]
-fn connect_pipe() -> Option<windows_sys::Win32::Foundation::HANDLE> {
+pub(crate) fn connect_pipe() -> Option<windows_sys::Win32::Foundation::HANDLE> {
     let name: Vec<u8> = format!("{}\0", PIPE_NAME).into_bytes();
     let handle = unsafe {
         windows_sys::Win32::Storage::FileSystem::CreateFileA(
