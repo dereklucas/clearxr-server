@@ -84,7 +84,41 @@ fn build_all(release: bool) -> Result<(), String> {
         run_cargo_build(&repo_root, target, release)?;
     }
 
+    copy_layer_to_streamer(&repo_root, profile_label)?;
+
     println!("Build complete.");
+    Ok(())
+}
+
+/// Copy the layer DLL + manifest into the streamer's output directory so the
+/// streamer's registration always points at a fresh build.
+fn copy_layer_to_streamer(repo_root: &std::path::Path, profile: &str) -> Result<(), String> {
+    let layer_out = repo_root.join("clearxr-layer").join("target").join(profile);
+    let streamer_out = repo_root.join("clearxr-streamer").join("target").join(profile);
+
+    let files = [
+        ("clear_xr_layer.dll", "clear_xr_layer.dll"),
+        ("clear-xr-layer.json", "clear-xr-layer.json"),
+    ];
+
+    for (src_name, dst_name) in &files {
+        let src = layer_out.join(src_name);
+        let dst = streamer_out.join(dst_name);
+
+        if !src.exists() {
+            return Err(format!(
+                "Layer artifact missing: {}. Did clearxr-layer build succeed?",
+                src.display()
+            ));
+        }
+
+        std::fs::copy(&src, &dst).map_err(|e| {
+            format!("Failed to copy {} → {}: {e}", src.display(), dst.display())
+        })?;
+
+        println!("  Copied {} → {}", src_name, dst.display());
+    }
+
     Ok(())
 }
 
