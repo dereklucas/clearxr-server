@@ -253,6 +253,8 @@ struct NextDispatch {
     suggest_interaction_profile_bindings: xr::pfn::SuggestInteractionProfileBindings,
     sync_actions: xr::pfn::SyncActions,
     get_action_state_boolean: xr::pfn::GetActionStateBoolean,
+    get_action_state_float: xr::pfn::GetActionStateFloat,
+    get_action_state_vector2f: xr::pfn::GetActionStateVector2f,
     apply_haptic_feedback: xr::pfn::ApplyHapticFeedback,
     stop_haptic_feedback: xr::pfn::StopHapticFeedback,
     path_to_string: xr::pfn::PathToString,
@@ -451,6 +453,7 @@ struct ControllerHandState {
     squeeze: f32,
     thumbstick_x: f32,
     thumbstick_y: f32,
+    buttons: u16,        // cached from xrGetActionStateBoolean intercepts
     active: bool,
 }
 
@@ -471,8 +474,8 @@ static NEXT: OnceLock<NextDispatch> = OnceLock::new();
 use std::sync::RwLock;
 
 static CONTROLLER_STATE: RwLock<[ControllerHandState; 2]> = RwLock::new([
-    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, thumbstick_x: 0.0, thumbstick_y: 0.0, active: false },
-    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, thumbstick_x: 0.0, thumbstick_y: 0.0, active: false },
+    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, thumbstick_x: 0.0, thumbstick_y: 0.0, buttons: 0, active: false },
+    ControllerHandState { aim_pos: [0.0; 3], aim_orient: [0.0, 0.0, 0.0, 1.0], trigger: 0.0, squeeze: 0.0, thumbstick_x: 0.0, thumbstick_y: 0.0, buttons: 0, active: false },
 ]);
 // These maps are populated at init time and read-only during the frame loop.
 static AIM_SPACES: OnceLock<RwLock<HashMap<u64, Hand>>> = OnceLock::new();
@@ -480,8 +483,6 @@ static TRIGGER_ACTIONS: OnceLock<RwLock<HashMap<(u64, Hand), ()>>> = OnceLock::n
 static SQUEEZE_ACTIONS: OnceLock<RwLock<HashMap<(u64, Hand), ()>>> = OnceLock::new();
 static THUMBSTICK_ACTIONS: OnceLock<RwLock<HashMap<u64, ()>>> = OnceLock::new();
 static NEXT_LOCATE_SPACE: OnceLock<xr::pfn::LocateSpace> = OnceLock::new();
-static NEXT_GET_FLOAT: OnceLock<xr::pfn::GetActionStateFloat> = OnceLock::new();
-static NEXT_GET_VEC2: OnceLock<xr::pfn::GetActionStateVector2f> = OnceLock::new();
 
 // ============================================================
 // DLL export: xrNegotiateLoaderApiLayerInterface
@@ -702,8 +703,6 @@ unsafe extern "system" fn layer_create_api_layer_instance(
             // This MUST be done before dispatch is moved into LayerState.
             let _ = NEXT.set(dispatch);
             let _ = NEXT_LOCATE_SPACE.set(dispatch.locate_space);
-            let _ = NEXT_GET_FLOAT.set(load_fn(next_gpa, instance, b"xrGetActionStateFloat\0"));
-            let _ = NEXT_GET_VEC2.set(load_fn(next_gpa, instance, b"xrGetActionStateVector2f\0"));
             let _ = THUMBSTICK_ACTIONS.set(RwLock::new(HashMap::new()));
             let _ = AIM_SPACES.set(RwLock::new(HashMap::new()));
             let _ = TRIGGER_ACTIONS.set(RwLock::new(HashMap::new()));
@@ -862,6 +861,8 @@ unsafe fn build_dispatch(gpa: xr::pfn::GetInstanceProcAddr, instance: xr::Instan
         suggest_interaction_profile_bindings: require_fn!(gpa, instance, "xrSuggestInteractionProfileBindings"),
         sync_actions: require_fn!(gpa, instance, "xrSyncActions"),
         get_action_state_boolean: require_fn!(gpa, instance, "xrGetActionStateBoolean"),
+        get_action_state_float: require_fn!(gpa, instance, "xrGetActionStateFloat"),
+        get_action_state_vector2f: require_fn!(gpa, instance, "xrGetActionStateVector2f"),
         apply_haptic_feedback: require_fn!(gpa, instance, "xrApplyHapticFeedback"),
         stop_haptic_feedback: require_fn!(gpa, instance, "xrStopHapticFeedback"),
         path_to_string: require_fn!(gpa, instance, "xrPathToString"),
@@ -940,6 +941,8 @@ unsafe extern "system" fn layer_get_instance_proc_addr(
     intercept!(b"xrSuggestInteractionProfileBindings", hook_suggest_bindings as xr::pfn::SuggestInteractionProfileBindings);
     intercept!(b"xrSyncActions", hook_sync_actions as xr::pfn::SyncActions);
     intercept!(b"xrGetActionStateBoolean", hook_get_action_state_boolean as xr::pfn::GetActionStateBoolean);
+    intercept!(b"xrGetActionStateFloat", hook_get_action_state_float as xr::pfn::GetActionStateFloat);
+    intercept!(b"xrGetActionStateVector2f", hook_get_action_state_vector2f as xr::pfn::GetActionStateVector2f);
     intercept!(b"xrApplyHapticFeedback", hook_apply_haptic_feedback as xr::pfn::ApplyHapticFeedback);
     intercept!(b"xrStopHapticFeedback", hook_stop_haptic_feedback as xr::pfn::StopHapticFeedback);
     // Dashboard overlay hooks:
@@ -1016,79 +1019,6 @@ unsafe fn find_d3d11_binding<'a>(
     None
 }
 
-/// Actively query a float action value for a specific hand.
-unsafe fn query_float(session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<f32> {
-    let next_fn = NEXT_GET_FLOAT.get()?;
-    let get_info = xr::ActionStateGetInfo {
-        ty: xr::ActionStateGetInfo::TYPE,
-        next: std::ptr::null(),
-        action: xr::Action::from_raw(action_raw),
-        subaction_path: subaction,
-    };
-    let mut state_out = xr::ActionStateFloat {
-        ty: xr::ActionStateFloat::TYPE,
-        next: std::ptr::null_mut(),
-        current_state: 0.0,
-        changed_since_last_sync: xr::FALSE,
-        last_change_time: xr::Time::from_nanos(0),
-        is_active: xr::FALSE,
-    };
-    let r = (*next_fn)(session, &get_info, &mut state_out);
-    if r == xr::Result::SUCCESS && state_out.is_active.into() {
-        Some(state_out.current_state)
-    } else {
-        None
-    }
-}
-
-/// Actively query a boolean action value for a specific hand.
-unsafe fn query_boolean(next: &NextDispatch, session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<bool> {
-    let get_info = xr::ActionStateGetInfo {
-        ty: xr::ActionStateGetInfo::TYPE,
-        next: std::ptr::null(),
-        action: xr::Action::from_raw(action_raw),
-        subaction_path: subaction,
-    };
-    let mut state_out = xr::ActionStateBoolean {
-        ty: xr::ActionStateBoolean::TYPE,
-        next: std::ptr::null_mut(),
-        current_state: xr::FALSE,
-        changed_since_last_sync: xr::FALSE,
-        last_change_time: xr::Time::from_nanos(0),
-        is_active: xr::FALSE,
-    };
-    let r = (next.get_action_state_boolean)(session, &get_info, &mut state_out);
-    if r == xr::Result::SUCCESS && state_out.is_active.into() {
-        Some(state_out.current_state.into())
-    } else {
-        None
-    }
-}
-
-/// Actively query a vector2f action (thumbstick) for a specific hand.
-unsafe fn query_vector2f(session: xr::Session, action_raw: u64, subaction: xr::Path) -> Option<(f32, f32)> {
-    let next_fn = NEXT_GET_VEC2.get()?;
-    let get_info = xr::ActionStateGetInfo {
-        ty: xr::ActionStateGetInfo::TYPE,
-        next: std::ptr::null(),
-        action: xr::Action::from_raw(action_raw),
-        subaction_path: subaction,
-    };
-    let mut state_out = xr::ActionStateVector2f {
-        ty: xr::ActionStateVector2f::TYPE,
-        next: std::ptr::null_mut(),
-        current_state: xr::Vector2f { x: 0.0, y: 0.0 },
-        changed_since_last_sync: xr::FALSE,
-        last_change_time: xr::Time::from_nanos(0),
-        is_active: xr::FALSE,
-    };
-    let r = (*next_fn)(session, &get_info, &mut state_out);
-    if r == xr::Result::SUCCESS && state_out.is_active.into() {
-        Some((state_out.current_state.x, state_out.current_state.y))
-    } else {
-        None
-    }
-}
 
 unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     // Poll opaque channel for button state
@@ -1105,71 +1035,31 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     let mut left = cs[0];
     let mut right = cs[1];
 
-    // Prefer opaque channel for trigger/grip/thumbstick/buttons — it carries the
-    // authoritative CloudXR values and is always fresh. xrGetActionStateFloat/Vector2f
-    // return is_active=false when called outside the xrSyncActions window (i.e. during
-    // xrEndFrame), so query_float / query_vector2f reliably return None here.
-    // Fall back to those queries only when opaque channel data is absent.
+    // trigger/grip/thumbstick/buttons are cached by hook_get_action_state_float,
+    // hook_get_action_state_vector2f, and hook_get_action_state_boolean when the
+    // host app queries them during its xrSyncActions loop. Use those cached values.
+    left.trigger      = cs[0].trigger;
+    left.squeeze      = cs[0].squeeze;
+    left.thumbstick_x = cs[0].thumbstick_x;
+    left.thumbstick_y = cs[0].thumbstick_y;
+    right.trigger      = cs[1].trigger;
+    right.squeeze      = cs[1].squeeze;
+    right.thumbstick_x = cs[1].thumbstick_x;
+    right.thumbstick_y = cs[1].thumbstick_y;
+    let mut left_buttons  = cs[0].buttons;
+    let mut right_buttons = cs[1].buttons;
+
+    // Menu button only comes from the opaque channel — the runtime reserves it
+    // and never exposes it via xrGetActionStateBoolean.
     let mut menu_down = false;
-    let mut left_buttons = 0u16;
-    let mut right_buttons = 0u16;
-    let mut opaque_filled = false;
     if let Some(ref ch) = state.opaque {
         if let Some(pkt) = ch.latest {
-            let left_active  = (pkt.active_hands & 0x01) != 0;
-            let right_active = (pkt.active_hands & 0x02) != 0;
-            let left_menu  = left_active  && (pkt.left.buttons  & SC_BTN_MENU) != 0;
-            let right_menu = right_active && (pkt.right.buttons & SC_BTN_MENU) != 0;
-            menu_down    = left_menu || right_menu;
-            left_buttons  = pkt.left.buttons;
-            right_buttons = pkt.right.buttons;
-            if left_active {
-                left.trigger      = pkt.left.trigger;
-                left.squeeze      = pkt.left.grip;
-                left.thumbstick_x = pkt.left.thumbstick_x;
-                left.thumbstick_y = pkt.left.thumbstick_y;
-            }
-            if right_active {
-                right.trigger      = pkt.right.trigger;
-                right.squeeze      = pkt.right.grip;
-                right.thumbstick_x = pkt.right.thumbstick_x;
-                right.thumbstick_y = pkt.right.thumbstick_y;
-            }
-            opaque_filled = true;
-        }
-    }
-
-    // Fallback: query the runtime directly if opaque channel has no data.
-    // (Non-CloudXR scenario, or before the headset has sent its first packet.)
-    if !opaque_filled {
-        for (hand_path, hand_state) in [
-            (state.left_hand_path, &mut left),
-            (state.right_hand_path, &mut right),
-        ] {
-            if hand_path == xr::Path::NULL { continue; }
-            for &(action_raw, _hand) in state.trigger_actions.keys() {
-                if let Some(val) = query_float(session, action_raw, hand_path) {
-                    hand_state.trigger = val;
-                    break;
-                }
-            }
-            for &(action_raw, _hand) in state.squeeze_actions.keys() {
-                if let Some(val) = query_float(session, action_raw, hand_path) {
-                    hand_state.squeeze = val;
-                    break;
-                }
-            }
-            if let Some(lock) = THUMBSTICK_ACTIONS.get() {
-                if let Ok(map) = lock.read() {
-                    for &action_raw in map.keys() {
-                        if let Some((x, y)) = query_vector2f(session, action_raw, hand_path) {
-                            hand_state.thumbstick_x = x;
-                            hand_state.thumbstick_y = y;
-                            break;
-                        }
-                    }
-                }
-            }
+            let left_menu  = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons  & SC_BTN_MENU) != 0;
+            let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
+            menu_down = left_menu || right_menu;
+            // Merge opaque touch bits into the cached button word
+            left_buttons  |= pkt.left.buttons  & (SC_TOUCH_A | SC_TOUCH_B | SC_TOUCH_TRIGGER | SC_TOUCH_THUMBSTICK | SC_BTN_MENU);
+            right_buttons |= pkt.right.buttons & (SC_TOUCH_A | SC_TOUCH_B | SC_TOUCH_TRIGGER | SC_TOUCH_THUMBSTICK | SC_BTN_MENU);
         }
     }
 
@@ -1801,8 +1691,21 @@ unsafe extern "system" fn hook_get_action_state_boolean(
         }
     };
 
-    // Look up the override
+    // Cache the runtime result in CONTROLLER_STATE for dashboard use.
+    // Only cache when runtime says is_active — menu returns inactive (reserved by runtime),
+    // so it won't overwrite state. A/B/thumbstick-click come through here correctly.
     if let Some(&bit) = state.overrides.get(&(action_raw, hand)) {
+        let hand_idx = match hand { Hand::Left => 0, Hand::Right => 1 };
+        let runtime_active: bool = (*state_out).is_active.into();
+        if runtime_active {
+            let runtime_pressed: bool = (*state_out).current_state.into();
+            if let Ok(mut cs) = CONTROLLER_STATE.write() {
+                if runtime_pressed { cs[hand_idx].buttons |= bit; }
+                else               { cs[hand_idx].buttons &= !bit; }
+            }
+        }
+
+        // Opaque override (menu button — runtime reserves it so runtime result is always inactive)
         let buttons = match hand {
             Hand::Left => {
                 if pkt.active_hands & 0x01 != 0 { pkt.left.buttons } else { return result; }
@@ -1811,12 +1714,84 @@ unsafe extern "system" fn hook_get_action_state_boolean(
                 if pkt.active_hands & 0x02 != 0 { pkt.right.buttons } else { return result; }
             }
         };
-
         let pressed = buttons & bit != 0;
         let out = &mut *state_out;
         out.current_state = if pressed { xr::TRUE } else { xr::FALSE };
         out.is_active = xr::TRUE;
     }
 
+    result
+}
+
+unsafe extern "system" fn hook_get_action_state_float(
+    session: xr::Session,
+    get_info: *const xr::ActionStateGetInfo,
+    state_out: *mut xr::ActionStateFloat,
+) -> xr::Result {
+    let next = match NEXT.get() { Some(n) => *n, None => return xr::Result::ERROR_HANDLE_INVALID };
+    let result = (next.get_action_state_float)(session, get_info, state_out);
+    if result != xr::Result::SUCCESS || get_info.is_null() || state_out.is_null() { return result; }
+    let out = &*state_out;
+    if !bool::from(out.is_active) { return result; }
+
+    let info = &*get_info;
+    let action_raw = info.action.into_raw();
+    let subaction_raw = info.subaction_path.into_raw();
+    let left_raw  = LEFT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
+    let right_raw = RIGHT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
+    let hand = if subaction_raw == left_raw       { Hand::Left }
+               else if subaction_raw == right_raw { Hand::Right }
+               else                               { return result; };
+    let hand_idx = match hand { Hand::Left => 0, Hand::Right => 1 };
+    let val = out.current_state;
+
+    let is_trigger = TRIGGER_ACTIONS.get()
+        .and_then(|l| l.read().ok())
+        .map(|m| m.contains_key(&(action_raw, hand)))
+        .unwrap_or(false);
+    let is_squeeze = !is_trigger && SQUEEZE_ACTIONS.get()
+        .and_then(|l| l.read().ok())
+        .map(|m| m.contains_key(&(action_raw, hand)))
+        .unwrap_or(false);
+
+    if is_trigger || is_squeeze {
+        if let Ok(mut cs) = CONTROLLER_STATE.write() {
+            if is_trigger { cs[hand_idx].trigger = val; }
+            else          { cs[hand_idx].squeeze = val; }
+        }
+    }
+    result
+}
+
+unsafe extern "system" fn hook_get_action_state_vector2f(
+    session: xr::Session,
+    get_info: *const xr::ActionStateGetInfo,
+    state_out: *mut xr::ActionStateVector2f,
+) -> xr::Result {
+    let next = match NEXT.get() { Some(n) => *n, None => return xr::Result::ERROR_HANDLE_INVALID };
+    let result = (next.get_action_state_vector2f)(session, get_info, state_out);
+    if result != xr::Result::SUCCESS || get_info.is_null() || state_out.is_null() { return result; }
+    let out = &*state_out;
+    if !bool::from(out.is_active) { return result; }
+
+    let info = &*get_info;
+    let action_raw = info.action.into_raw();
+    let subaction_raw = info.subaction_path.into_raw();
+    let left_raw  = LEFT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
+    let right_raw = RIGHT_HAND_PATH.load(std::sync::atomic::Ordering::Relaxed);
+    let hand_idx = if subaction_raw == left_raw       { 0 }
+                   else if subaction_raw == right_raw { 1 }
+                   else                               { return result; };
+
+    let is_thumbstick = THUMBSTICK_ACTIONS.get()
+        .and_then(|l| l.read().ok())
+        .map(|m| m.contains_key(&action_raw))
+        .unwrap_or(false);
+    if is_thumbstick {
+        if let Ok(mut cs) = CONTROLLER_STATE.write() {
+            cs[hand_idx].thumbstick_x = out.current_state.x;
+            cs[hand_idx].thumbstick_y = out.current_state.y;
+        }
+    }
     result
 }

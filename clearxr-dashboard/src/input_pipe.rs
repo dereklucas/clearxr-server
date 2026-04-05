@@ -169,8 +169,9 @@ impl InputPipeServer {
                         // If we got nothing, client may have disconnected
                         if let Err(ref e) = ok {
                             let code = e.code().0 as u32;
-                            // ERROR_BROKEN_PIPE or ERROR_NO_DATA → mark disconnected
-                            if code == 0x8007006D || code == 0x800700E8 {
+                            // ERROR_BROKEN_PIPE (0x6D) = client disconnected → reconnect.
+                            // ERROR_NO_DATA (0xE8) = pipe empty in NOWAIT mode → normal, keep connected.
+                            if code == 0x8007006D {
                                 self.connected = false;
                             }
                         }
