@@ -1105,56 +1105,71 @@ unsafe fn poll_opaque_and_update_overlay(state: &mut LayerState) {
     let mut left = cs[0];
     let mut right = cs[1];
 
-    // Actively query trigger/squeeze/thumbstick values (not intercepted — we call directly)
-    for (hand_path, hand_state) in [
-        (state.left_hand_path, &mut left),
-        (state.right_hand_path, &mut right),
-    ] {
-        if hand_path == xr::Path::NULL { continue; }
-
-        // Find trigger action for this hand
-        for &(action_raw, _hand) in state.trigger_actions.keys() {
-            if let Some(val) = query_float(session, action_raw, hand_path) {
-                hand_state.trigger = val;
-                break;
-            }
-        }
-        // Find squeeze action for this hand
-        for &(action_raw, _hand) in state.squeeze_actions.keys() {
-            if let Some(val) = query_float(session, action_raw, hand_path) {
-                hand_state.squeeze = val;
-                break;
-            }
-        }
-        // Find thumbstick action for this hand
-        if let Some(lock) = THUMBSTICK_ACTIONS.get() {
-            if let Ok(map) = lock.read() {
-                for &action_raw in map.keys() {
-                    if let Some((x, y)) = query_vector2f(session, action_raw, hand_path) {
-                        hand_state.thumbstick_x = x;
-                        hand_state.thumbstick_y = y;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Read menu button from opaque channel. The runtime reserves the menu button
-    // and doesn't expose it via xrGetActionStateBoolean (returns is_active=false).
-    // Our hook_get_action_state_boolean overrides the result for the HOST APP using
-    // opaque channel data, but query_boolean bypasses our hook and goes to the runtime
-    // directly. So we must read the opaque channel ourselves.
+    // Prefer opaque channel for trigger/grip/thumbstick/buttons — it carries the
+    // authoritative CloudXR values and is always fresh. xrGetActionStateFloat/Vector2f
+    // return is_active=false when called outside the xrSyncActions window (i.e. during
+    // xrEndFrame), so query_float / query_vector2f reliably return None here.
+    // Fall back to those queries only when opaque channel data is absent.
     let mut menu_down = false;
     let mut left_buttons = 0u16;
     let mut right_buttons = 0u16;
+    let mut opaque_filled = false;
     if let Some(ref ch) = state.opaque {
         if let Some(pkt) = ch.latest {
-            let left_menu = (pkt.active_hands & 0x01) != 0 && (pkt.left.buttons & SC_BTN_MENU) != 0;
-            let right_menu = (pkt.active_hands & 0x02) != 0 && (pkt.right.buttons & SC_BTN_MENU) != 0;
-            menu_down = left_menu || right_menu;
-            left_buttons = pkt.left.buttons;
+            let left_active  = (pkt.active_hands & 0x01) != 0;
+            let right_active = (pkt.active_hands & 0x02) != 0;
+            let left_menu  = left_active  && (pkt.left.buttons  & SC_BTN_MENU) != 0;
+            let right_menu = right_active && (pkt.right.buttons & SC_BTN_MENU) != 0;
+            menu_down    = left_menu || right_menu;
+            left_buttons  = pkt.left.buttons;
             right_buttons = pkt.right.buttons;
+            if left_active {
+                left.trigger      = pkt.left.trigger;
+                left.squeeze      = pkt.left.grip;
+                left.thumbstick_x = pkt.left.thumbstick_x;
+                left.thumbstick_y = pkt.left.thumbstick_y;
+            }
+            if right_active {
+                right.trigger      = pkt.right.trigger;
+                right.squeeze      = pkt.right.grip;
+                right.thumbstick_x = pkt.right.thumbstick_x;
+                right.thumbstick_y = pkt.right.thumbstick_y;
+            }
+            opaque_filled = true;
+        }
+    }
+
+    // Fallback: query the runtime directly if opaque channel has no data.
+    // (Non-CloudXR scenario, or before the headset has sent its first packet.)
+    if !opaque_filled {
+        for (hand_path, hand_state) in [
+            (state.left_hand_path, &mut left),
+            (state.right_hand_path, &mut right),
+        ] {
+            if hand_path == xr::Path::NULL { continue; }
+            for &(action_raw, _hand) in state.trigger_actions.keys() {
+                if let Some(val) = query_float(session, action_raw, hand_path) {
+                    hand_state.trigger = val;
+                    break;
+                }
+            }
+            for &(action_raw, _hand) in state.squeeze_actions.keys() {
+                if let Some(val) = query_float(session, action_raw, hand_path) {
+                    hand_state.squeeze = val;
+                    break;
+                }
+            }
+            if let Some(lock) = THUMBSTICK_ACTIONS.get() {
+                if let Ok(map) = lock.read() {
+                    for &action_raw in map.keys() {
+                        if let Some((x, y)) = query_vector2f(session, action_raw, hand_path) {
+                            hand_state.thumbstick_x = x;
+                            hand_state.thumbstick_y = y;
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
