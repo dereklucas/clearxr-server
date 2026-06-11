@@ -543,7 +543,9 @@ impl DashboardOverlayD3D11 {
         let dst = self.images[image_index as usize];
 
         let pixel_bytes = (self.width * self.height * 4) as usize;
-        if shmem_size < PIXEL_DATA_OFFSET + pixel_bytes {
+        // Double-buffered: the region holds two slots after the header. Require
+        // both. Slot math must match the writer in clearxr-dashboard/src/shm.rs.
+        if shmem_size < PIXEL_DATA_OFFSET + 2 * pixel_bytes {
             // Region is too small to hold pixels (stale mapping from an older
             // run/build). This is the classic "dashboard silently absent" cause,
             // so say it out loud exactly once.
@@ -553,7 +555,7 @@ impl DashboardOverlayD3D11 {
                     warn,
                     "[ClearXR Layer D3D11] SHM region is {} bytes but {} are required; \
                      stale mapping from another ClearXR instance? Restart the streamer.",
-                    shmem_size, PIXEL_DATA_OFFSET + pixel_bytes
+                    shmem_size, PIXEL_DATA_OFFSET + 2 * pixel_bytes
                 );
             }
             // Still release the acquired image — returning while holding it
@@ -567,7 +569,12 @@ impl DashboardOverlayD3D11 {
             }
             return Ok(self.has_rendered);
         }
-        let pixel_ptr = pixel_ptr_raw as *const c_void;
+        // Read the slot the writer just published. It writes the *other* slot
+        // for the next frame, so this copy can't tear. slot_cap must match the
+        // writer's (clearxr-dashboard/src/shm.rs write_pixels).
+        let slot_cap = (shmem_size - PIXEL_DATA_OFFSET) / 2;
+        let slot = (frame_counter & 1) as usize;
+        let pixel_ptr = pixel_ptr_raw.add(slot * slot_cap) as *const c_void;
         let row_pitch = self.width * 4;
         update_subresource(self.d3d11.context_ptr(), dst, pixel_ptr, row_pitch, 0);
 

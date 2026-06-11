@@ -41,7 +41,11 @@ pub struct ShmWriter {
 
 impl ShmWriter {
     pub fn create(width: u32, height: u32) -> Result<Self, ShmemError> {
-        let total_size = HEADER_SIZE + (width * height * 4) as usize;
+        // Double-buffered pixel region: two full frames after the header. The
+        // writer fills the slot for the next frame while the reader is still
+        // copying the previously-published slot, so a ~10 MB reader copy can
+        // never tear against the writer. Slot = frame_counter & 1.
+        let total_size = HEADER_SIZE + 2 * (width * height * 4) as usize;
         let shmem = match ShmemConf::new()
             .size(total_size)
             .os_id(SHM_NAME)
@@ -67,7 +71,7 @@ impl ShmWriter {
             header.gpu_luid = [0; 8];
         }
 
-        log::info!("[ClearXR Dashboard] SHM created: {}x{}, header + pixel buffer ({} bytes)", width, height, total_size);
+        log::info!("[ClearXR Dashboard] SHM created: {}x{}, header + double-buffered pixels ({} bytes)", width, height, total_size);
         Ok(Self { shmem })
     }
 
@@ -103,25 +107,34 @@ impl ShmWriter {
 
     /// Write raw RGBA8_SRGB pixel data into the SHM pixel buffer.
     /// `data` must be exactly `width * height * 4` bytes.
+    ///
+    /// Double-buffered: the data is written to the slot for the *next* frame
+    /// (`(frame_counter + 1) & 1`), which is the slot the reader is NOT reading.
+    /// Call `bump_frame_counter()` immediately after to publish it. The slot
+    /// math here must match the reader in clearxr-layer/src/overlay_d3d11.rs.
     pub fn write_pixels(&self, data: &[u8]) {
-        // Never trust the mapping size: a reused region from a run with
-        // different dimensions would otherwise be overflowed by ~10 MB.
-        let avail = self.shmem.len().saturating_sub(PIXEL_DATA_OFFSET);
-        let n = data.len().min(avail);
+        // Per-slot capacity: half the pixel region. Never trust the mapping
+        // size — a reused region from a run with different dimensions would
+        // otherwise be overflowed.
+        let slot_cap = self.shmem.len().saturating_sub(PIXEL_DATA_OFFSET) / 2;
+        let n = data.len().min(slot_cap);
         if n < data.len() {
             use std::sync::atomic::{AtomicBool, Ordering};
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::Relaxed) {
                 log::error!(
-                    "[ClearXR Dashboard] SHM region too small for a frame ({} < {} bytes); \
+                    "[ClearXR Dashboard] SHM slot too small for a frame ({} < {} bytes); \
                      writing truncated pixels. Close stale ClearXR processes and restart.",
-                    avail,
+                    slot_cap,
                     data.len()
                 );
             }
         }
         unsafe {
-            let base = self.shmem.as_ptr().add(PIXEL_DATA_OFFSET);
+            let header = &*(self.shmem.as_ptr() as *const ShmHeader);
+            let next_frame = header.frame_counter.load(Ordering::Relaxed).wrapping_add(1);
+            let slot = (next_frame & 1) as usize;
+            let base = self.shmem.as_ptr().add(PIXEL_DATA_OFFSET + slot * slot_cap);
             std::ptr::copy_nonoverlapping(data.as_ptr(), base, n);
         }
     }
