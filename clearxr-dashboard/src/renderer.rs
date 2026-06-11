@@ -358,6 +358,7 @@ impl HeadlessRenderer {
         trigger: bool,
         secondary: bool,
         scroll_delta: f32,
+        want_readback: bool,
         build_ui: impl FnMut(&Context),
     ) -> Result<bool> {
         // 1. Build egui input
@@ -542,49 +543,69 @@ impl HeadlessRenderer {
 
             device.cmd_end_render_pass(cmd);
 
-            // Transition render image: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
-            let barrier_to_transfer = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .image(self.render_image)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .level_count(1)
-                        .layer_count(1),
-                )
-                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
-            device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[], &[], &[barrier_to_transfer],
-            );
+            // Move the rendered image to its final layout. Only the D3D11/SHM
+            // consumer path needs the CPU readback copy; with no D3D11 consumer
+            // (Vulkan-only games or idle) we skip the GPU CopyImageToBuffer
+            // entirely and transition straight to GENERAL for Vulkan import.
+            if want_readback {
+                // COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
+                let barrier_to_transfer = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .image(self.render_image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(1)
+                            .layer_count(1),
+                    )
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[], &[], &[barrier_to_transfer],
+                );
 
-            // ── CPU readback path: CopyImageToBuffer → SHM → UpdateSubresource ──
-            let region = vk::BufferImageCopy::default()
-                .buffer_offset(0)
-                .buffer_row_length(0)
-                .buffer_image_height(0)
-                .image_subresource(vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0, base_array_layer: 0, layer_count: 1,
-                })
-                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                .image_extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 });
-            device.cmd_copy_image_to_buffer(
-                cmd,
-                self.render_image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                self.readback_buffer,
-                std::slice::from_ref(&region),
-            );
+                // CopyImageToBuffer → readback buffer → SHM → UpdateSubresource
+                let region = vk::BufferImageCopy::default()
+                    .buffer_offset(0)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0, base_array_layer: 0, layer_count: 1,
+                    })
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .image_extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 });
+                device.cmd_copy_image_to_buffer(
+                    cmd,
+                    self.render_image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    self.readback_buffer,
+                    std::slice::from_ref(&region),
+                );
+            }
 
             // Transition render image → GENERAL (Vulkan games import it by name).
+            // Source layout/stage depend on whether the readback detour ran.
+            let (gen_old_layout, gen_src_stage, gen_src_access) = if want_readback {
+                (
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::AccessFlags::TRANSFER_READ,
+                )
+            } else {
+                (
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                )
+            };
             let barrier_to_general = vk::ImageMemoryBarrier::default()
-                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .old_layout(gen_old_layout)
                 .new_layout(vk::ImageLayout::GENERAL)
                 .image(self.render_image)
                 .subresource_range(
@@ -593,11 +614,11 @@ impl HeadlessRenderer {
                         .level_count(1)
                         .layer_count(1),
                 )
-                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .src_access_mask(gen_src_access)
                 .dst_access_mask(vk::AccessFlags::MEMORY_READ);
             device.cmd_pipeline_barrier(
                 cmd,
-                vk::PipelineStageFlags::TRANSFER,
+                gen_src_stage,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                 vk::DependencyFlags::empty(),
                 &[], &[], &[barrier_to_general],

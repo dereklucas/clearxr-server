@@ -39,7 +39,9 @@ pub(crate) struct ShmHeader {
     pub(crate) panel_orient: [f32; 4],       // 28
     pub(crate) panel_size: [f32; 2],         // 44
     pub(crate) gpu_luid: [u8; 8],           // 52
-    pub(crate) _reserved: [u8; 4],          // 60 -> total 64
+    /// D3D11-consumer liveness counter (the D3D11 overlay bumps this so the
+    /// dashboard knows to keep running the GPU readback). See shm.rs.
+    pub(crate) consumer_heartbeat: AtomicU32, // 60 -> total 64
 }
 
 // Safety: DashboardOverlay is only accessed from the thread that calls xrEndFrame.

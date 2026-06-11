@@ -153,6 +153,14 @@ fn render_loop(
     let mut prev_trigger = false;
     let mut prev_secondary = false;
 
+    // GPU readback gating: only run CopyImageToBuffer when a D3D11 overlay
+    // consumer is live (it bumps consumer_heartbeat). Vulkan consumers import
+    // the shared image directly and never bump it. Keep readback on for a
+    // grace window after the last heartbeat change so brief gaps don't flip it.
+    let mut last_heartbeat = 0u32;
+    let mut readback_idle_frames = u32::MAX; // start idle → no needless readback
+    const READBACK_GRACE_FRAMES: u32 = 90; // ~1s at 90fps
+
     let target_interval = std::time::Duration::from_micros(11_111); // ~90fps
 
     log::info!("[ClearXR Dashboard] Render loop starting. screen_capture={}",
@@ -193,6 +201,16 @@ fn render_loop(
             }
         }
 
+        // Decide whether a D3D11 consumer needs the CPU readback this frame.
+        let hb = shm.consumer_heartbeat();
+        if hb != last_heartbeat {
+            last_heartbeat = hb;
+            readback_idle_frames = 0;
+        } else {
+            readback_idle_frames = readback_idle_frames.saturating_add(1);
+        }
+        let want_readback = readback_idle_frames < READBACK_GRACE_FRAMES;
+
         // Render egui frame
         let has_desktop_tex = renderer.desktop_texture_id().is_some();
         let mut actions = Vec::new();
@@ -201,6 +219,7 @@ fn render_loop(
             trigger,
             secondary,
             scroll_delta,
+            want_readback,
             |ctx| {
                 // Always request repaint so the overlay stays alive across
                 // session transitions (even without input, the FPS counter
@@ -213,7 +232,12 @@ fn render_loop(
 
         match result {
             Ok(true) => {
-                shm.write_pixels(renderer.readback_slice());
+                // Only push pixels when we actually did the readback this frame;
+                // otherwise readback_slice() holds stale data. Always bump the
+                // frame counter so the Vulkan path + pose updates keep flowing.
+                if want_readback {
+                    shm.write_pixels(renderer.readback_slice());
+                }
                 shm.bump_frame_counter();
             }
             Ok(false) => {}

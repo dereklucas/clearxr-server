@@ -482,6 +482,10 @@ impl DashboardOverlayD3D11 {
             let shmem = self.shmem.as_ref().unwrap();
             let header = &*(shmem.as_ptr() as *const ShmHeader);
             let fc = header.frame_counter.load(Ordering::Acquire);
+            // Tell the dashboard a D3D11 consumer is live so it keeps running the
+            // CPU readback (the Vulkan path imports the image directly and never
+            // bumps this, letting the dashboard skip readback for Vulkan-only games).
+            header.consumer_heartbeat.fetch_add(1, Ordering::Relaxed);
             let sz = shmem.len();
             let px = shmem.as_ptr().add(PIXEL_DATA_OFFSET);
             (

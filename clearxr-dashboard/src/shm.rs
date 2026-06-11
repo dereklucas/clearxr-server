@@ -25,7 +25,9 @@ pub struct ShmHeader {
     pub panel_orient: [f32; 4],     // 28
     pub panel_size: [f32; 2],       // 44
     pub gpu_luid: [u8; 8],         // 52
-    pub _reserved: [u8; 4],        // 60 -> total 64
+    /// Liveness counter bumped by the layer's D3D11 overlay each frame it
+    /// consumes SHM pixels. The dashboard gates GPU readback on it advancing.
+    pub consumer_heartbeat: AtomicU32, // 60 -> total 64
 }
 
 pub const HEADER_SIZE: usize = 64;
@@ -69,10 +71,21 @@ impl ShmWriter {
             header.panel_orient = [0.0, 0.0, 0.0, 1.0];
             header.panel_size = [1.6, 1.0];
             header.gpu_luid = [0; 8];
+            header.consumer_heartbeat = AtomicU32::new(0);
         }
 
         log::info!("[ClearXR Dashboard] SHM created: {}x{}, header + double-buffered pixels ({} bytes)", width, height, total_size);
         Ok(Self { shmem })
+    }
+
+    /// D3D11-consumer liveness counter. The layer's D3D11 overlay bumps this
+    /// each frame it reads pixels; if it stops advancing, no D3D11 consumer
+    /// needs the CPU readback and the dashboard can skip it.
+    pub fn consumer_heartbeat(&self) -> u32 {
+        unsafe {
+            let header = &*(self.shmem.as_ptr() as *const ShmHeader);
+            header.consumer_heartbeat.load(Ordering::Acquire)
+        }
     }
 
     pub fn bump_frame_counter(&self) {
@@ -149,6 +162,27 @@ mod tests {
         assert_eq!(std::mem::size_of::<ShmHeader>(), 64);
     }
 
+    /// The readback-gating design (issue #2) requires the layer's `open()`ed
+    /// mapping to be writable, so a D3D11 consumer can post a heartbeat back to
+    /// the dashboard. Prove that a value written through an opened handle is
+    /// observed through the creator's handle (i.e. open() yields RW + shared).
+    #[test]
+    fn test_open_mapping_is_writable() {
+        let name = "ClearXR_test_writable_probe";
+        let creator = ShmemConf::new()
+            .size(128)
+            .os_id(name)
+            .create()
+            .or_else(|_| ShmemConf::new().os_id(name).open())
+            .expect("create probe region");
+        let opened = ShmemConf::new().os_id(name).open().expect("open probe region");
+        unsafe {
+            std::ptr::write_volatile(opened.as_ptr() as *mut u32, 0xDEAD_BEEF);
+            let seen = std::ptr::read_volatile(creator.as_ptr() as *const u32);
+            assert_eq!(seen, 0xDEAD_BEEF, "open()ed SHM mapping is not writable/shared");
+        }
+    }
+
     #[test]
     fn test_shm_header_field_offsets() {
         assert_eq!(memoffset_of!(ShmHeader, frame_counter), 0);
@@ -159,6 +193,7 @@ mod tests {
         assert_eq!(memoffset_of!(ShmHeader, panel_orient), 28);
         assert_eq!(memoffset_of!(ShmHeader, panel_size), 44);
         assert_eq!(memoffset_of!(ShmHeader, gpu_luid), 52);
+        assert_eq!(memoffset_of!(ShmHeader, consumer_heartbeat), 60);
     }
 }
 
