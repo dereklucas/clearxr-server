@@ -213,8 +213,6 @@ fn render_loop(
 
         match result {
             Ok(true) => {
-                // New frame rendered. Write pixels to SHM for D3D11 overlay games,
-                // then bump the frame counter so the layer knows to re-sample.
                 shm.write_pixels(renderer.readback_slice());
                 shm.bump_frame_counter();
             }

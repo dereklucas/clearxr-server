@@ -102,13 +102,13 @@ impl DashboardOverlayD3D11 {
             (2048, 1280)
         };
 
-        let format = pick_d3d11_swapchain_format(next, session)?;
-        let swapchain = create_d3d11_swapchain(next, session, format, width, height)?;
+        let swapchain_format = pick_d3d11_swapchain_format(next, session)?;
+        let swapchain = create_d3d11_swapchain(next, session, swapchain_format, width, height)?;
         let images = enumerate_d3d11_swapchain_images(next, swapchain)?;
         let space = create_stage_space(next, session)?;
 
         // Backface: 1x1 grey swapchain
-        let backface_swapchain = create_d3d11_swapchain(next, session, format, 1, 1)?;
+        let backface_swapchain = create_d3d11_swapchain(next, session, swapchain_format, 1, 1)?;
         let backface_images = enumerate_d3d11_swapchain_images(next, backface_swapchain)?;
         let backface_image = backface_images[0];
 
@@ -465,7 +465,7 @@ impl DashboardOverlayD3D11 {
     /// Returns Ok(true) if the swapchain has valid content (safe to submit as a quad layer),
     /// Ok(false) if no content yet (do NOT submit quad layers), or Err on failure.
     pub unsafe fn render_frame(&mut self, next: &NextDispatch) -> Result<bool, String> {
-        // Try to open SHM if not connected yet
+        // Try to open SHM if not connected yet (needed for pose data AND pixel upload)
         if self.shmem.is_none() {
             if let Ok(s) = ShmemConf::new().os_id(SHM_NAME).open() {
                 log::info!("[ClearXR Layer D3D11] SHM connected.");
@@ -520,15 +520,6 @@ impl DashboardOverlayD3D11 {
             return Ok(false);
         }
 
-        // Read pixel data from SHM (RGBA8_SRGB, written by dashboard after each render).
-        let pixel_bytes = (self.width * self.height * 4) as usize;
-        if shmem_size < PIXEL_DATA_OFFSET + pixel_bytes {
-            // SHM was created with old header-only layout — no pixels available yet.
-            return Ok(self.has_rendered);
-        }
-        let pixel_ptr = pixel_ptr_raw as *const c_void;
-        let row_pitch = self.width * 4;
-
         // Acquire swapchain image
         let mut image_index = 0;
         let r = (next.acquire_swapchain_image)(
@@ -549,15 +540,20 @@ impl DashboardOverlayD3D11 {
 
         let dst = self.images[image_index as usize];
 
-        // Upload SHM pixels to swapchain texture via UpdateSubresource.
-        // No GPU barriers needed — D3D11 handles synchronization internally.
-        update_subresource(
-            self.d3d11.context_ptr(),
-            dst,
-            pixel_ptr,
-            row_pitch,
-            0,
-        );
+        let pixel_bytes = (self.width * self.height * 4) as usize;
+        if shmem_size < PIXEL_DATA_OFFSET + pixel_bytes {
+            let r = (next.release_swapchain_image)(
+                self.swapchain,
+                &xr::SwapchainImageReleaseInfo { ty: xr::SwapchainImageReleaseInfo::TYPE, next: ptr::null() },
+            );
+            if r != xr::Result::SUCCESS {
+                return Err(format!("ReleaseSwapchainImage: {:?}", r));
+            }
+            return Ok(self.has_rendered);
+        }
+        let pixel_ptr = pixel_ptr_raw as *const c_void;
+        let row_pitch = self.width * 4;
+        update_subresource(self.d3d11.context_ptr(), dst, pixel_ptr, row_pitch, 0);
 
         self.last_frame_counter = frame_counter;
 

@@ -19,6 +19,7 @@ const IMAGE_HANDLE_NAME: &[u16] = &[
 ];
 
 
+
 /// User-managed Vulkan texture for the desktop capture image.
 /// Bypasses egui-ash-renderer's set_textures (which does vkQueueWaitIdle)
 /// by uploading directly via our own staging buffer + command buffer.
@@ -83,8 +84,7 @@ pub struct HeadlessRenderer {
     // User-managed desktop texture (bypasses set_textures bottleneck)
     desktop_texture: Option<DesktopTexture>,
 
-    // CPU-accessible readback buffer for SHM pixel export (D3D11 overlay path).
-    // Permanently mapped; written by GPU via CopyImageToBuffer each render frame.
+    // CPU-accessible readback buffer for SHM pixel export.
     readback_buffer: vk::Buffer,
     readback_memory: vk::DeviceMemory,
     readback_ptr: *mut u8,
@@ -313,7 +313,7 @@ impl HeadlessRenderer {
         };
 
         log::info!(
-            "[ClearXR Dashboard] Headless renderer initialized: {}x{}, Vulkan 1.2, shared image + SHM pixel readback",
+            "[ClearXR Dashboard] Headless renderer initialized: {}x{}, Vulkan 1.2",
             width, height
         );
 
@@ -543,7 +543,6 @@ impl HeadlessRenderer {
             device.cmd_end_render_pass(cmd);
 
             // Transition render image: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
-            // so we can copy pixels to the CPU-readable readback buffer.
             let barrier_to_transfer = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
@@ -564,16 +563,14 @@ impl HeadlessRenderer {
                 &[], &[], &[barrier_to_transfer],
             );
 
-            // Copy render image → readback buffer (for SHM pixel export to D3D11 games).
+            // ── CPU readback path: CopyImageToBuffer → SHM → UpdateSubresource ──
             let region = vk::BufferImageCopy::default()
                 .buffer_offset(0)
-                .buffer_row_length(0)   // tightly packed
-                .buffer_image_height(0) // tightly packed
+                .buffer_row_length(0)
+                .buffer_image_height(0)
                 .image_subresource(vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 1,
+                    mip_level: 0, base_array_layer: 0, layer_count: 1,
                 })
                 .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                 .image_extent(vk::Extent3D { width: self.width, height: self.height, depth: 1 });
@@ -585,7 +582,7 @@ impl HeadlessRenderer {
                 std::slice::from_ref(&region),
             );
 
-            // Transition render image: TRANSFER_SRC_OPTIMAL → GENERAL for cross-process sampling.
+            // Transition render image → GENERAL (Vulkan games import it by name).
             let barrier_to_general = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
                 .new_layout(vk::ImageLayout::GENERAL)
@@ -612,13 +609,11 @@ impl HeadlessRenderer {
                 .command_buffers(std::slice::from_ref(&cmd));
             device.queue_submit(self.queue, &[submit], self.flights[slot].fence)?;
 
-            // Wait for the GPU to finish so the shared image is safe to read
-            // by the layer process. The SHM counter is bumped AFTER this returns.
+            // Wait for GPU to finish before releasing shared resources.
             device.wait_for_fences(&[self.flights[slot].fence], true, u64::MAX)?;
         }
 
         // Defer texture frees until this flight's fence is waited on (next use of this slot).
-        // The GPU may still be referencing these textures in the just-submitted command buffer.
         self.flights[slot].pending_free = textures_delta.free;
 
         self.has_rendered = true;
@@ -884,6 +879,7 @@ impl Drop for HeadlessRenderer {
             self.device.unmap_memory(self.readback_memory);
             self.device.destroy_buffer(self.readback_buffer, None);
             self.device.free_memory(self.readback_memory, None);
+
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);

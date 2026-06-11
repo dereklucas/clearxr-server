@@ -654,15 +654,23 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                 next_info: ni.next,
             };
 
-            let result = if has_opaque {
+            // The opaque data channel is Vulkan-specific — the CloudXR runtime rejects
+            // it when combined with XR_KHR_D3D11_enable (returns ERROR_RUNTIME_FAILURE).
+            // Only inject it for Vulkan apps.
+            let orig_ci = &*ci;
+            let orig_count = orig_ci.enabled_extension_count as usize;
+            let app_wants_d3d11 = (0..orig_count).any(|i| {
+                CStr::from_ptr(*orig_ci.enabled_extension_names.add(i)).to_bytes()
+                    == b"XR_KHR_D3D11_enable"
+            });
+
+            let result = if has_opaque && !app_wants_d3d11 {
                 let ext_name: &[u8] = if has_nvx1 {
                     b"XR_NVX1_opaque_data_channel\0"
                 } else {
                     b"XR_NV_opaque_data_channel\0"
                 };
 
-                let orig_ci = &*ci;
-                let orig_count = orig_ci.enabled_extension_count as usize;
                 let mut ext_ptrs: Vec<*const c_char> = Vec::with_capacity(orig_count + 1);
                 for i in 0..orig_count {
                     ext_ptrs.push(*orig_ci.enabled_extension_names.add(i));
@@ -677,8 +685,13 @@ unsafe extern "system" fn layer_create_api_layer_instance(
                     ext_ptrs.len());
                 (next_create)(&modified_ci, &next_layer_ci, instance_out)
             } else {
-                layer_log!(info, "[ClearXR Layer] No opaque channel ext, calling next_create with original {} extensions.",
-                    (*ci).enabled_extension_count);
+                if app_wants_d3d11 {
+                    layer_log!(info, "[ClearXR Layer] D3D11 app — skipping opaque channel injection. Passing {} extensions as-is.",
+                        orig_count);
+                } else {
+                    layer_log!(info, "[ClearXR Layer] No opaque channel ext, calling next_create with original {} extensions.",
+                        orig_count);
+                }
                 (next_create)(ci, &next_layer_ci, instance_out)
             };
 

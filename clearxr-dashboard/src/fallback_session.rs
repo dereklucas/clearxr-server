@@ -39,8 +39,20 @@ impl FallbackSession {
         let thread = std::thread::Builder::new()
             .name("fallback-xr".into())
             .spawn(move || {
-                if let Err(e) = session_loop(kr, ss) {
-                    log::error!("[ClearXR Fallback] Session loop error: {}", e);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(e) = session_loop(kr, ss) {
+                        log::error!("[ClearXR Fallback] Session loop error: {}", e);
+                    }
+                }));
+                if let Err(panic) = result {
+                    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    log::error!("[ClearXR Fallback] Session loop PANICKED: {}", msg);
                 }
             })
             .map_err(|e| format!("Failed to spawn fallback thread: {e}"))?;
@@ -105,15 +117,18 @@ fn session_loop(
     // Check for Vulkan support
     let available_extensions = entry.enumerate_extensions()
         .map_err(|e| format!("enumerate extensions: {e}"))?;
-    if !available_extensions.khr_vulkan_enable2 && !available_extensions.khr_vulkan_enable {
-        return Err("Runtime does not support Vulkan".into());
+    if !available_extensions.khr_vulkan_enable {
+        return Err("Runtime does not support XR_KHR_vulkan_enable".into());
     }
 
+    // Always use khr_vulkan_enable (not enable2): run_session uses vulkan_legacy_*
+    // APIs which require this extension. All runtimes that support enable2 also
+    // support enable.
     let mut required_exts = xr::ExtensionSet::default();
-    if available_extensions.khr_vulkan_enable2 {
-        required_exts.khr_vulkan_enable2 = true;
-    } else {
+    if available_extensions.khr_vulkan_enable {
         required_exts.khr_vulkan_enable = true;
+    } else {
+        return Err("Runtime does not support XR_KHR_vulkan_enable (required for fallback session)".into());
     }
 
     let instance = entry.create_instance(&app_info, &required_exts, &[])
