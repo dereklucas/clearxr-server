@@ -50,6 +50,7 @@ pub struct DashboardOverlayD3D11 {
     d3d11: D3D11Backend,
     last_frame_counter: u32,
     has_rendered: bool,
+    shm_layout_warned: bool,
     // SHM reader
     shmem: Option<Shmem>,
     // Pipe client for controller input
@@ -85,11 +86,11 @@ impl DashboardOverlayD3D11 {
         // Try to open SHM
         let shmem = match ShmemConf::new().os_id(SHM_NAME).open() {
             Ok(s) => {
-                log::info!("[ClearXR Layer D3D11] SHM opened: {}", SHM_NAME);
+                layer_log!(info, "[ClearXR Layer D3D11] SHM opened: {}", SHM_NAME);
                 Some(s)
             }
             Err(e) => {
-                log::warn!("[ClearXR Layer D3D11] SHM not available yet: {e}");
+                layer_log!(warn, "[ClearXR Layer D3D11] SHM not available yet: {e}");
                 None
             }
         };
@@ -129,6 +130,7 @@ impl DashboardOverlayD3D11 {
             d3d11,
             last_frame_counter: 0,
             has_rendered: false,
+            shm_layout_warned: false,
             shmem,
             #[cfg(target_os = "windows")]
             pipe,
@@ -401,7 +403,7 @@ impl DashboardOverlayD3D11 {
         );
 
         self.backface_initialized = true;
-        log::info!("[ClearXR Layer D3D11] Backface initialized (dark grey 1x1).");
+        layer_log!(info, "[ClearXR Layer D3D11] Backface initialized (dark grey 1x1).");
         Ok(())
     }
 
@@ -468,7 +470,7 @@ impl DashboardOverlayD3D11 {
         // Try to open SHM if not connected yet (needed for pose data AND pixel upload)
         if self.shmem.is_none() {
             if let Ok(s) = ShmemConf::new().os_id(SHM_NAME).open() {
-                log::info!("[ClearXR Layer D3D11] SHM connected.");
+                layer_log!(info, "[ClearXR Layer D3D11] SHM connected.");
                 self.shmem = Some(s);
             } else {
                 return Ok(self.has_rendered);
@@ -507,7 +509,7 @@ impl DashboardOverlayD3D11 {
         // Initialize backface grey card (once)
         if !self.backface_initialized {
             if let Err(e) = self.init_backface(next) {
-                log::warn!("[ClearXR Layer D3D11] Backface init failed: {e}");
+                layer_log!(warn, "[ClearXR Layer D3D11] Backface init failed: {e}");
             }
         }
 
@@ -542,6 +544,20 @@ impl DashboardOverlayD3D11 {
 
         let pixel_bytes = (self.width * self.height * 4) as usize;
         if shmem_size < PIXEL_DATA_OFFSET + pixel_bytes {
+            // Region is too small to hold pixels (stale mapping from an older
+            // run/build). This is the classic "dashboard silently absent" cause,
+            // so say it out loud exactly once.
+            if !self.shm_layout_warned {
+                self.shm_layout_warned = true;
+                layer_log!(
+                    warn,
+                    "[ClearXR Layer D3D11] SHM region is {} bytes but {} are required; \
+                     stale mapping from another ClearXR instance? Restart the streamer.",
+                    shmem_size, PIXEL_DATA_OFFSET + pixel_bytes
+                );
+            }
+            // Still release the acquired image — returning while holding it
+            // leaks one acquire per frame.
             let r = (next.release_swapchain_image)(
                 self.swapchain,
                 &xr::SwapchainImageReleaseInfo { ty: xr::SwapchainImageReleaseInfo::TYPE, next: ptr::null() },
@@ -593,7 +609,7 @@ impl Drop for DashboardOverlayD3D11 {
                 windows_sys::Win32::Foundation::CloseHandle(h);
             }
         }
-        log::info!("[ClearXR Layer D3D11] DashboardOverlayD3D11 destroyed.");
+        layer_log!(info, "[ClearXR Layer D3D11] DashboardOverlayD3D11 destroyed.");
     }
 }
 

@@ -5,9 +5,7 @@
 /// touch and button click events from PS Sense controllers, working around
 /// CloudXR bugs.
 
-mod d3d11_backend;
 mod opaque;
-mod overlay_d3d11;
 mod vk_backend;
 
 use opaque::*;
@@ -179,6 +177,8 @@ macro_rules! layer_log {
 }
 
 mod overlay;
+mod d3d11_backend;
+mod overlay_d3d11;
 
 #[repr(C)]
 pub struct NegotiateLoaderInfo {

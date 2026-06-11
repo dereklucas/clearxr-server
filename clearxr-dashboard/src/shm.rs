@@ -7,7 +7,9 @@ use shared_memory::{Shmem, ShmemConf, ShmemError};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Name of the shared memory region.
-pub const SHM_NAME: &str = "ClearXR_Dashboard_Meta";
+// v2: the region now carries pixel data after the header. Bumped name so a
+// stale header-only region from an older build can never be reused by mistake.
+pub const SHM_NAME: &str = "ClearXR_Dashboard_v2";
 
 /// Named Vulkan handle for the shared image (must match layer's overlay.rs).
 pub const IMAGE_HANDLE_NAME: &str = "ClearXR_DashboardImage";
@@ -102,9 +104,25 @@ impl ShmWriter {
     /// Write raw RGBA8_SRGB pixel data into the SHM pixel buffer.
     /// `data` must be exactly `width * height * 4` bytes.
     pub fn write_pixels(&self, data: &[u8]) {
+        // Never trust the mapping size: a reused region from a run with
+        // different dimensions would otherwise be overflowed by ~10 MB.
+        let avail = self.shmem.len().saturating_sub(PIXEL_DATA_OFFSET);
+        let n = data.len().min(avail);
+        if n < data.len() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                log::error!(
+                    "[ClearXR Dashboard] SHM region too small for a frame ({} < {} bytes); \
+                     writing truncated pixels. Close stale ClearXR processes and restart.",
+                    avail,
+                    data.len()
+                );
+            }
+        }
         unsafe {
             let base = self.shmem.as_ptr().add(PIXEL_DATA_OFFSET);
-            std::ptr::copy_nonoverlapping(data.as_ptr(), base, data.len());
+            std::ptr::copy_nonoverlapping(data.as_ptr(), base, n);
         }
     }
 }

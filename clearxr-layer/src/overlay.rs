@@ -10,7 +10,9 @@ use std::mem::MaybeUninit;
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub(crate) const SHM_NAME: &str = "ClearXR_Dashboard_Meta";
+// v2: the region now carries pixel data after the header. Bumped name so a
+// stale header-only region from an older build can never be reused by mistake.
+pub(crate) const SHM_NAME: &str = "ClearXR_Dashboard_v2";
 pub(crate) const PIPE_NAME: &str = r"\\.\pipe\ClearXR_Controller_Input";
 /// Byte offset within SHM where RGBA8_SRGB pixel data begins (matches shm.rs PIXEL_DATA_OFFSET).
 pub(crate) const PIXEL_DATA_OFFSET: usize = 64; // = HEADER_SIZE
@@ -65,6 +67,7 @@ pub struct DashboardOverlay {
     last_frame_counter: u32,
     has_rendered: bool,
     shared_resources_imported: bool,
+    import_fail_count: u32,
     // SHM reader
     shmem: Option<Shmem>,
     // Pipe client for controller input
@@ -101,11 +104,11 @@ impl DashboardOverlay {
         // Try to open SHM (dashboard process may not have created it yet)
         let shmem = match ShmemConf::new().os_id(SHM_NAME).open() {
             Ok(s) => {
-                log::info!("[ClearXR Layer] SHM opened: {}", SHM_NAME);
+                layer_log!(info, "[ClearXR Layer] SHM opened: {}", SHM_NAME);
                 Some(s)
             }
             Err(e) => {
-                log::warn!("[ClearXR Layer] SHM not available yet: {e}");
+                layer_log!(warn, "[ClearXR Layer] SHM not available yet: {e}");
                 None
             }
         };
@@ -167,6 +170,7 @@ impl DashboardOverlay {
             last_frame_counter: 0,
             has_rendered: false,
             shared_resources_imported: false,
+            import_fail_count: 0,
             shmem,
             #[cfg(target_os = "windows")]
             pipe,
@@ -210,15 +214,19 @@ impl DashboardOverlay {
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::TRANSFER_SRC)
             .push_next(&mut external_image_info);
-        self.shared_image = device.create_image(&image_ci, None)
+        let image = device.create_image(&image_ci, None)
             .map_err(|e| format!("create shared image: {e}"))?;
 
         // Query memory requirements for the imported image
-        let mem_reqs = device.get_image_memory_requirements(self.shared_image);
-        let mem_type = self.vk.find_memory_type(
+        let mem_reqs = device.get_image_memory_requirements(image);
+        let Some(mem_type) = self.vk.find_memory_type(
             mem_reqs.memory_type_bits,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        ).ok_or("No DEVICE_LOCAL memory type for shared image")?;
+        ) else {
+            // Clean up: this retries every frame, so a leak here is 90 images/s.
+            device.destroy_image(image, None);
+            return Err("No DEVICE_LOCAL memory type for shared image".into());
+        };
 
         // Import memory via named Win32 handle (null handle + name = name-based import)
         let mut import_win32_info = vk::ImportMemoryWin32HandleInfoKHR::default()
@@ -226,18 +234,28 @@ impl DashboardOverlay {
             .handle(vk::HANDLE::default())
             .name(IMAGE_HANDLE_NAME.as_ptr());
         let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default()
-            .image(self.shared_image);
+            .image(image);
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_reqs.size)
             .memory_type_index(mem_type)
             .push_next(&mut dedicated_info)
             .push_next(&mut import_win32_info);
-        self.shared_image_memory = device.allocate_memory(&alloc_info, None)
-            .map_err(|e| format!("import shared image memory: {e}"))?;
-        device.bind_image_memory(self.shared_image, self.shared_image_memory, 0)
-            .map_err(|e| format!("bind shared image memory: {e}"))?;
+        let memory = match device.allocate_memory(&alloc_info, None) {
+            Ok(m) => m,
+            Err(e) => {
+                device.destroy_image(image, None);
+                return Err(format!("import shared image memory: {e}"));
+            }
+        };
+        if let Err(e) = device.bind_image_memory(image, memory, 0) {
+            device.free_memory(memory, None);
+            device.destroy_image(image, None);
+            return Err(format!("bind shared image memory: {e}"));
+        }
+        self.shared_image = image;
+        self.shared_image_memory = memory;
 
-        log::info!(
+        layer_log!(info, 
             "[ClearXR Layer] Shared image imported: {}x{}, mem_type={}",
             self.width, self.height, mem_type
         );
@@ -553,7 +571,7 @@ impl DashboardOverlay {
             &xr::SwapchainImageReleaseInfo { ty: xr::SwapchainImageReleaseInfo::TYPE, next: ptr::null() });
 
         self.backface_initialized = true;
-        log::info!("[ClearXR Layer] Backface initialized (dark grey 1x1).");
+        layer_log!(info, "[ClearXR Layer] Backface initialized (dark grey 1x1).");
         Ok(())
     }
 
@@ -621,7 +639,7 @@ impl DashboardOverlay {
         // Try to open SHM if not connected yet
         if self.shmem.is_none() {
             if let Ok(s) = ShmemConf::new().os_id(SHM_NAME).open() {
-                log::info!("[ClearXR Layer] SHM connected.");
+                layer_log!(info, "[ClearXR Layer] SHM connected.");
                 self.shmem = Some(s);
             } else {
                 return Ok(self.has_rendered); // Dashboard not running yet
@@ -652,15 +670,28 @@ impl DashboardOverlay {
         // Import shared Vulkan resources (retry each frame until dashboard is ready)
         if !self.shared_resources_imported {
             match self.import_shared_resources() {
-                Ok(()) => {}
-                Err(_) => return Ok(false), // Dashboard not ready yet — retry next frame
+                Ok(()) => {
+                    self.import_fail_count = 0;
+                }
+                Err(e) => {
+                    self.import_fail_count += 1;
+                    // Never retry silently: log the first failure, then ~every 5s.
+                    if self.import_fail_count == 1 || self.import_fail_count % 450 == 0 {
+                        layer_log!(
+                            warn,
+                            "[ClearXR Layer] Shared image import failing (attempt {}): {}",
+                            self.import_fail_count, e
+                        );
+                    }
+                    return Ok(false); // Retry next frame
+                }
             }
         }
 
         // Initialize backface grey card (once)
         if !self.backface_initialized {
             if let Err(e) = self.init_backface(next) {
-                log::warn!("[ClearXR Layer] Backface init failed: {e}");
+                layer_log!(warn, "[ClearXR Layer] Backface init failed: {e}");
             }
         }
 
@@ -828,7 +859,7 @@ impl Drop for DashboardOverlay {
                 windows_sys::Win32::Foundation::CloseHandle(h);
             }
         }
-        log::info!("[ClearXR Layer] DashboardOverlay destroyed.");
+        layer_log!(info, "[ClearXR Layer] DashboardOverlay destroyed.");
     }
 }
 
@@ -902,7 +933,7 @@ pub(crate) unsafe fn create_stage_space(next: &NextDispatch, session: xr::Sessio
     if r != xr::Result::SUCCESS {
         // Fall back to LOCAL if STAGE isn't supported
         if r == xr::Result::ERROR_REFERENCE_SPACE_UNSUPPORTED {
-            log::warn!("[ClearXR Layer] STAGE space not supported, falling back to LOCAL.");
+            layer_log!(warn, "[ClearXR Layer] STAGE space not supported, falling back to LOCAL.");
             let ci_local = xr::ReferenceSpaceCreateInfo {
                 ty: xr::ReferenceSpaceCreateInfo::TYPE, next: ptr::null(),
                 reference_space_type: xr::ReferenceSpaceType::LOCAL,
@@ -1039,7 +1070,7 @@ pub(crate) fn connect_pipe() -> Option<windows_sys::Win32::Foundation::HANDLE> {
     if handle == -1isize as windows_sys::Win32::Foundation::HANDLE {
         None
     } else {
-        log::info!("[ClearXR Layer] Pipe connected: {}", PIPE_NAME);
+        layer_log!(info, "[ClearXR Layer] Pipe connected: {}", PIPE_NAME);
         Some(handle)
     }
 }
