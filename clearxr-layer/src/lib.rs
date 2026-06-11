@@ -637,6 +637,12 @@ unsafe extern "system" fn layer_create_api_layer_instance(
             *NEXT_GPA.lock().unwrap() = Some(next_gpa);
             *NEXT_CREATE.lock().unwrap() = Some(next_create);
 
+            // Dump the runtime's full extension list once. Settles the
+            // multi-client/overlay architecture question empirically: if
+            // XR_EXTX_overlay enumerates, a standalone dashboard overlay client
+            // is viable and the fallback-session baton-pass can be retired.
+            log_runtime_extensions(next_gpa);
+
             // Check if opaque data channel extension is available
             layer_log!(info, "[ClearXR Layer] Checking for opaque data channel extension...");
             let has_nvx1 = check_extension_available(next_gpa, "XR_NVX1_opaque_data_channel");
@@ -819,6 +825,67 @@ unsafe fn check_extension_available(
         }
     }
     false
+}
+
+/// Dump the runtime's full OpenXR extension list to the layer log (once per
+/// instance creation), flagging XR_EXTX_overlay. This is the empirical test for
+/// whether this runtime (NVIDIA CloudXR, reportedly Monado-based) supports the
+/// multi-client overlay model — if the extension enumerates, a standalone
+/// dashboard overlay client is possible.
+unsafe fn log_runtime_extensions(next_gpa: xr::pfn::GetInstanceProcAddr) {
+    let mut fp: Option<xr::pfn::VoidFunction> = None;
+    let r = (next_gpa)(
+        xr::Instance::NULL,
+        b"xrEnumerateInstanceExtensionProperties\0".as_ptr() as *const c_char,
+        &mut fp,
+    );
+    let enumerate: xr::pfn::EnumerateInstanceExtensionProperties = match fp {
+        Some(f) => std::mem::transmute(f),
+        None => {
+            layer_log!(warn, "[ClearXR Layer] Extension dump: could not load xrEnumerateInstanceExtensionProperties (result={:?})", r);
+            return;
+        }
+    };
+
+    let mut count: u32 = 0;
+    let r = (enumerate)(std::ptr::null(), 0, &mut count, std::ptr::null_mut());
+    if r != xr::Result::SUCCESS || count == 0 {
+        layer_log!(warn, "[ClearXR Layer] Extension dump: enumerate(count) failed: {:?}, count={}", r, count);
+        return;
+    }
+
+    let mut props: Vec<xr::ExtensionProperties> = vec![
+        xr::ExtensionProperties {
+            ty: xr::ExtensionProperties::TYPE,
+            next: std::ptr::null_mut(),
+            extension_name: [0; 128],
+            extension_version: 0,
+        };
+        count as usize
+    ];
+    let r = (enumerate)(std::ptr::null(), count, &mut count, props.as_mut_ptr());
+    if r != xr::Result::SUCCESS {
+        layer_log!(warn, "[ClearXR Layer] Extension dump: enumerate(props) failed: {:?}", r);
+        return;
+    }
+
+    layer_log!(info, "[ClearXR Layer] ===== Runtime exposes {} OpenXR extension(s) =====", count);
+    let mut has_overlay = false;
+    for p in &props {
+        let name = CStr::from_ptr(p.extension_name.as_ptr());
+        if let Ok(s) = name.to_str() {
+            layer_log!(info, "[ClearXR Layer]   ext: {} (v{})", s, p.extension_version);
+            if s == "XR_EXTX_overlay" {
+                has_overlay = true;
+            }
+        }
+    }
+    layer_log!(
+        info,
+        "[ClearXR Layer] ===== XR_EXTX_overlay present: {} — multi-client overlay dashboard {} =====",
+        has_overlay,
+        if has_overlay { "is worth testing (pass XrSessionCreateInfoOverlayEXTX)" } else { "NOT supported by this runtime" }
+    );
 }
 
 /// Load a function pointer from the next layer's dispatch.
