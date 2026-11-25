@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>ClearXR — Split Panel Launcher</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: transparent;
+    color: #e0e0e8;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #0a0a14 0%, #12121e 50%, #0e0e1a 100%);
+  }
+
+  .panel {
+    width: 1024px;
+    height: 640px;
+    display: flex;
+    position: relative;
+    border-radius: 18px;
+    overflow: hidden;
+    background: rgba(10, 10, 18, 0.82);
+    backdrop-filter: blur(40px);
+    -webkit-backdrop-filter: blur(40px);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.4),
+      0 24px 80px rgba(0, 0, 0, 0.6),
+      0 0 120px rgba(0, 229, 255, 0.03);
+  }
+
+  /* ─── LEFT COLUMN ─── */
+  .left-col {
+    width: 358px;
+    min-width: 358px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: rgba(12, 12, 20, 0.75);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    position: relative;
+    z-index: 2;
+  }
+
+  .left-header {
+    padding: 20px 22px 14px;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-shrink: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .left-header .brand {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: #00e5ff;
+    text-transform: uppercase;
+  }
+
+  .left-header .count {
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.3);
+    letter-spacing: 0.5px;
+  }
+
+  .game-list {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 6px 0;
+  }
+
+  /* Custom scrollbar */
+  .game-list::-webkit-scrollbar {
+    width: 4px;
+  }
+  .game-list::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .game-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+  }
+  .game-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .game-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 64px;
+    padding: 8px 18px 8px 18px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    border-left: 3px solid transparent;
+    position: relative;
+    user-select: none;
+  }
+
+  .game-row:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .game-row.selected {
+    border-left-color: #00e5ff;
+    background: rgba(0, 229, 255, 0.08);
+  }
+
+  .game-row.selected .row-title {
+    color: #fff;
+  }
+
+  .row-thumb {
+    width: 80px;
+    height: 45px;
+    border-radius: 5px;
+    overflow: hidden;
+    flex-shrink: 0;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .row-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .row-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .row-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.82);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+    transition: color 0.15s ease;
+  }
+
+  .row-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.3);
+    letter-spacing: 0.3px;
+  }
+
+  .row-badge .dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #4fc3f7;
+    flex-shrink: 0;
+  }
+
+  /* ─── RIGHT PANEL ─── */
+  .right-panel {
+    flex: 1;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero-area {
+    position: relative;
+    width: 100%;
+    height: 55%;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .hero-img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: opacity 0.3s ease;
+  }
+
+  .hero-img.fade-out {
+    opacity: 0;
+  }
+
+  .hero-gradient {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 60%;
+    background: linear-gradient(to top, rgba(10, 10, 18, 1) 0%, rgba(10, 10, 18, 0.7) 40%, transparent 100%);
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .detail-area {
+    flex: 1;
+    padding: 0 32px 24px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    z-index: 2;
+    margin-top: -20px;
+  }
+
+  .detail-title {
+    font-size: 24px;
+    font-weight: 700;
+    color: #fff;
+    line-height: 1.25;
+    margin-bottom: 8px;
+    transition: opacity 0.3s ease;
+  }
+
+  .detail-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    transition: opacity 0.3s ease;
+  }
+
+  .meta-tag {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: #4fc3f7;
+    background: rgba(0, 229, 255, 0.08);
+    padding: 3px 10px;
+    border-radius: 4px;
+    border: 1px solid rgba(0, 229, 255, 0.12);
+  }
+
+  .meta-info {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.4);
+    font-weight: 500;
+  }
+
+  .detail-desc {
+    font-size: 14px;
+    line-height: 1.6;
+    color: rgba(255, 255, 255, 0.5);
+    max-height: 68px;
+    overflow: hidden;
+    flex-shrink: 0;
+    transition: opacity 0.3s ease;
+  }
+
+  .detail-actions {
+    margin-top: auto;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 14px;
+    padding-top: 12px;
+  }
+
+  .btn-launch {
+    min-height: 48px;
+    padding: 0 40px;
+    border: none;
+    border-radius: 24px;
+    background: linear-gradient(135deg, #00e5ff 0%, #00b8d4 100%);
+    color: #0a0a14;
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease;
+    box-shadow: 0 4px 20px rgba(0, 229, 255, 0.25);
+    user-select: none;
+  }
+
+  .btn-launch:hover {
+    transform: scale(1.04);
+    box-shadow: 0 6px 28px rgba(0, 229, 255, 0.35);
+  }
+
+  .btn-launch:active {
+    transform: scale(0.97);
+    box-shadow: 0 2px 12px rgba(0, 229, 255, 0.2);
+  }
+
+  .btn-secondary {
+    min-height: 48px;
+    padding: 0 22px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 24px;
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(255, 255, 255, 0.5);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    user-select: none;
+  }
+
+  .btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.07);
+    border-color: rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  /* Crossfade detail text */
+  .detail-area.transitioning .detail-title,
+  .detail-area.transitioning .detail-meta,
+  .detail-area.transitioning .detail-desc {
+    opacity: 0;
+  }
+</style>
+</head>
+<body>
+
+<div class="panel">
+  <!-- LEFT COLUMN -->
+  <div class="left-col">
+    <div class="left-header">
+      <span class="brand">ClearXR</span>
+      <span class="count" id="gameCount">8 games</span>
+    </div>
+    <div class="game-list" id="gameList"></div>
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div class="right-panel">
+    <div class="hero-area">
+      <img class="hero-img" id="heroImg" src="" alt="">
+      <img class="hero-img fade-out" id="heroImgNext" src="" alt="">
+      <div class="hero-gradient"></div>
+    </div>
+    <div class="detail-area" id="detailArea">
+      <div class="detail-title" id="detailTitle"></div>
+      <div class="detail-meta" id="detailMeta"></div>
+      <div class="detail-desc" id="detailDesc"></div>
+      <div class="detail-actions">
+        <button class="btn-secondary" onclick="onInfo()">Details</button>
+        <button class="btn-launch" id="btnLaunch" onclick="onLaunch()">Launch</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const games = [
+  {
+    appid: 546560,
+    title: "Half-Life: Alyx",
+    source: "Steam",
+    platform: "SteamVR",
+    desc: "Valve's return to the Half-Life universe in a full-length VR game. Lean around a filtered corner to make an impossible shot. Rummage through shelves to find healing syringes and ammunition."
+  },
+  {
+    appid: 620980,
+    title: "Beat Saber",
+    source: "Steam",
+    platform: "SteamVR",
+    desc: "Beat Saber is an immersive rhythm experience where you slash the beats of adrenaline-pumping music as they fly towards you. Use your sabers to slash the beats as they come at you."
+  },
+  {
+    appid: 823500,
+    title: "BONEWORKS",
+    source: "Steam",
+    platform: "SteamVR",
+    desc: "An experimental physics VR adventure. Explore a mysterious virtual world with advanced physics interactions. Use anything as a weapon, solve physics puzzles, and fight your way through."
+  },
+  {
+    appid: 555160,
+    title: "Phasmophobia",
+    source: "Steam",
+    platform: "SteamVR",
+    desc: "Phasmophobia is a cooperative ghost hunting horror game. You and your team of paranormal investigators will enter haunted locations filled with paranormal activity and gather evidence."
+  },
+  {
+    appid: 617830,
+    title: "SUPERHOT VR",
+    source: "Steam",
+    platform: "SteamVR",
+    desc: "Time moves only when you move. SUPERHOT VR is the definitive VR experience. Disarm enemies, dodge bullets in slow-motion, and conquer waves of crystalline foes."
+  },
+  {
+    appid: 418650,
+    title: "Space Pirate Trainer",
+    source: "Steam",
+    platform: "SteamVR",
+    desc: "The official trainer for wannabe space pirates. Pick up your blasters and fight off relentless waves of droids. Dodge lasers, grab your shield, and go for the high score."
+  },
+  {
+    appid: 611670,
+    title: "Blade & Sorcery",
+    source: "Steam",
+    platform: "SteamVR",
+    desc: "A medieval fantasy sandbox built exclusively for VR. Become a powerful warrior, sorcerer, or both. Wield swords, axes, and magic with realistic physics-driven combat."
+  },
+  {
+    appid: 916840,
+    title: "Pistol Whip",
+    source: "Steam",
+    platform: "SteamVR",
+    desc: "Pistol Whip is an unstoppable VR action-rhythm journey. Dodge bullets, blast enemies, and feel like the hero of your own cinematic action scene set to an energizing soundtrack."
+  }
+];
+
+let selectedIndex = 0;
+let isTransitioning = false;
+
+function headerUrl(appid) {
+  return `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/header.jpg`;
+}
+
+function capsuleUrl(appid) {
+  return `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/capsule_616x353.jpg`;
+}
+
+function buildList() {
+  const list = document.getElementById('gameList');
+  list.innerHTML = '';
+  games.forEach((game, i) => {
+    const row = document.createElement('div');
+    row.className = 'game-row' + (i === selectedIndex ? ' selected' : '');
+    row.setAttribute('data-index', i);
+    row.innerHTML = `
+      <div class="row-thumb"><img src="${headerUrl(game.appid)}" alt="" loading="lazy"></div>
+      <div class="row-info">
+        <div class="row-title">${game.title}</div>
+        <div class="row-badge"><span class="dot"></span>${game.source} &middot; ${game.platform}</div>
+      </div>
+    `;
+    row.addEventListener('click', () => selectGame(i));
+    list.appendChild(row);
+  });
+}
+
+function selectGame(index) {
+  if (index === selectedIndex || isTransitioning) return;
+  isTransitioning = true;
+
+  // Update list selection
+  const rows = document.querySelectorAll('.game-row');
+  rows.forEach(r => r.classList.remove('selected'));
+  rows[index].classList.add('selected');
+
+  // Scroll into view if needed
+  rows[index].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+
+  const game = games[index];
+
+  // Crossfade hero image
+  const heroImg = document.getElementById('heroImg');
+  const heroImgNext = document.getElementById('heroImgNext');
+  heroImgNext.src = capsuleUrl(game.appid);
+  heroImgNext.onload = () => {
+    heroImgNext.classList.remove('fade-out');
+    heroImg.classList.add('fade-out');
+    setTimeout(() => {
+      heroImg.src = heroImgNext.src;
+      heroImg.classList.remove('fade-out');
+      heroImgNext.classList.add('fade-out');
+      isTransitioning = false;
+    }, 300);
+  };
+  // Fallback in case image is cached
+  if (heroImgNext.complete) {
+    heroImgNext.classList.remove('fade-out');
+    heroImg.classList.add('fade-out');
+    setTimeout(() => {
+      heroImg.src = heroImgNext.src;
+      heroImg.classList.remove('fade-out');
+      heroImgNext.classList.add('fade-out');
+      isTransitioning = false;
+    }, 300);
+  }
+
+  // Crossfade detail text
+  const detailArea = document.getElementById('detailArea');
+  detailArea.classList.add('transitioning');
+  setTimeout(() => {
+    updateDetail(game);
+    detailArea.classList.remove('transitioning');
+  }, 150);
+
+  selectedIndex = index;
+}
+
+function updateDetail(game) {
+  document.getElementById('detailTitle').textContent = game.title;
+  document.getElementById('detailMeta').innerHTML = `
+    <span class="meta-tag">${game.source}</span>
+    <span class="meta-info">${game.platform}</span>
+    <span class="meta-info">App ID: ${game.appid}</span>
+  `;
+  document.getElementById('detailDesc').textContent = game.desc;
+}
+
+function onLaunch() {
+  const game = games[selectedIndex];
+  const btn = document.getElementById('btnLaunch');
+  btn.textContent = 'Launching...';
+  btn.style.background = 'linear-gradient(135deg, #00b8d4 0%, #0097a7 100%)';
+  setTimeout(() => {
+    btn.textContent = 'Launch';
+    btn.style.background = '';
+    alert(`Launching: ${game.title} (Steam AppID: ${game.appid})`);
+  }, 800);
+}
+
+function onInfo() {
+  const game = games[selectedIndex];
+  window.open(`https://store.steampowered.com/app/${game.appid}/`, '_blank');
+}
+
+// Init
+buildList();
+const firstGame = games[0];
+document.getElementById('heroImg').src = capsuleUrl(firstGame.appid);
+updateDetail(firstGame);
+</script>
+
+</body>
+</html>

@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024, height=640">
+<title>ClearXR — Living Gallery</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    font-family: 'Inter', system-ui, -apple-serif, sans-serif;
+    background: rgba(6, 6, 12, 0.88);
+    color: #e8e8ef;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    padding: 16px 20px 12px;
+  }
+
+  /* ── Top bar ── */
+  .top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    flex-shrink: 0;
+  }
+
+  .top-bar h1 {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: rgba(255,255,255,0.55);
+    text-transform: uppercase;
+  }
+
+  .top-bar .count {
+    font-size: 13px;
+    color: rgba(255,255,255,0.3);
+    font-weight: 400;
+  }
+
+  /* ── Grid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-auto-rows: minmax(0, 1fr);
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* ── Card ── */
+  .card {
+    position: relative;
+    border-radius: 10px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: all 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+    background: #0c0c16;
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+  }
+
+  .card .art {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+                filter 0.4s ease;
+  }
+
+  .card .title-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 28px 10px 8px;
+    background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
+    transition: opacity 0.3s ease;
+  }
+
+  .card .title-overlay .title {
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.7);
+  }
+
+  .card .title-overlay .source {
+    font-size: 10px;
+    color: rgba(255,255,255,0.4);
+    margin-top: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* Hover */
+  .card:not(.expanded):hover {
+    transform: translateY(-3px) scale(1.02);
+    outline-color: rgba(0, 220, 255, 0.25);
+    z-index: 2;
+  }
+
+  .card:not(.expanded):hover .art {
+    filter: brightness(1.15);
+  }
+
+  /* ── Expanded card ── */
+  .card.expanded {
+    grid-column: span 2;
+    grid-row: span 2;
+    outline-color: rgba(0, 220, 255, 0.35);
+    z-index: 10;
+    cursor: default;
+  }
+
+  .card.expanded .art {
+    position: absolute;
+    inset: 0;
+    bottom: 50%;
+  }
+
+  .card.expanded .title-overlay {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .card.expanded .detail {
+    opacity: 1;
+    pointer-events: auto;
+    transition-delay: 0.15s;
+  }
+
+  /* ── Detail panel (inside expanded card) ── */
+  .detail {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: 48%;
+    padding: 12px 16px 14px;
+    background: linear-gradient(to top, rgba(6, 6, 14, 0.97) 60%, rgba(6, 6, 14, 0.85) 85%, transparent 100%);
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+
+  .detail .detail-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 2px;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.5);
+  }
+
+  .detail .detail-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .detail .badge {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: rgba(0, 200, 255, 0.15);
+    color: #5cd8f0;
+    border: 1px solid rgba(0, 200, 255, 0.2);
+  }
+
+  .detail .playtime {
+    font-size: 11px;
+    color: rgba(255,255,255,0.35);
+  }
+
+  .detail .desc {
+    font-size: 13px;
+    line-height: 1.45;
+    color: rgba(255,255,255,0.55);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+
+  .detail .actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .btn-launch {
+    padding: 10px 36px;
+    font-size: 15px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    background: linear-gradient(135deg, #00d4ff 0%, #00b8d4 50%, #0097a7 100%);
+    color: #000f14;
+    box-shadow: 0 0 20px rgba(0, 210, 255, 0.3), 0 4px 12px rgba(0,0,0,0.4);
+    transition: all 0.2s ease;
+  }
+
+  .btn-launch:hover {
+    background: linear-gradient(135deg, #33e0ff 0%, #00d4ff 50%, #00b8d4 100%);
+    box-shadow: 0 0 30px rgba(0, 210, 255, 0.45), 0 4px 16px rgba(0,0,0,0.4);
+    transform: scale(1.04);
+  }
+
+  .btn-collapse {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.5);
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+  }
+
+  .btn-collapse:hover {
+    background: rgba(255,255,255,0.12);
+    color: #fff;
+    border-color: rgba(255,255,255,0.3);
+  }
+
+  /* ── Watermark ── */
+  .watermark {
+    position: fixed;
+    bottom: 6px;
+    right: 12px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.1);
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+  <h1>Library</h1>
+  <span class="count">8 games</span>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<div class="watermark">CLEARXR</div>
+
+<script>
+const GAMES = [
+  {
+    appid: 546560,
+    title: "Half-Life: Alyx",
+    desc: "Lean around a filtered doorway and make an impossible shot. Rummage through shelves to find a healing syringe and some shotgun shells.",
+    source: "Steam VR",
+    playtime: "14.2 hrs"
+  },
+  {
+    appid: 620980,
+    title: "Beat Saber",
+    desc: "A VR rhythm game where you slash the beats of adrenaline-pumping music as they fly towards you.",
+    source: "Steam VR",
+    playtime: "86.5 hrs"
+  },
+  {
+    appid: 823500,
+    title: "VTOL VR",
+    desc: "A near-future combat flight game built specifically for virtual reality with intuitive hands-on controls.",
+    source: "Steam VR",
+    playtime: "32.1 hrs"
+  },
+  {
+    appid: 555160,
+    title: "Pavlov VR",
+    desc: "Competitive multiplayer VR shooter with realistic reloading, community maps, and intense team-based gameplay.",
+    source: "Steam VR",
+    playtime: "47.8 hrs"
+  },
+  {
+    appid: 617830,
+    title: "SUPERHOT VR",
+    desc: "Time moves only when you move. The acclaimed FPS reimagined for VR — dodge bullets, grab weapons, outmaneuver enemies.",
+    source: "Steam VR",
+    playtime: "6.3 hrs"
+  },
+  {
+    appid: 418650,
+    title: "Space Pirate Trainer",
+    desc: "The official trainer for wannabe space pirates. Dodge and shoot your way through relentless waves of droids.",
+    source: "Steam VR",
+    playtime: "3.7 hrs"
+  },
+  {
+    appid: 611670,
+    title: "The Elder Scrolls V: Skyrim VR",
+    desc: "Experience the epic fantasy of Skyrim like never before in VR. Battle dragons, explore dungeons, and forge your destiny.",
+    source: "Steam VR",
+    playtime: "11.0 hrs"
+  },
+  {
+    appid: 916840,
+    title: "The Walking Dead: Saints & Sinners",
+    desc: "Face all the horrors that New Orleans has to offer in this VR survival adventure set in The Walking Dead universe.",
+    source: "Steam VR",
+    playtime: "22.4 hrs"
+  }
+];
+
+const grid = document.getElementById('grid');
+let selectedIndex = 0; // first game starts selected
+
+function headerUrl(appid) {
+  return `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/header.jpg`;
+}
+
+function capsuleUrl(appid) {
+  return `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/capsule_616x353.jpg`;
+}
+
+function render() {
+  grid.innerHTML = '';
+  GAMES.forEach((game, i) => {
+    const isExpanded = i === selectedIndex;
+    const card = document.createElement('div');
+    card.className = 'card' + (isExpanded ? ' expanded' : '');
+    card.dataset.index = i;
+
+    const artSrc = isExpanded ? capsuleUrl(game.appid) : headerUrl(game.appid);
+
+    card.innerHTML = `
+      <div class="art" style="background-image: url('${artSrc}')"></div>
+      <div class="title-overlay">
+        <div class="title">${game.title}</div>
+        <div class="source">${game.source}</div>
+      </div>
+      <div class="detail">
+        <div class="detail-title">${game.title}</div>
+        <div class="detail-meta">
+          <span class="badge">${game.source}</span>
+          <span class="playtime">${game.playtime} played</span>
+        </div>
+        <div class="desc">${game.desc}</div>
+        <div class="actions">
+          <button class="btn-launch" data-action="launch">LAUNCH</button>
+          <button class="btn-collapse" data-action="collapse" title="Collapse">&times;</button>
+        </div>
+      </div>
+    `;
+
+    card.addEventListener('click', (e) => {
+      const action = e.target.dataset.action;
+      if (action === 'collapse') {
+        selectedIndex = -1;
+        render();
+        return;
+      }
+      if (action === 'launch') {
+        // Launch action placeholder
+        return;
+      }
+      if (isExpanded) {
+        // Clicking the art area of expanded card collapses it
+        const rect = card.getBoundingClientRect();
+        const clickY = e.clientY - rect.top;
+        if (clickY < rect.height * 0.48) {
+          selectedIndex = -1;
+          render();
+        }
+        return;
+      }
+      selectedIndex = i;
+      render();
+    });
+
+    grid.appendChild(card);
+  });
+}
+
+render();
+</script>
+</body>
+</html>

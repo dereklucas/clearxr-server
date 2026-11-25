@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>CLEARXR Dock + Stage</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    background: #08080f;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    color: #fff;
+    position: relative;
+    user-select: none;
+  }
+
+  /* ── STAGE ── */
+  .stage {
+    position: absolute;
+    top: 0; left: 0;
+    width: 1024px;
+    height: 480px;
+    overflow: hidden;
+  }
+
+  .stage-art {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center top;
+    transition: opacity 0.3s ease;
+  }
+
+  .stage-art.leaving {
+    opacity: 0;
+  }
+
+  /* Animated gradient shimmer over art */
+  .stage-art::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      135deg,
+      rgba(0, 0, 0, 0.15) 0%,
+      rgba(0, 0, 0, 0.0) 40%,
+      rgba(10, 10, 30, 0.2) 60%,
+      rgba(0, 0, 0, 0.1) 100%
+    );
+    background-size: 200% 200%;
+    animation: gradientShift 6s ease infinite;
+  }
+
+  @keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+
+  /* Bottom gradient blending into dock */
+  .stage-art::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 220px;
+    background: linear-gradient(
+      to bottom,
+      rgba(8, 8, 15, 0) 0%,
+      rgba(8, 8, 15, 0.5) 40%,
+      rgba(8, 8, 15, 0.85) 70%,
+      rgba(8, 8, 15, 1) 100%
+    );
+  }
+
+  /* Vignette edges */
+  .stage::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    box-shadow: inset 0 0 120px rgba(0, 0, 0, 0.4);
+  }
+
+  .stage-info {
+    position: absolute;
+    bottom: 40px;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    z-index: 2;
+    transition: opacity 0.2s ease;
+  }
+
+  .stage-info.fading {
+    opacity: 0;
+  }
+
+  .stage-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.45);
+    margin-bottom: 10px;
+  }
+
+  .stage-badge .dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .stage-title {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-shadow: 0 2px 20px rgba(0, 0, 0, 0.8), 0 1px 4px rgba(0, 0, 0, 0.6);
+    margin-bottom: 6px;
+    text-align: center;
+    padding: 0 60px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+
+  .stage-desc {
+    font-size: 15px;
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.7);
+    text-shadow: 0 1px 10px rgba(0, 0, 0, 0.8);
+    margin-bottom: 20px;
+    text-align: center;
+    padding: 0 80px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+
+  .launch-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px 52px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #0a0a18;
+    background: linear-gradient(135deg, #ffffff 0%, #b0e0ff 50%, #80d4ff 100%);
+    border: none;
+    border-radius: 100px;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    box-shadow:
+      0 4px 20px rgba(128, 212, 255, 0.3),
+      0 0 40px rgba(128, 212, 255, 0.1);
+  }
+
+  .launch-btn:hover {
+    transform: scale(1.06);
+    box-shadow:
+      0 6px 30px rgba(128, 212, 255, 0.45),
+      0 0 60px rgba(128, 212, 255, 0.2);
+  }
+
+  .launch-btn:active {
+    transform: scale(0.97);
+  }
+
+  /* ── DOCK ── */
+  .dock-region {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 160px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 10;
+  }
+
+  .dock-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 14px 24px 18px;
+    margin-bottom: 16px;
+    background: rgba(15, 15, 25, 0.7);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow:
+      0 8px 32px rgba(0, 0, 0, 0.5),
+      0 2px 8px rgba(0, 0, 0, 0.3),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    position: relative;
+  }
+
+  .dock-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: transform 0.2s ease, opacity 0.2s ease;
+    opacity: 0.6;
+  }
+
+  .dock-item:hover,
+  .dock-item.previewing {
+    opacity: 0.85;
+    transform: scale(1.08);
+  }
+
+  .dock-item.selected {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+
+  .dock-thumb {
+    width: 100px;
+    height: 47px;
+    border-radius: 6px;
+    background-size: cover;
+    background-position: center;
+    border: 2px solid transparent;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  }
+
+  .dock-item.selected .dock-thumb {
+    border-color: rgba(255, 255, 255, 0.4);
+    box-shadow: 0 2px 16px rgba(128, 212, 255, 0.25);
+  }
+
+  .dock-indicator {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #fff;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    box-shadow: 0 0 6px rgba(128, 212, 255, 0.6);
+  }
+
+  .dock-item.selected .dock-indicator {
+    opacity: 1;
+  }
+
+  /* ── BRAND ── */
+  .brand {
+    position: absolute;
+    top: 16px;
+    left: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    color: rgba(255, 255, 255, 0.2);
+    z-index: 5;
+  }
+</style>
+</head>
+<body>
+
+<div class="brand">CLEARXR</div>
+
+<div class="stage">
+  <div class="stage-art" id="stageArt"></div>
+  <div class="stage-info" id="stageInfo">
+    <div class="stage-badge">
+      <span>Steam</span>
+      <span class="dot"></span>
+      <span>VR</span>
+    </div>
+    <div class="stage-title" id="stageTitle"></div>
+    <div class="stage-desc" id="stageDesc"></div>
+    <button class="launch-btn" id="launchBtn">Launch</button>
+  </div>
+</div>
+
+<div class="dock-region">
+  <div class="dock-bar" id="dockBar"></div>
+</div>
+
+<script>
+const games = [
+  { appid: 546560, title: "Half-Life: Alyx",       desc: "Valve's flagship VR adventure set between Half-Life and Half-Life 2." },
+  { appid: 620980, title: "Beat Saber",            desc: "Slash blocks to the beat of adrenaline-pumping music." },
+  { appid: 823500, title: "BONEWORKS",             desc: "Experimental physics VR adventure from Stress Level Zero." },
+  { appid: 555160, title: "Blade & Sorcery",       desc: "Medieval fantasy sandbox with full physics-driven melee combat." },
+  { appid: 617830, title: "SUPERHOT VR",           desc: "Time moves only when you move. The most innovative shooter in years." },
+  { appid: 418650, title: "Space Pirate Trainer",  desc: "The original VR arcade shooter. Dodge, duck, and blast droids." },
+  { appid: 611670, title: "Pavlov VR",             desc: "Multiplayer VR shooter with competitive and community modes." },
+  { appid: 916840, title: "Pistol Whip",           desc: "Cinematic rhythm FPS — shoot to the beat, dodge bullets in style." },
+];
+
+const artUrl = (appid) => `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/capsule_616x353.jpg`;
+const headerUrl = (appid) => `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/header.jpg`;
+const heroUrl = (appid) => `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/library_hero.jpg`;
+
+const dockBar = document.getElementById('dockBar');
+const stageArt = document.getElementById('stageArt');
+const stageInfo = document.getElementById('stageInfo');
+const stageTitle = document.getElementById('stageTitle');
+const stageDesc = document.getElementById('stageDesc');
+const launchBtn = document.getElementById('launchBtn');
+
+let selectedIndex = 0;
+let previewIndex = null;
+let transitioning = false;
+
+// Preload hero images
+games.forEach(g => {
+  const img = new Image();
+  img.src = heroUrl(g.appid);
+  const img2 = new Image();
+  img2.src = headerUrl(g.appid);
+});
+
+function buildDock() {
+  games.forEach((g, i) => {
+    const item = document.createElement('div');
+    item.className = 'dock-item' + (i === 0 ? ' selected' : '');
+    item.dataset.index = i;
+
+    const thumb = document.createElement('div');
+    thumb.className = 'dock-thumb';
+    thumb.style.backgroundImage = `url(${headerUrl(g.appid)})`;
+
+    const dot = document.createElement('div');
+    dot.className = 'dock-indicator';
+
+    item.appendChild(thumb);
+    item.appendChild(dot);
+    dockBar.appendChild(item);
+
+    item.addEventListener('mouseenter', () => {
+      if (transitioning) return;
+      previewIndex = i;
+      updateDockClasses();
+      showGame(i);
+    });
+
+    item.addEventListener('mouseleave', () => {
+      previewIndex = null;
+      updateDockClasses();
+      // Revert to selected if not same
+      if (previewIndex === null) {
+        showGame(selectedIndex);
+      }
+    });
+
+    item.addEventListener('click', () => {
+      selectedIndex = i;
+      previewIndex = null;
+      updateDockClasses();
+      showGame(i);
+    });
+  });
+}
+
+function updateDockClasses() {
+  const items = dockBar.querySelectorAll('.dock-item');
+  items.forEach((item, i) => {
+    item.classList.remove('selected', 'previewing');
+    if (i === selectedIndex) item.classList.add('selected');
+    else if (i === previewIndex) item.classList.add('previewing');
+  });
+}
+
+let currentGameIndex = -1;
+
+function showGame(index) {
+  if (index === currentGameIndex) return;
+  currentGameIndex = index;
+  const g = games[index];
+
+  // Crossfade art
+  transitioning = true;
+  stageArt.classList.add('leaving');
+  stageInfo.classList.add('fading');
+
+  setTimeout(() => {
+    stageArt.style.backgroundImage = `url(${heroUrl(g.appid)}), url(${artUrl(g.appid)})`;
+    stageArt.classList.remove('leaving');
+
+    setTimeout(() => {
+      stageTitle.textContent = g.title;
+      stageDesc.textContent = g.desc;
+      stageInfo.classList.remove('fading');
+      transitioning = false;
+    }, 80);
+  }, 200);
+}
+
+launchBtn.addEventListener('click', () => {
+  const g = games[selectedIndex];
+  launchBtn.textContent = 'Launching...';
+  launchBtn.style.transform = 'scale(0.95)';
+  setTimeout(() => {
+    launchBtn.textContent = 'Launch';
+    launchBtn.style.transform = '';
+  }, 1500);
+  console.log(`Launching: ${g.title} (Steam AppID: ${g.appid})`);
+});
+
+// Init
+buildDock();
+showGame(0);
+// Immediately show first game without transition
+stageArt.style.backgroundImage = `url(${heroUrl(games[0].appid)}), url(${artUrl(games[0].appid)})`;
+stageArt.classList.remove('leaving');
+stageTitle.textContent = games[0].title;
+stageDesc.textContent = games[0].desc;
+stageInfo.classList.remove('fading');
+currentGameIndex = 0;
+</script>
+</body>
+</html>

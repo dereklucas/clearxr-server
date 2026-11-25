@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1024">
+<title>ClearXR — Attract Mode</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+
+  body {
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #000;
+    cursor: default;
+    user-select: none;
+  }
+
+  /* ── Panel container ── */
+  #panel {
+    position: relative;
+    width: 1024px;
+    height: 640px;
+    overflow: hidden;
+    border-radius: 20px;
+    background: rgba(10, 10, 14, 0.85);
+  }
+
+  /* ── Slide layers ── */
+  .slide {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    opacity: 0;
+    transition: opacity 1.5s ease-in-out;
+    will-change: opacity, transform;
+    transform-origin: center center;
+  }
+  .slide.active {
+    opacity: 1;
+  }
+
+  /* Ken Burns keyframes — zoom in */
+  @keyframes kenburns-in {
+    from { transform: scale(1.0); }
+    to   { transform: scale(1.08); }
+  }
+  /* Ken Burns — slight pan right + zoom */
+  @keyframes kenburns-pan-right {
+    from { transform: scale(1.0) translateX(0); }
+    to   { transform: scale(1.05) translateX(12px); }
+  }
+  /* Ken Burns — slight pan left + zoom */
+  @keyframes kenburns-pan-left {
+    from { transform: scale(1.0) translateX(0); }
+    to   { transform: scale(1.05) translateX(-12px); }
+  }
+  /* Ken Burns — zoom out from larger */
+  @keyframes kenburns-out {
+    from { transform: scale(1.08); }
+    to   { transform: scale(1.0); }
+  }
+
+  .slide.active.kb-0 { animation: kenburns-in 6s ease-out forwards; }
+  .slide.active.kb-1 { animation: kenburns-pan-right 6s ease-out forwards; }
+  .slide.active.kb-2 { animation: kenburns-out 6s ease-out forwards; }
+  .slide.active.kb-3 { animation: kenburns-pan-left 6s ease-out forwards; }
+
+  /* ── Bottom gradient for legibility ── */
+  #gradient-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 40%;
+    background: linear-gradient(to top, rgba(0,0,0,0.82) 0%, rgba(0,0,0,0.4) 50%, transparent 100%);
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  /* ── Subtle edge vignette ── */
+  #vignette {
+    position: absolute;
+    inset: 0;
+    box-shadow: inset 0 0 80px rgba(0,0,0,0.45);
+    pointer-events: none;
+    z-index: 2;
+    border-radius: 20px;
+  }
+
+  /* ── Game title ── */
+  #game-title {
+    position: absolute;
+    bottom: 80px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    z-index: 5;
+    color: #fff;
+    font-size: 32px;
+    font-weight: 300;
+    letter-spacing: 0.5px;
+    text-shadow: 0 2px 20px rgba(0,0,0,0.7), 0 1px 4px rgba(0,0,0,0.5);
+    transition: bottom 0.4s ease, opacity 0.4s ease;
+    opacity: 1;
+  }
+  #game-title.active-mode {
+    bottom: 140px;
+  }
+
+  /* ── "Point to interact" hint ── */
+  #hint {
+    position: absolute;
+    bottom: 52px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    z-index: 5;
+    color: rgba(255,255,255,0.55);
+    font-size: 13px;
+    font-weight: 400;
+    letter-spacing: 0.8px;
+    animation: hint-pulse 3s ease-in-out infinite;
+    transition: opacity 0.4s ease;
+  }
+  #hint.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  @keyframes hint-pulse {
+    0%, 100% { opacity: 0.3; }
+    50%      { opacity: 0.7; }
+  }
+
+  /* ── Controls layer (active mode) ── */
+  #controls {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.4s ease;
+  }
+  #controls.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* ── LAUNCH button ── */
+  #launch-btn {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    height: 52px;
+    padding: 0 48px;
+    border: none;
+    border-radius: 26px;
+    background: rgba(255,255,255,0.18);
+    backdrop-filter: blur(20px) saturate(1.4);
+    -webkit-backdrop-filter: blur(20px) saturate(1.4);
+    color: #fff;
+    font-family: inherit;
+    font-size: 17px;
+    font-weight: 500;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.15s, box-shadow 0.2s;
+    box-shadow: 0 2px 20px rgba(0,0,0,0.3), inset 0 0.5px 0 rgba(255,255,255,0.2);
+  }
+  #launch-btn:hover {
+    background: rgba(255,255,255,0.28);
+    transform: translate(-50%, -50%) scale(1.04);
+    box-shadow: 0 4px 30px rgba(0,0,0,0.35), inset 0 0.5px 0 rgba(255,255,255,0.3);
+  }
+  #launch-btn:active {
+    transform: translate(-50%, -50%) scale(0.97);
+    background: rgba(255,255,255,0.35);
+  }
+
+  /* ── Arrow buttons ── */
+  .arrow-btn {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 48px;
+    height: 48px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.12);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    color: rgba(255,255,255,0.8);
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, transform 0.15s;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+  }
+  .arrow-btn:hover {
+    background: rgba(255,255,255,0.22);
+    transform: translateY(-50%) scale(1.08);
+  }
+  .arrow-btn:active {
+    transform: translateY(-50%) scale(0.95);
+  }
+  #arrow-left  { left: 20px; }
+  #arrow-right { right: 20px; }
+
+  /* ── Game counter ── */
+  #game-counter {
+    position: absolute;
+    top: 20px;
+    right: 24px;
+    color: rgba(255,255,255,0.5);
+    font-size: 14px;
+    font-weight: 400;
+    letter-spacing: 0.5px;
+  }
+
+  /* ── Thumbnail strip ── */
+  #thumb-strip {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    z-index: 10;
+  }
+  .thumb {
+    width: 60px;
+    height: 34px;
+    border-radius: 6px;
+    background-size: cover;
+    background-position: center;
+    cursor: pointer;
+    border: 2px solid transparent;
+    opacity: 0.5;
+    transition: opacity 0.25s, border-color 0.25s, transform 0.15s;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.4);
+  }
+  .thumb:hover {
+    opacity: 0.85;
+    transform: scale(1.08);
+  }
+  .thumb.selected {
+    border-color: #38e8e8;
+    opacity: 1;
+  }
+
+  /* ── Click overlay for "tap to advance" ── */
+  #tap-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 8;
+    cursor: pointer;
+  }
+
+  /* ── Panel border glow ── */
+  #panel::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 20px;
+    border: 1px solid rgba(255,255,255,0.08);
+    pointer-events: none;
+    z-index: 20;
+  }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <!-- Slide layers — two for crossfade -->
+  <div class="slide" id="slide-a"></div>
+  <div class="slide" id="slide-b"></div>
+
+  <div id="gradient-overlay"></div>
+  <div id="vignette"></div>
+
+  <div id="game-title"></div>
+  <div id="hint">Point to interact</div>
+
+  <!-- Controls (hidden until active) -->
+  <div id="controls">
+    <div id="tap-overlay"></div>
+    <button id="launch-btn">Launch</button>
+    <button class="arrow-btn" id="arrow-left">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <button class="arrow-btn" id="arrow-right">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>
+    <div id="game-counter"></div>
+    <div id="thumb-strip"></div>
+  </div>
+</div>
+
+<script>
+const GAMES = [
+  { appid: 546560,  name: 'Half-Life: Alyx' },
+  { appid: 620980,  name: 'Beat Saber' },
+  { appid: 823500,  name: 'BONEWORKS' },
+  { appid: 555160,  name: 'Phasmophobia' },
+  { appid: 617830,  name: 'SUPERHOT VR' },
+  { appid: 418650,  name: 'Space Pirate Trainer' },
+  { appid: 611670,  name: 'Overcooked! 2' },
+  { appid: 916840,  name: 'Blade & Sorcery' },
+];
+
+function artUrl(appid) {
+  return `https://cdn.akamai.steamstatic.com/steam/apps/${appid}/capsule_616x353.jpg`;
+}
+
+// Preload images
+GAMES.forEach(g => {
+  const img = new Image();
+  img.src = artUrl(g.appid);
+});
+
+// ── State ──
+let currentIndex = 0;
+let isActive = false;          // active mode (controls visible)
+let attractTimer = null;       // auto-cycle timer
+let idleTimer = null;          // idle → return to attract
+let useSlideA = true;          // alternating slide layers
+let kbIndex = 0;               // Ken Burns variant rotation
+
+const slideA      = document.getElementById('slide-a');
+const slideB      = document.getElementById('slide-b');
+const titleEl     = document.getElementById('game-title');
+const hintEl      = document.getElementById('hint');
+const controlsEl  = document.getElementById('controls');
+const counterEl   = document.getElementById('game-counter');
+const launchBtn   = document.getElementById('launch-btn');
+const arrowLeft   = document.getElementById('arrow-left');
+const arrowRight  = document.getElementById('arrow-right');
+const tapOverlay  = document.getElementById('tap-overlay');
+const thumbStrip  = document.getElementById('thumb-strip');
+const panel       = document.getElementById('panel');
+
+// ── Build thumbnail strip ──
+GAMES.forEach((g, i) => {
+  const el = document.createElement('div');
+  el.className = 'thumb';
+  el.style.backgroundImage = `url(${artUrl(g.appid)})`;
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    goToGame(i);
+    resetIdleTimer();
+  });
+  thumbStrip.appendChild(el);
+});
+
+function updateThumbs() {
+  const thumbs = thumbStrip.querySelectorAll('.thumb');
+  thumbs.forEach((t, i) => t.classList.toggle('selected', i === currentIndex));
+}
+
+// ── Show a game on the crossfade layers ──
+function showGame(index, instant) {
+  const game = GAMES[index];
+  const url = artUrl(game.appid);
+  const incoming = useSlideA ? slideA : slideB;
+  const outgoing = useSlideA ? slideB : slideA;
+
+  // Reset KB classes on incoming
+  incoming.className = 'slide';
+  incoming.style.backgroundImage = `url(${url})`;
+
+  if (instant) {
+    incoming.style.transition = 'none';
+    outgoing.style.transition = 'none';
+  } else {
+    incoming.style.transition = 'opacity 1.5s ease-in-out';
+    outgoing.style.transition = 'opacity 1.5s ease-in-out';
+  }
+
+  // Force reflow for instant
+  if (instant) incoming.offsetHeight;
+
+  incoming.classList.add('active', `kb-${kbIndex % 4}`);
+  outgoing.classList.remove('active');
+
+  if (instant) {
+    requestAnimationFrame(() => {
+      incoming.style.transition = '';
+      outgoing.style.transition = '';
+    });
+  }
+
+  kbIndex++;
+  useSlideA = !useSlideA;
+
+  // Update title
+  titleEl.textContent = game.name;
+  counterEl.textContent = `${index + 1} / ${GAMES.length}`;
+  updateThumbs();
+}
+
+function goToGame(index) {
+  currentIndex = index;
+  showGame(currentIndex);
+}
+
+function nextGame() {
+  currentIndex = (currentIndex + 1) % GAMES.length;
+  showGame(currentIndex);
+}
+
+function prevGame() {
+  currentIndex = (currentIndex - 1 + GAMES.length) % GAMES.length;
+  showGame(currentIndex);
+}
+
+// ── Attract mode auto-cycling ──
+function startAttractCycle() {
+  stopAttractCycle();
+  attractTimer = setInterval(nextGame, 5000);
+}
+
+function stopAttractCycle() {
+  if (attractTimer) {
+    clearInterval(attractTimer);
+    attractTimer = null;
+  }
+}
+
+// ── Active / Idle transitions ──
+function enterActiveMode() {
+  if (isActive) return;
+  isActive = true;
+  stopAttractCycle();
+  controlsEl.classList.add('visible');
+  hintEl.classList.add('hidden');
+  titleEl.classList.add('active-mode');
+  resetIdleTimer();
+}
+
+function exitActiveMode() {
+  if (!isActive) return;
+  isActive = false;
+  controlsEl.classList.remove('visible');
+  hintEl.classList.remove('hidden');
+  titleEl.classList.remove('active-mode');
+  clearIdleTimer();
+  startAttractCycle();
+}
+
+function resetIdleTimer() {
+  clearIdleTimer();
+  idleTimer = setTimeout(exitActiveMode, 8000);
+}
+
+function clearIdleTimer() {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+}
+
+// ── Event wiring ──
+
+// Hover on panel → enter active mode
+panel.addEventListener('mouseenter', enterActiveMode);
+panel.addEventListener('mousemove', () => {
+  if (isActive) resetIdleTimer();
+  else enterActiveMode();
+});
+
+// Tap on art → next game
+tapOverlay.addEventListener('click', () => {
+  nextGame();
+  resetIdleTimer();
+});
+
+// Arrow buttons
+arrowLeft.addEventListener('click', (e) => {
+  e.stopPropagation();
+  prevGame();
+  resetIdleTimer();
+});
+arrowRight.addEventListener('click', (e) => {
+  e.stopPropagation();
+  nextGame();
+  resetIdleTimer();
+});
+
+// Launch button
+launchBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  launchBtn.textContent = 'Launching...';
+  launchBtn.style.background = 'rgba(56, 232, 232, 0.25)';
+  setTimeout(() => {
+    launchBtn.textContent = 'Launch';
+    launchBtn.style.background = '';
+  }, 2000);
+  resetIdleTimer();
+});
+
+// ── Init ──
+showGame(0, true);
+startAttractCycle();
+
+</script>
+</body>
+</html>
